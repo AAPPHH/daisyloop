@@ -44,7 +44,7 @@ class Loader:
             where.append("source = ?")
             args.append(device)
         sql = (
-            f"select cast(floor(epoch(ts) / {step}) as bigint) as k, role, source || '/' || channel as name, "
+            f"select cast(floor(epoch(ts) / {step}) as bigint) as k, role, channel as name,"
             f"arg_max(value, ts) as v from iceberg_scan(?) where {' and '.join(where)} group by all order by k"
         )
         return self.con.execute(sql, [self.location(self.cfg["table"])] + args).fetchnumpy()
