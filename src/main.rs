@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod lake;
+mod sources;
+use lake::Lake;
 use serde::Deserialize;
+use sources::{D5Next, Lhm, Nvidia, Source};
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -82,13 +86,116 @@ pub fn now_micros() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros() as i64).unwrap_or(0)
 }
 
+struct Slot {
+    src: Box<dyn Source>,
+    failing: bool,
+}
+
+struct Collector {
+    slots: Vec<Slot>,
+    lake: Lake,
+    interval: Duration,
+    commit_every: Duration,
+    stop_file: PathBuf,
+}
+
+impl Collector {
+    fn new(cfg: &Config) -> Result<Collector, Box<dyn std::error::Error>> {
+        let srcs: Vec<Box<dyn Source>> = vec![Box::new(D5Next::new(cfg)), Box::new(Nvidia::new()), Box::new(Lhm::new(cfg))];
+        Ok(Collector {
+            slots: srcs.into_iter().map(|src| Slot { src, failing: false }).collect(),
+            lake: Lake::open(cfg)?,
+            interval: Duration::from_secs_f64(cfg.interval_secs),
+            commit_every: Duration::from_secs(cfg.commit_secs),
+            stop_file: cfg.data_dir.join("stop"),
+        })
+    }
+
+    fn tick(&mut self) {
+        let ts = now_micros();
+        for s in &mut self.slots {
+            match s.src.poll() {
+                Ok(sample) => {
+                    if s.failing {
+                        log::info!("{} recovered", s.src.name());
+                        s.failing = false;
+                    }
+                    self.lake.push(ts, sample.rows, sample.raw);
+                }
+                Err(e) => {
+                    if !s.failing {
+                        log::warn!("{} unavailable: {e}", s.src.name());
+                        s.failing = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn commit(&mut self) {
+        match self.lake.commit() {
+            Ok((a, b)) if a + b > 0 => log::info!("committed {a} telemetry rows, {b} raw reports"),
+            Ok(_) => {}
+            Err(e) => log::error!("commit failed ({} rows buffered): {e}", self.lake.pending()),
+        }
+    }
+
+    fn run(&mut self) {
+        let mut next = Instant::now();
+        let mut last_commit = Instant::now();
+        loop {
+            self.tick();
+            if self.stop_file.exists() {
+                let _ = std::fs::remove_file(&self.stop_file);
+                self.commit();
+                log::info!("stopped");
+                return;
+            }
+            if last_commit.elapsed() >= self.commit_every {
+                self.commit();
+                last_commit = Instant::now();
+            }
+            next += self.interval;
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else if now - next > self.interval * 5 {
+                next = now;
+            }
+        }
+    }
+}
+
+fn single_instance() -> bool {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name: Vec<u16> = r"Local\daisyloop-collector".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        !h.is_null() && GetLastError() != ERROR_ALREADY_EXISTS
+    }
+}
+
 fn main() {
     let cfg = Config::load();
     let _ = std::fs::create_dir_all(&cfg.data_dir);
+    if !single_instance() {
+        return;
+    }
     if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(cfg.data_dir.join("collector.log")) {
-        let lc = ConfigBuilder::new().set_time_format_rfc3339().set_time_offset_to_local().unwrap_or(&mut ConfigBuilder::new()).build();
-        let _ = WriteLogger::init(LevelFilter::Info, lc, f);
+        let mut b = ConfigBuilder::new();
+        b.set_time_format_rfc3339();
+        let _ = b.set_time_offset_to_local();
+        let _ = WriteLogger::init(LevelFilter::Info, b.build(), f);
     }
     std::panic::set_hook(Box::new(|i| log::error!("panic: {i}")));
-    let _ = (Instant::now(), Duration::ZERO);
+    let mut c = match Collector::new(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("startup failed: {e}");
+            return;
+        }
+    };
+    log::info!("collector started, interval {}s, commit {}s", cfg.interval_secs, cfg.commit_secs);
+    c.run();
 }
