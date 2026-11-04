@@ -1,3 +1,4 @@
+use d5_probe::Crc16Usb;
 use hidapi::{HidApi, HidDevice};
 use std::time::{Duration, Instant};
 
@@ -10,21 +11,6 @@ struct Config {
     samples: usize,
     gap: Duration,
     out_dir: &'static str,
-}
-
-struct Crc16Usb;
-
-impl Crc16Usb {
-    fn compute(data: &[u8]) -> u16 {
-        let mut crc = 0xFFFFu16;
-        for &b in data {
-            crc ^= b as u16;
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xA001 } else { crc >> 1 };
-            }
-        }
-        crc ^ 0xFFFF
-    }
 }
 
 struct Probe {
