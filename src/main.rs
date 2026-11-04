@@ -21,8 +21,8 @@ pub struct Config {
     pub poll_timeout_ms: u64,
     pub keep_versions: usize,
     pub data_dir: PathBuf,
-    pub lhm_url: String,
-    pub lhm_timeout_ms: u64,
+    pub sidecar: Option<PathBuf>,
+    pub sidecar_stale_secs: u64,
     pub d5_vid: u16,
     pub d5_pid: u16,
     pub d5_usage_page: u16,
@@ -38,8 +38,8 @@ impl Default for Config {
             poll_timeout_ms: 1300,
             keep_versions: 10,
             data_dir: Config::default_data_dir(),
-            lhm_url: "http://127.0.0.1:8085/data.json".into(),
-            lhm_timeout_ms: 300,
+            sidecar: None,
+            sidecar_stale_secs: 15,
             d5_vid: 0x0C70,
             d5_pid: 0xF00E,
             d5_usage_page: 0xFF00,
@@ -66,6 +66,17 @@ impl Config {
         let mut cfg: Config = toml::from_str(&text).unwrap_or_default();
         cfg.data_dir = dir;
         cfg
+    }
+    pub fn sidecar_exe(&self) -> PathBuf {
+        if let Some(p) = &self.sidecar {
+            return p.clone();
+        }
+        let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
+        let deployed = dir.join("sidecar").join("daisyloop-lhm.exe");
+        if deployed.exists() {
+            return deployed;
+        }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar").join("publish").join("daisyloop-lhm.exe")
     }
     pub fn mutex_name(&self) -> String {
         if std::env::var_os("DAISYLOOP_DATA_DIR").is_none() {

@@ -1,3 +1,6 @@
 /target
 /refs
 __pycache__/
+/sidecar/bin
+/sidecar/obj
+/sidecar/publish
