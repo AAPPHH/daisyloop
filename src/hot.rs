@@ -295,17 +295,12 @@ impl HotStore {
         if self.blocked.get(&table).is_some_and(|(at, wait)| at.elapsed() < *wait) {
             return Ok(None);
         }
-        match Stream::create(&self.dir, table, crate::now_micros()) {
-            Ok(s) => {
-                self.blocked.remove(&table);
-                Ok(Some(s))
-            }
-            Err(e) => {
-                let wait = self.blocked.get(&table).map_or(CREATE_RETRY_MIN, |(_, w)| (*w * 2).min(CREATE_RETRY_MAX));
-                self.blocked.insert(table, (Instant::now(), wait));
-                Err(e)
-            }
-        }
+        Stream::create(&self.dir, table, crate::now_micros()).map(Some).inspect_err(|_| self.back_off(table))
+    }
+
+    fn back_off(&mut self, table: Table) {
+        let wait = self.blocked.get(&table).map_or(CREATE_RETRY_MIN, |(_, w)| (*w * 2).min(CREATE_RETRY_MAX));
+        self.blocked.insert(table, (Instant::now(), wait));
     }
 
     pub fn append(&mut self, tick: &Tick) -> Res<()> {
@@ -341,6 +336,7 @@ impl HotStore {
                         self.streams.insert(i, fresh);
                         if let Err(e) = self.streams[i].append(tick) {
                             log::error!("the fresh stream cannot take this tick either, it is lost: {e}");
+                            self.back_off(table);
                         }
                     }
                     Ok(None) => continue,
@@ -349,6 +345,9 @@ impl HotStore {
                         continue;
                     }
                 }
+            } else {
+                let table = s.table;
+                self.blocked.remove(&table);
             }
             i += 1;
         }
@@ -836,6 +835,21 @@ mod tests {
         std::thread::sleep(CREATE_RETRY_MIN + Duration::from_millis(100));
         assert!(hot.append(&tick(2, 3)).is_ok());
         assert_eq!(HotStore::open_files(&d).len(), 2);
+    }
+
+    #[test]
+    fn failing_writes_back_off_instead_of_a_new_file_per_tick() {
+        let d = dir("hot-write-backoff");
+        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        hot.append(&tick(0, 3)).unwrap();
+        for ts in 1..9 {
+            let _ = hot.append(&tick(ts, 33000));
+        }
+        let sealed = std::fs::read_dir(HotStore::dir(&d)).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(&format!(".{SEALED}"))).count();
+        assert!(sealed <= 3, "{sealed} sealed files");
+        std::thread::sleep(CREATE_RETRY_MAX.min(Duration::from_secs(5)));
+        hot.append(&tick(9, 3)).unwrap();
+        assert!(hot.blocked.is_empty());
     }
 
     #[test]
