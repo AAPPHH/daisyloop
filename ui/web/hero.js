@@ -153,11 +153,11 @@ export class Hero {
     el.classList.toggle('off', !p || !live);
     const m = S.snap?.model;
     $('#pred-title').textContent = p ? `Prognose in ${Math.round(p.horizon_s / 60)} min` : 'Prognose';
-    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : !m.warm ? `Modell wärmt auf (${Math.ceil(m.warmup_left_s / 60)} min)` : p ? (p.feasible ? 'nur berechnet, innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewählt') : '';
+    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : !m.warm ? `Modell wärmt auf (${Math.ceil(m.warmup_left_s / 60)} min)` : (p ? (p.feasible ? 'nur berechnet, innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewählt') : '') + (m.fan_identified && m.pump_identified ? '' : ' · nicht identifiziert, nicht belastbar');
     for (const [k, lim] of [['water', 'water_limit'], ['cpu', 'cpu_limit'], ['gpu', 'gpu_limit']]) {
       $('#pred-' + k).textContent = p?.[k] != null ? num(p[k], 1) + ' °C' : '–';
       $('#pred-' + k).classList.toggle('over', p?.[k] != null && p[k] > p[lim]);
-      $('#pred-' + k + '-lim').textContent = p ? `Grenze ${num(p[lim], 0)}` : '';
+      $('#pred-' + k + '-lim').textContent = p ? `Grenze ${num(p[lim], 1)}` : '';
     }
     const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
     $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));

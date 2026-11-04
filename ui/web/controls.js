@@ -136,7 +136,10 @@ class Row {
     } else {
       this.test.append(h('button', { class: 'ghost', onclick: () => this.arm('test', true) }, 'Stufentest starten …'));
     }
-    const lock = !c.allowed ? 'Aktiv gesperrt: Schreiben ist deaktiviert (writes_enabled).' : !c.identified ? 'Aktiv gesperrt: das Modell kennt die Antwort dieses Kanals noch nicht (nicht identifiziert).' : null;
+    const locks = [];
+    if (!c.allowed) locks.push('Schreiben ist deaktiviert (writes_enabled)');
+    if (!c.identified) locks.push('das Modell kennt die Antwort dieses Kanals noch nicht (nicht identifiziert)');
+    const lock = locks.length ? 'Aktiv gesperrt: ' + locks.join('; ') + '.' : null;
     const lines = [];
     if (c.mode !== 'active' && lock) lines.push(h('p', { class: 'lock' }, lock));
     if (c.note && !(c.mode === 'shadow' && c.note.startsWith('nur berechnet'))) lines.push(h('p', { class: 'note' }, c.note));
@@ -155,7 +158,7 @@ class Row {
     const shadow = c.mode === 'shadow';
     this.target.replaceChildren();
     if (c.target_rpm != null) {
-      this.target.append(h('span', { class: 'k' }, shadow ? 'Soll (nur berechnet)' : 'Soll'), h('b', {}, num(c.target_rpm, 0)), h('small', {}, ' U/min'));
+      this.target.append(h('span', { class: 'k' }, shadow || !c.identified ? `Soll (nur berechnet${c.identified ? '' : ', nicht identifiziert'})` : 'Soll'), h('b', {}, num(c.target_rpm, 0)), h('small', {}, ' U/min'));
       this.target.classList.toggle('shadow', shadow);
     } else this.target.append(h('span', { class: 'k' }, c.mode === 'off' ? 'Kanal aus: kein Soll' : 'Noch kein Soll'));
     this.state.className = 'state' + (c.drive === 'firmware' ? '' : ' drive') + (c.mode === 'off' ? ' off' : '');
