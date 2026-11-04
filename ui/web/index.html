@@ -19,16 +19,22 @@
   </nav>
   <div id="status" class="status"><i></i><span>Verbinde …</span></div>
 </header>
+<div id="alarm-bar" class="alarm-bar" hidden></div>
+<div id="toast" class="toast" role="status" hidden></div>
 <main>
   <section id="hero">
     <div class="hero-copy">
       <p class="eyebrow">Wassertemperatur</p>
       <div class="water"><span id="water-v">–</span><span class="deg">°C</span></div>
       <p id="water-trend" class="trend">&nbsp;</p>
-      <div class="setpoint" id="hero-set">
-        <div class="set-head"><span>Sollwert Radiatorlüfter</span><output id="hero-set-v">–</output></div>
-        <div class="track heat-track" id="hero-track"><b class="now" id="hero-now"></b><b class="knob" id="hero-knob" tabindex="0"></b></div>
-        <div class="scale-labels"><span>24</span><span>30</span><span>35</span><span>40</span><span>46 °C</span></div>
+      <div class="forecast" id="hero-pred">
+        <div class="fc-head"><span id="pred-title">Prognose</span><em id="pred-tag"></em></div>
+        <div class="fc-grid">
+          <div><span class="k">Wasser</span><b id="pred-water">–</b><small id="pred-water-lim"></small></div>
+          <div><span class="k">CPU</span><b id="pred-cpu">–</b><small id="pred-cpu-lim"></small></div>
+          <div><span class="k">GPU</span><b id="pred-gpu">–</b><small id="pred-gpu-lim"></small></div>
+        </div>
+        <div class="fc-modes" id="hero-modes"></div>
       </div>
       <div id="alarm-pill" class="pill ok">Alle Werte im Rahmen</div>
     </div>
@@ -38,27 +44,38 @@
         <span class="lbl">CPU</span>
         <span class="big"><span id="cpu-t">–</span><small>°C</small></span>
         <span class="sub"><span id="cpu-p">–</span> W</span>
+        <span class="age" id="cpu-age"></span>
       </div>
       <div class="node chip-node" id="n-gpu" style="left:66%;top:17%">
         <span class="lbl">GPU</span>
         <span class="big"><span id="gpu-t">–</span><small>°C</small></span>
         <span class="sub"><span id="gpu-p">–</span> W</span>
+        <span class="age" id="gpu-age"></span>
       </div>
-      <div class="node plain" id="n-pump" style="left:21%;top:45%">
+      <div class="node plain" id="n-pump" style="left:27%;top:47%">
         <span class="lbl">Pumpe</span>
         <span class="big"><span id="pump-rpm">–</span><small>U/min</small></span>
         <span class="sub"><span id="pump-duty">–</span> % Duty</span>
+        <span class="sub tgt">Soll <span id="pump-target">–</span> U/min</span>
+        <span class="age" id="pump-age"></span>
       </div>
       <div class="node plain" id="n-fan" style="left:50%;top:56%">
         <span class="lbl">Radiatorlüfter</span>
         <span class="big"><span id="fan-rpm">–</span><small>U/min</small></span>
         <span class="sub"><span id="fan-duty">–</span> % Duty</span>
+        <span class="sub tgt">Soll <span id="fan-target">–</span> U/min</span>
+        <span class="age" id="fan-age"></span>
       </div>
     </div>
     <a class="cue" href="#controls" aria-label="Weiter"><span></span></a>
   </section>
   <section id="controls" class="block">
-    <div class="block-head"><h2>Regelung</h2><p>PID-Regler je Kanal. Sollwert direkt auf der Temperaturskala ziehen.</p></div>
+    <div class="block-head">
+      <h2>Regelung</h2>
+      <p>Das Modell berechnet je Kanal eine Drehzahl. Nur berechnet schreibt nichts, Aktiv setzt die Duty direkt.</p>
+      <label class="weight"><span>leise</span><input id="weight" type="range" min="0" max="1" step="0.05" aria-label="leise bis kühl"><span>kühl</span></label>
+    </div>
+    <div id="model-line" class="model-line"></div>
     <div id="ctl-list"></div>
   </section>
   <section id="history" class="block">
@@ -77,7 +94,7 @@
     </div>
     <div id="groups"></div>
   </section>
-  <footer>daisyloop · Protokoll v1 · Pipe \\.\pipe\daisyloop</footer>
+  <footer>daisyloop · Protokoll v2 · Pipe \\.\pipe\daisyloop</footer>
 </main>
 <script type="module" src="app.js"></script>
 </body>

@@ -1,42 +1,7 @@
-import { $, $$, h, num, decimals, unitLabel, scrub, sparkPath } from './ui.js';
-import { S, send, alarmed } from './state.js';
+import { $, $$, h, num, decimals, unitLabel, sparkPath, ageText } from './ui.js';
+import { S, alarmed } from './state.js';
 
-const limitEdits = new Map();
-let limitTimer = null;
 const SPARK = 90;
-
-const speed = (u) => ({ RPM: 10, MHz: 10, '°C': 0.5, V: 0.01 })[u] ?? 1;
-const limitable = (c) => !['data', 'other'].includes(c.kind);
-
-function effectiveLimit(id) {
-  const e = limitEdits.get(id);
-  if (e) return e;
-  const l = S.snap.limits.find((x) => x.channel === id);
-  return { low: l?.low ?? null, high: l?.high ?? null };
-}
-
-function editLimit(id, patch) {
-  const cur = effectiveLimit(id);
-  limitEdits.set(id, { low: cur.low, high: cur.high, ...patch, dirty: performance.now(), sent: false });
-  clearTimeout(limitTimer);
-  limitTimer = setTimeout(() => {
-    for (const [ch, e] of limitEdits) {
-      if (!e.sent) {
-        e.sent = true;
-        e.sentAt = performance.now();
-        send({ cmd: 'set_limit', channel: ch, low: e.low, high: e.high }).catch(() => limitEdits.delete(ch));
-      }
-    }
-  }, 260);
-}
-
-function settleLimits() {
-  const now = performance.now();
-  for (const [id, e] of limitEdits) {
-    const l = S.snap.limits.find((x) => x.channel === id);
-    if (e.sent && (now - e.sentAt > 3000 || ((l?.low ?? null) === e.low && (l?.high ?? null) === e.high))) limitEdits.delete(id);
-  }
-}
 
 class SensorRow {
   constructor(c, history) {
@@ -48,46 +13,21 @@ class SensorRow {
     this.mx = h('span', { class: 'mm' });
     this.svg = h('span', { class: 'sp', html: '<svg class="spark" viewBox="0 0 112 22" preserveAspectRatio="none"><path></path></svg>' });
     this.pathEl = this.svg.firstChild.firstChild;
-    this.cells = { low: h('div', { class: 'lim' }), high: h('div', { class: 'lim' }) };
-    this.cellState = { low: 'x', high: 'x' };
-    this.scrubs = {};
     this.sel = h('button', { class: 'sel', title: 'Im Verlauf anzeigen', onclick: () => history.toggle(this.id) }, '∿');
     this.nm = h('span', { class: 'nm' }, c.label);
     this.el = h('div', { class: 'row', 'data-s': (c.label + ' ' + c.hardware).toLowerCase() },
-      this.nm, h('span', { class: 'v' }, this.v, h('small', {}, unitLabel(c.unit))), this.mn, this.mx, this.svg, this.cells.low, this.cells.high, this.sel);
-  }
-
-  limitCell(side) {
-    const cur = effectiveLimit(this.id)[side];
-    const cell = this.cells[side];
-    const state = cur == null ? 'none' : 'set';
-    if (!limitable(this.c)) return;
-    if (state !== this.cellState[side]) {
-      this.cellState[side] = state;
-      cell.replaceChildren();
-      if (state === 'none') {
-        cell.append(h('button', { class: 'ghost', onclick: () => {
-          const v = this.c.value ?? 0;
-          editLimit(this.id, { [side]: side === 'low' ? Math.floor(v * 0.9) : Math.max(Math.ceil(v * 1.1), v + 1) });
-        } }, side === 'low' ? '+ unten' : '+ oben'));
-      } else {
-        const d = decimals(this.c.unit);
-        const s = scrub({ value: cur, step: speed(this.c.unit), min: -1e6, max: 1e6, dec: d, onInput: (v) => editLimit(this.id, { [side]: v }) });
-        this.scrubs[side] = s;
-        cell.append(s.el, h('button', { class: 'x', title: 'Grenzwert entfernen', onclick: () => editLimit(this.id, { [side]: null }) }, '×'));
-      }
-    } else if (state === 'set') this.scrubs[side].set(cur);
+      this.nm, h('span', { class: 'v' }, this.v, h('small', {}, unitLabel(c.unit))), this.mn, this.mx, this.svg, this.sel);
   }
 
   render(c) {
     this.c = c;
     this.v.textContent = num(c.value, decimals(c.unit));
+    this.el.classList.toggle('stale', !!c.stale);
+    this.el.title = c.stale ? `Wert seit ${ageText(c.age_ms / 1000)} veraltet` : '';
     this.mn.textContent = num(c.min, decimals(c.unit));
     this.mx.textContent = num(c.max, decimals(c.unit));
     this.el.classList.toggle('alarm', alarmed(c.id));
     this.pathEl.setAttribute('d', sparkPath((S.trail.get(c.id) ?? []).slice(-SPARK), 112, 22));
-    this.limitCell('low');
-    this.limitCell('high');
     this.sel.classList.toggle('on', S.selected.includes(c.id));
   }
 }
@@ -105,7 +45,7 @@ class Group {
     this.alarm = h('span', { class: 'gal' });
     this.head = h('span', { class: 'ghead' });
     const header = h('header', { onclick: () => (this.toggle(), rerender()) }, h('span', { class: 'gname' }, name), this.count, this.alarm, this.head);
-    const cols = h('div', { class: 'row head' }, h('span', {}, 'Name'), h('span', { style: 'text-align:right' }, 'Wert'), h('span', { class: 'mm' }, 'Min'), h('span', { class: 'mm' }, 'Max'), h('span', {}, 'Verlauf'), h('span', {}, 'Untergrenze'), h('span', {}, 'Obergrenze'), h('span'));
+    const cols = h('div', { class: 'row head' }, h('span', {}, 'Name'), h('span', { style: 'text-align:right' }, 'Wert'), h('span', { class: 'mm' }, 'Min'), h('span', { class: 'mm' }, 'Max'), h('span', {}, 'Verlauf'), h('span'));
     this.inner = h('div', {}, cols);
     this.el = h('div', { class: 'grp' }, header, h('div', { class: 'body' }, this.inner));
   }
@@ -168,7 +108,6 @@ export class Sensors {
   render() {
     const snap = S.snap;
     if (!snap) return;
-    settleLimits();
     const sig = snap.channels.map((c) => c.id).join('|').length + ':' + snap.channels.length;
     if (sig !== this.sig) {
       this.sig = sig;

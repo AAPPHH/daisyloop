@@ -1,30 +1,34 @@
-# daisyloop UI protocol (v1)
+# daisyloop UI protocol (v2)
 
-Transport: Windows named pipe `\\.\pipe\daisyloop`, byte mode, newline-delimited JSON, one request then one response, strictly sequential per connection. The UI process is the client, the daemon is the server. Types live in `src/protocol.rs`; the pipe client is `src/ipc.rs`.
+Transport: Windows named pipe `\\.\pipe\daisyloop`, byte mode, newline-delimited JSON, one request then one response, strictly sequential per connection. The UI process is the client, the daemon is the server. Types live in `src/protocol.rs`; the UI crate includes that same file by path (`ui/src/lib.rs`), so there is one copy. The pipe client is `ui/src/ipc.rs`.
 
 ## Envelope
 
-Request `{"v":1,"id":7,"body":{...}}`, response `{"v":1,"id":7,"body":{...}}` with the same `id`. A server that does not support `v` answers `{"type":"error"}`.
+Request `{"v":2,"id":7,"body":{...}}`, response `{"v":2,"id":7,"body":{...}}` with the same `id`. A server that does not support `v` answers `{"type":"error"}`.
 
-Request bodies (`type`): `snapshot`, `history` (`channels`, `from_ms`, `to_ms`, `max_points`), `command`.
-Response bodies (`type`): `snapshot`, `history`, `ack`, `error {message}`.
+Request bodies (`type`): `snapshot`, `history` (`channels` capped at 64 and deduplicated, `from_ms`, `to_ms`, `max_points`), `command`.
+Response bodies (`type`): `snapshot`, `history`, `ack`, `error {message}`. A refused command is an `error` with a readable German message; the UI shows it as a toast and next to the channel.
 
 ## Snapshot
 
-`ts_ms`, `seq`, `channels[]` (`id` globally unique, `label`, `hardware`, `kind`, `unit`, `value`, `min`, `max`), `controls[]`, `limits[]`, `alarms[]`.
-`control`: `id`, `label`, `kind` (pump|fan), `rpm_channel`, `duty_channel`, `mode` (`pid`|`manual`|`curve`, only `pid` has UI so far), `floor` (hard minimum duty, enforced by the daemon, mirrored by the UI), `pid` (`source` channel id, `setpoint`, `kp`, `ki`, `kd`, `min_duty`, `max_duty`), `state` (`output`, `error`, `p`, `i`, `d`, `saturated`).
-The UI polls `snapshot` at 1 Hz. History is requested only on range or selection change and every 10 s / 60 s / 5 min for 1 h / 1 d / 1 w.
+`ts_ms`, `seq`, `weight` (0 leise, 1 kuehl), `model` (`loaded`, `warm`, `warmup_left_s`, `fan_identified`, `pump_identified`, `error`), `predicted` (`horizon_s`, `water`, `cpu`, `gpu`, limits, `feasible`, `age_ms`; null before the first plan), `step_test` (`id`, `phase`, `phases`, `duty`, `left_s`; null when idle), `channels[]`, `controls[]`, `limits[]`, `alarms[]`.
+
+`channels[]`: `id` (globally unique), `label`, `hardware` (passed through per sensor), `kind`, `unit` (normalised, for example `°C`, `rpm`), `value`, `min`, `max`, `age_ms`, `stale`. A stale channel keeps its last `value`; the UI greys it and shows the age.
+
+`controls[]` (one per channel, `d5.fan` and `d5.pump`): `mode` (`off`|`shadow`|`active`), `allowed` (`writes_enabled` is on), `identified` (the model's response for this channel is identified), `drive` (`firmware` | `duty` | `test`), `target_rpm`, `actual_rpm`, `duty`, `commanded_duty`, `floor_duty`, `min_rpm`, `max_rpm`, `fallback` (reason while the channel sits on the firmware PID after a fault), `note`.
+
+`alarms[]`: `kind` (`water_high`, `cpu_high`, `pump_low`, `fan_stopped`, `stale`, `fallback`), `channel`, `message`, `value`, `limit`, `since_ms`.
+
+The first snapshot is available before the first control tick: `controls` may be empty and the UI must tolerate that. The UI polls `snapshot` at 1 Hz. History is requested only on range or selection change and every 10 s / 60 s / 5 min for 1 h / 1 d / 1 w; the daemon keeps 6 h in RAM.
 
 ## Commands
 
-`set_mode {id, mode}`, `set_pid {id, pid}`, `set_limit {channel, low, high}` (both null removes the limit). The daemon must clamp `min_duty >= floor` and `max_duty >= min_duty` itself; the UI clamps only for feedback. The server answers `ack` or `error`.
+- `set_mode {id, mode, confirmed}`: `active` is refused unless `writes_enabled` is set and the model declares the channel identified. The pump needs `confirmed: true` for `active` (UI two-step confirm).
+- `set_weight {weight}`: 0..1.
+- `start_step_test {id, confirmed}` / `stop_step_test`: duty step excitation from config, off unless started explicitly, floors and fault fallback stay active. Needs `confirmed: true`.
+
+Commands are rate limited per connection; the daemon enforces every safety limit, never the UI.
 
 ## Pipe ACL for a user process talking to a SYSTEM daemon
 
-A pipe created by a SYSTEM service gets the default DACL: full control for SYSTEM and Administrators, read for Everyone. A normal user cannot open it read/write, so the daemon must pass explicit `SECURITY_ATTRIBUTES` to `CreateNamedPipeW`, for example SDDL `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` (interactive users read/write). Recommended hardening:
-
-- Restrict to the installing user's SID instead of `IU` (`(A;;GRGW;;;<user-sid>)`), because every control command is a write to the pump and fans.
-- Create the first instance with `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS` so no other process can squat the name and no remote client can connect.
-- Verify the client with `GetNamedPipeClientProcessId` / impersonation if per-user policy is needed.
-- The daemon enforces all safety limits (pump floor, duty range); never rely on the UI.
-- Do not use a mandatory label lower than the client integrity level; normal UI runs at medium integrity, which the SDDL above allows.
+The daemon passes explicit `SECURITY_ATTRIBUTES` (`SDDL` in `src/ipc.rs`): SYSTEM, Administrators and the owner full control, interactive users the mask `0x0012019b`, which allows read and write but not creating further pipe instances (`GRGW` includes `FILE_CREATE_PIPE_INSTANCE`, so a rogue server could otherwise squat the name). The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS`.
