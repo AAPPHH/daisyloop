@@ -627,7 +627,11 @@ impl Control {
         let loops = Spec::ALL.iter().zip(flags).map(|(s, a)| Loop::new(*s, if s.name == "fan" { &cfg.control.fan } else { &cfg.control.pump }, a)).collect();
         let mut c = Control { cfg: cfg.control.clone(), dir: cfg.data_dir.clone(), factory, guard: None, recovery: None, inputs: Inputs::default(), loops, last_verify: 0, misses: 0 };
         if let Some(rec) = Recovery::load(&c.dir) {
-            c.recover(rec);
+            if flags.iter().any(|f| *f) {
+                c.recover(rec);
+            } else {
+                log::error!("control: recovery file present but no control flag is set, device not touched, file kept");
+            }
         }
         c
     }

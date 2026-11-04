@@ -1,13 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod control;
+mod ipc;
 mod lake;
+mod protocol;
 mod sources;
+use control::{Control, D5Control, HidControl};
+use ipc::{Hub, Ipc, Job};
 use lake::{Committer, Lake, Tick, Wal};
 use serde::{Deserialize, Serialize};
 use sources::{D5Next, Lhm, Nvidia, Source};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,6 +34,7 @@ pub struct Config {
     pub fan_control_enabled: bool,
     pub pump_control_enabled: bool,
     pub control: control::ControlConfig,
+    pub ipc_enabled: bool,
 }
 
 impl Default for Config {
@@ -50,6 +55,7 @@ impl Default for Config {
             fan_control_enabled: false,
             pump_control_enabled: false,
             control: control::ControlConfig::default(),
+            ipc_enabled: true,
         }
     }
 }
@@ -154,6 +160,11 @@ struct Collector {
     committer: Committer,
     alive: Arc<AtomicU64>,
     cfg: Config,
+    control: Control,
+    hub: Arc<Mutex<Hub>>,
+    jobs: Receiver<Job>,
+    start: Instant,
+    autostart: Vec<&'static str>,
 }
 
 impl Collector {
@@ -187,7 +198,15 @@ impl Collector {
                 Worker { name, tx, busy_since: None, failing: false }
             })
             .collect();
-        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone() })
+        let hid_cfg = cfg.clone();
+        let control = Control::new(cfg, Box::new(move || HidControl::open(&hid_cfg).map(|h| Box::new(h) as Box<dyn D5Control>)));
+        let hub = Arc::new(Mutex::new(Hub::new(&cfg.control)));
+        let (jobs_tx, jobs) = channel();
+        if cfg.ipc_enabled {
+            Ipc::spawn(hub.clone(), jobs_tx);
+        }
+        let autostart = control.autostart();
+        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), autostart })
     }
 
     fn accept(&mut self, i: usize, r: Result<Sample, String>, tick: &mut Tick) {
@@ -247,11 +266,36 @@ impl Collector {
                 Err(_) => break,
             }
         }
+        self.control_step(&mut tick);
         if !tick.rows.is_empty() || tick.raw.is_some() {
             if let Err(e) = self.wal.append(&tick) {
                 log::error!("wal append failed: {e}");
             }
         }
+    }
+
+    fn mono(&self) -> i64 {
+        self.start.elapsed().as_millis() as i64
+    }
+
+    fn control_step(&mut self, tick: &mut Tick) {
+        let now = self.mono();
+        while let Ok((cmd, reply)) = self.jobs.try_recv() {
+            let _ = reply.send(ipc::apply(&mut self.control, cmd, now));
+        }
+        self.control.step(&mut tick.rows, now);
+        let mut pending = std::mem::take(&mut self.autostart);
+        pending.retain(|name| match self.control.enable(name, now) {
+            Ok(()) => false,
+            Err(e) => {
+                if now > 300_000 {
+                    log::error!("{name} control autostart gave up: {e}");
+                }
+                now <= 300_000
+            }
+        });
+        self.autostart = pending;
+        self.hub.lock().unwrap().update(tick, self.control.statuses());
     }
 
     fn rotate(&mut self) {
@@ -299,6 +343,8 @@ impl Collector {
             }
             if stop_file.exists() {
                 let _ = std::fs::remove_file(&stop_file);
+                let now = self.mono();
+                self.control.shutdown(now);
                 self.rotate();
                 self.committer.finish();
                 log::info!("stopped");
