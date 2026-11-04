@@ -11,6 +11,8 @@ struct Config {
     fan: std::ops::Range<usize>,
     pump: std::ops::Range<usize>,
     fan_setpoint_at: usize,
+    pump_setpoint_at: usize,
+    pump_setpoint_min: u16,
     setpoint_range: (u16, u16),
     baseline_secs: u64,
     pump_rpm_tolerance: f64,
@@ -28,6 +30,8 @@ const CFG: Config = Config {
     fan: 0x41..0x96,
     pump: 0x96..0xEB,
     fan_setpoint_at: 0x46,
+    pump_setpoint_at: 0x9B,
+    pump_setpoint_min: 2800,
     setpoint_range: (2800, 3800),
     baseline_secs: 30,
     pump_rpm_tolerance: 150.0,
@@ -107,6 +111,7 @@ struct Stage {
     d5: D5,
     send: bool,
     setpoint: Option<u16>,
+    pump_setpoint: Option<u16>,
     hold_secs: u64,
     restore: bool,
 }
@@ -120,6 +125,7 @@ impl Stage {
             d5: D5::open()?,
             send: Self::env("D5_SEND").as_deref() == Some("YES"),
             setpoint: Self::env("D5_FAN_SETPOINT").map(|s| s.parse().map_err(|_| "bad setpoint")).transpose()?,
+            pump_setpoint: Self::env("D5_PUMP_SETPOINT").map(|s| s.parse().map_err(|_| "bad pump setpoint")).transpose()?,
             hold_secs: Self::env("D5_HOLD").and_then(|s| s.parse().ok()).unwrap_or(60),
             restore: Self::env("D5_RESTORE").as_deref() != Some("NO"),
         })
@@ -133,18 +139,27 @@ impl Stage {
             t[CFG.fan_setpoint_at..CFG.fan_setpoint_at + 2].copy_from_slice(&sp.to_be_bytes());
             Crc16Usb::seal(&mut t);
         }
+        if let Some(sp) = self.pump_setpoint {
+            if self.setpoint.is_some() {
+                return Err("refused: one channel per run".into());
+            }
+            let now = Live::be16(base, CFG.pump_setpoint_at) as u16;
+            if sp > now || sp < CFG.pump_setpoint_min {
+                return Err(format!("refused: pump set-point {sp} must stay within {}..={now}", CFG.pump_setpoint_min));
+            }
+            t[CFG.pump_setpoint_at..CFG.pump_setpoint_at + 2].copy_from_slice(&sp.to_be_bytes());
+            Crc16Usb::seal(&mut t);
+        }
+        let allowed = if self.pump_setpoint.is_some() { CFG.pump_setpoint_at..CFG.pump_setpoint_at + 2 } else { CFG.fan.clone() };
         let n = t.len();
         let diffs: Vec<usize> = (0..n).filter(|&o| t[o] != base[o]).collect();
         for &o in &diffs {
             println!("diff {o:#05X}: {:02X} -> {:02X}", base[o], t[o]);
-            if !CFG.fan.contains(&o) && o < n - 2 {
-                return Err(format!("refused: byte {o:#05X} outside the fan subgroup"));
+            if !allowed.contains(&o) && o < n - 2 {
+                return Err(format!("refused: byte {o:#05X} outside {allowed:?}"));
             }
         }
-        if t[CFG.pump.clone()] != base[CFG.pump.clone()] {
-            return Err("refused: pump subgroup differs".into());
-        }
-        println!("diff bytes: {} (pump subgroup identical)", diffs.len());
+        println!("diff bytes: {}", diffs.len());
         Ok(t)
     }
     fn baseline(&self) -> Result<Live, String> {
@@ -174,7 +189,7 @@ impl Stage {
             last = l;
             let t = start.elapsed().as_secs();
             l.print(&format!("t+{t:>3}s"));
-            if (l.pump_rpm - base.pump_rpm).abs() > CFG.pump_rpm_tolerance {
+            if self.pump_setpoint.is_none() && (l.pump_rpm - base.pump_rpm).abs() > CFG.pump_rpm_tolerance {
                 return Err(format!("pump rpm {:.0} deviates from {:.0}", l.pump_rpm, base.pump_rpm));
             }
             if l.pump_rpm < CFG.pump_rpm_floor {
