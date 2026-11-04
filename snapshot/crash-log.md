@@ -32,6 +32,16 @@ Fixed before the result: supported if there is no event 41 during 72 h of normal
 
 Result: failed as the sole cause. Event 41 logged at the 2026-11-04 18:18 boot, event 6008 time 17:32:52, 55 min after the C6 boot. No power button timestamp, bugcheck 0. Last data 17:32:47: CPU ~58 W (144 W peak in 4 min), core max ~67 C (82 C peak), load ~22 %, GPU ~116 W and 75 % (training), water ~36 C, pump 100 %. Not thermal: this is the coolest, lowest-CPU outage with GPU training on. Whether the user's BIOS change took effect is taken from the user's report; not verified from software.
 
+## 2026-11-04 19:13:48, first outage captured by the new daemon
+
+C6 still set, RAM still 8200 MT/s per Win32_PhysicalMemory. Bugcheck 0, no power button. WAL replay after the reset committed 320,228 rows; data ends 19:13:48, exactly the 6008 time, with a 1 s fsync. Boot-start proved: the service came up on its own after this and after the user's restart at 19:22.
+
+Last 60 s: CPU 196..253 W (273 W peak in 4 min), core max 93..97 C (102 C peak), CPU load 58..100 % falling, GPU 11 W idle, water 33 C, pump 19.8 %. Compare 17:32: CPU ~58 W and 67 C, GPU 116 W with training. So no shared load: CPU heavy with GPU idle, and the reverse. The CPU load may be partly this project's cargo builds.
+
+Uptime at outage from 6008: 182.4, 100.4, 5.4, 55.4, 55.4 min; seconds are all :23..:24, so the stamp is probably rastered about once a minute and not exact (metric files were written up to 55 s later on earlier outages). Two 55.4 min values are probably coincidence: earlier uptimes range from 17 min to 13,592 min.
+
+Trend from 6008 over 60 days: 29 outages since 2026-09-08. About 11 in the 40 days to 10-18, 12 in 10-23..11-02, and 5 on 11-04 alone. The rate is rising, which fits something degrading or a new load; cause open.
+
 ## Other suspects, unchanged so far
 
 - RAM: CUDIMM per user, 8200 MT/s, 1.40 V, 2 x 24 GB (Win32_PhysicalMemory). Normal for CUDIMM XMP, but above the CPU's official DDR5-6400 as far as known, unverified here. Next test if C6 fails: XMP off or 6400.
