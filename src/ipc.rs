@@ -276,7 +276,7 @@ pub fn apply(control: &mut Controller, cmd: Command, now: i64) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::{D5Actuator, Factory};
+    use crate::d5::{D5Actuator, Factory};
     use crate::Config;
 
     fn control(writes: bool) -> Controller {

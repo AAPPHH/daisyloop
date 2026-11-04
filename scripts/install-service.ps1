@@ -56,6 +56,8 @@ try {
     Copy-Item (Join-Path $PSScriptRoot 'watchdog.ps1') (Join-Path $install 'watchdog.ps1') -Force
     New-Item -ItemType Directory -Force (Join-Path $install 'sidecar') | Out-Null
     Copy-Item (Join-Path $newSidecar '*') (Join-Path $install 'sidecar') -Recurse -Force
+    New-Item -ItemType Directory -Force (Join-Path $install 'models') | Out-Null
+    foreach ($m in 'feature_spec_deploy.json', 'model_deploy.json') { Copy-Item (Join-Path $PSScriptRoot "..\models\$m") (Join-Path $install 'models') -Force }
     if (-not (Test-Path $configPath)) {
         $text = "data_dir = '$base'`r`nwrites_enabled = false`r`n"
         [IO.File]::WriteAllText($configPath, $text, (New-Object Text.UTF8Encoding($false)))

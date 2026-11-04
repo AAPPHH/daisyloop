@@ -9,7 +9,7 @@ from models import CONFIG, Dataset, local_idx
 from rawstore import RawStore
 
 CFG = {
-    "tag": "x40aug",
+    "tag": "x44aug",
     "stage": "stage2.pkl",
     "spec_out": os.path.join(CONFIG["out_dir"], "feature_spec_deploy.json"),
     "model_out": os.path.join(CONFIG["out_dir"], "model_deploy.json"),
@@ -25,7 +25,8 @@ class Exporter:
         self.cfg = cfg
         self.D = Dataset(CONFIG).load()
         self.rich = Spec.load(FCFG["spec_path"])
-        self.feats, _ = Stage2().pruned(cfg["feature_count"])
+        pruned, _ = Stage2().pruned(cfg["feature_count"])
+        self.feats = pruned + [n for n in CONFIG["forced"] if n not in pruned]
         self.stage = {r["tag"]: r["res"] for r in pickle.load(open(os.path.join(CONFIG["out_dir"], cfg["stage"]), "rb"))}[cfg["tag"]]
 
     def spec(self):

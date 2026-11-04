@@ -1,36 +1,9 @@
+use crate::d5::{Actuator, Ownership, Setting, Spec};
 use crate::model::{Axis, Model, Operating, Plan, Planner, Temps};
 use crate::protocol::{Alarm, AlarmKind, Control as PControl, ControlKind, Drive, Limit, Mode, ModelInfo, Predicted, StepStatus};
 use crate::{Config, Row};
-use hidapi::{HidApi, HidDevice};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
-
-pub struct Crc16Usb;
-
-impl Crc16Usb {
-    pub fn compute(data: &[u8]) -> u16 {
-        let mut crc = 0xFFFFu16;
-        for &b in data {
-            crc ^= b as u16;
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xA001 } else { crc >> 1 };
-            }
-        }
-        crc ^ 0xFFFF
-    }
-    pub fn stored(r: &[u8]) -> u16 {
-        u16::from_be_bytes([r[r.len() - 2], r[r.len() - 1]])
-    }
-    pub fn of_report(r: &[u8]) -> u16 {
-        Self::compute(&r[1..r.len() - 2])
-    }
-    pub fn seal(r: &mut [u8]) {
-        let c = Self::of_report(r).to_be_bytes();
-        let n = r.len();
-        r[n - 2..].copy_from_slice(&c);
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
@@ -88,6 +61,7 @@ pub struct ChannelOverride {
     pub curve: Option<Vec<[f64; 2]>>,
     pub rpm_tolerance: Option<f64>,
     pub alarm_rpm: Option<f64>,
+    pub daily_writes: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,13 +75,14 @@ pub struct ChannelConfig {
     pub curve: Vec<[f64; 2]>,
     pub rpm_tolerance: f64,
     pub alarm_rpm: f64,
+    pub daily_writes: u32,
 }
 
 impl ChannelConfig {
     pub fn defaults(kind: ControlKind) -> ChannelConfig {
         match kind {
-            ControlKind::Fan => ChannelConfig { floor_duty: 30.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0 },
-            ControlKind::Pump => ChannelConfig { floor_duty: 40.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.25, alarm_rpm: 1800.0 },
+            ControlKind::Fan => ChannelConfig { floor_duty: 30.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0, daily_writes: 500 },
+            ControlKind::Pump => ChannelConfig { floor_duty: 40.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.25, alarm_rpm: 1800.0, daily_writes: 500 },
         }
     }
     pub fn resolve(kind: ControlKind, o: &ChannelOverride) -> Result<ChannelConfig, String> {
@@ -122,10 +97,11 @@ impl ChannelConfig {
             curve: o.curve.clone().unwrap_or(d.curve),
             rpm_tolerance: o.rpm_tolerance.unwrap_or(d.rpm_tolerance),
             alarm_rpm: o.alarm_rpm.unwrap_or(d.alarm_rpm),
+            daily_writes: o.daily_writes.unwrap_or(d.daily_writes),
         };
         let all = [c.floor_duty, c.max_duty, c.step_up_rpm, c.step_down_rpm, c.deadband_duty, c.rpm_tolerance, c.alarm_rpm];
-        if all.iter().any(|v| !v.is_finite()) || c.floor_duty < 0.0 || c.max_duty > 100.0 || c.floor_duty > c.max_duty {
-            return Err("duty floor and ceiling must satisfy 0 <= floor <= max <= 100".into());
+        if all.iter().any(|v| !v.is_finite()) || c.floor_duty < Spec::of(kind).hard_min || c.max_duty > 100.0 || c.floor_duty > c.max_duty {
+            return Err("duty floor and ceiling must satisfy hard minimum <= floor <= max <= 100".into());
         }
         if c.step_up_rpm <= 0.0 || c.step_down_rpm <= 0.0 || c.deadband_duty < 0.0 || !(0.0..=1.0).contains(&c.rpm_tolerance) || c.alarm_rpm < 0.0 {
             return Err("step, deadband, tolerance or alarm value out of range".into());
@@ -169,6 +145,8 @@ pub struct ControlConfig {
     pub weight: f64,
     pub weight_span_k: f64,
     pub pump_noise: f64,
+    pub plan_hysteresis_k: f64,
+    pub cpu_smooth_secs: f64,
     pub water_plan_limit: f64,
     pub cpu_plan_limit: f64,
     pub gpu_plan_limit: f64,
@@ -203,6 +181,8 @@ impl Default for ControlConfig {
             weight: 0.5,
             weight_span_k: 5.0,
             pump_noise: 0.5,
+            plan_hysteresis_k: 0.3,
+            cpu_smooth_secs: 30.0,
             water_plan_limit: 38.0,
             cpu_plan_limit: 95.0,
             gpu_plan_limit: 80.0,
@@ -226,7 +206,7 @@ impl Default for ControlConfig {
 
 impl ControlConfig {
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.cpu_limit, self.cpu_hold_secs, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.follow_settle_secs, self.follow_secs];
+        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.cpu_limit, self.cpu_hold_secs, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.follow_settle_secs, self.follow_secs];
         if nums.iter().any(|v| !v.is_finite() || *v < 0.0) || self.decision_secs < 5.0 || self.stale_secs < 2.0 {
             return Err("timing or limit value out of range".into());
         }
@@ -235,229 +215,11 @@ impl ControlConfig {
         }
         for (kind, o, steps) in [(ControlKind::Fan, &self.fan, &self.step_test.fan), (ControlKind::Pump, &self.pump, &self.step_test.pump)] {
             let c = ChannelConfig::resolve(kind, o)?;
-            if steps.iter().any(|s| s[0] < c.floor_duty || s[0] > c.max_duty || s[1] < self.decision_secs) {
+            if steps.iter().any(|s| !s[0].is_finite() || !s[1].is_finite() || s[0] < c.floor_duty || s[0] > c.max_duty || s[1] < self.decision_secs) {
                 return Err("step test duty outside the floor and ceiling or step shorter than the decision interval".into());
             }
         }
         Ok(())
-    }
-}
-
-pub trait D5Control {
-    fn get(&mut self) -> Result<Vec<u8>, String>;
-    fn set(&mut self, report: &[u8]) -> Result<(), String>;
-    fn settle(&mut self, _ms: u64) {}
-}
-
-pub struct HidControl {
-    dev: HidDevice,
-}
-
-impl HidControl {
-    pub fn open(cfg: &Config) -> Result<HidControl, String> {
-        let api = HidApi::new().map_err(|e| e.to_string())?;
-        let info = api
-            .device_list()
-            .find(|d| d.vendor_id() == cfg.d5_vid && d.product_id() == cfg.d5_pid && d.usage_page() == cfg.d5_usage_page)
-            .ok_or("D5 Next HID interface not found")?;
-        Ok(HidControl { dev: info.open_device(&api).map_err(|e| e.to_string())? })
-    }
-}
-
-impl D5Control for HidControl {
-    fn get(&mut self) -> Result<Vec<u8>, String> {
-        let mut buf = vec![0u8; Guard::LEN];
-        buf[0] = Guard::ID;
-        let n = self.dev.get_feature_report(&mut buf).map_err(|e| e.to_string())?;
-        buf.truncate(n);
-        Ok(buf)
-    }
-    fn set(&mut self, report: &[u8]) -> Result<(), String> {
-        if report.len() != Guard::LEN || report[0] != Guard::ID {
-            return Err("refused: only the 809 byte report 0x03 may be sent".into());
-        }
-        std::thread::sleep(Duration::from_millis(200));
-        self.dev.send_feature_report(report).map_err(|e| e.to_string())
-    }
-    fn settle(&mut self, ms: u64) {
-        std::thread::sleep(Duration::from_millis(ms));
-    }
-}
-
-pub fn be16(r: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([r[at], r[at + 1]])
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Spec {
-    pub kind: ControlKind,
-    pub name: &'static str,
-    pub base: usize,
-}
-
-impl Spec {
-    pub const FAN: Spec = Spec { kind: ControlKind::Fan, name: "fan", base: 0x41 };
-    pub const PUMP: Spec = Spec { kind: ControlKind::Pump, name: "pump", base: 0x96 };
-    pub const ALL: [Spec; 2] = [Spec::FAN, Spec::PUMP];
-    pub fn of(kind: ControlKind) -> Spec {
-        Spec::ALL[Spec::ALL.iter().position(|s| s.kind == kind).unwrap()]
-    }
-    pub fn mode(&self) -> usize {
-        self.base
-    }
-    pub fn preset(&self) -> usize {
-        self.base + 1
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Setting {
-    Firmware,
-    Duty(f64),
-}
-
-pub trait Actuator {
-    fn apply(&mut self, set: &[(ControlKind, Setting)]) -> Result<(), String>;
-    fn recover(&mut self) -> Result<Vec<ControlKind>, String>;
-}
-
-pub struct Guard {
-    dev: Box<dyn D5Control>,
-}
-
-impl Guard {
-    pub const LEN: usize = 0x329;
-    pub const ID: u8 = 3;
-    pub const CRC: usize = 0x327;
-    pub const READBACK_MS: u64 = 500;
-
-    pub fn new(dev: Box<dyn D5Control>) -> Guard {
-        Guard { dev }
-    }
-    pub fn validate(r: &[u8]) -> Result<(), String> {
-        if r.len() != Self::LEN || r[0] != Self::ID {
-            return Err(format!("bad report length {} id {}", r.len(), r.first().copied().unwrap_or(0)));
-        }
-        if Crc16Usb::stored(r) != Crc16Usb::of_report(r) {
-            return Err("crc mismatch on device report".into());
-        }
-        Ok(())
-    }
-    pub fn check_diff(fresh: &[u8], target: &[u8], edits: &[(Spec, Setting)]) -> Result<(), String> {
-        Self::validate(target)?;
-        if fresh.len() != target.len() {
-            return Err("length differs".into());
-        }
-        let mut allowed = vec![Self::CRC, Self::CRC + 1];
-        for (spec, setting) in edits {
-            allowed.push(spec.mode());
-            if matches!(setting, Setting::Duty(_)) {
-                allowed.extend([spec.preset(), spec.preset() + 1]);
-                if be16(target, spec.preset()) > 10000 {
-                    return Err(format!("{} preset above 100 %", spec.name));
-                }
-            }
-            if target[spec.mode()] > 1 {
-                return Err(format!("{} mode byte {} is neither duty nor set-point mode", spec.name, target[spec.mode()]));
-            }
-        }
-        match (0..target.len()).find(|o| target[*o] != fresh[*o] && !allowed.contains(o)) {
-            Some(o) => Err(format!("byte {o:#05X} outside the requested channel fields would change")),
-            None => Ok(()),
-        }
-    }
-    fn fresh(&mut self) -> Result<Vec<u8>, String> {
-        let r = self.dev.get()?;
-        Self::validate(&r)?;
-        Ok(r)
-    }
-    pub fn modes(&mut self) -> Result<Vec<(Spec, u8)>, String> {
-        let r = self.fresh()?;
-        Ok(Spec::ALL.iter().map(|s| (*s, r[s.mode()])).collect())
-    }
-    pub fn write(&mut self, edits: &[(Spec, Setting)]) -> Result<bool, String> {
-        let fresh = self.fresh()?;
-        let mut target = fresh.clone();
-        for (spec, setting) in edits {
-            if fresh[spec.mode()] > 1 {
-                return Err(format!("{} is in mode {}, refusing to touch it", spec.name, fresh[spec.mode()]));
-            }
-            match setting {
-                Setting::Firmware => target[spec.mode()] = 1,
-                Setting::Duty(duty) => {
-                    target[spec.mode()] = 0;
-                    target[spec.preset()..spec.preset() + 2].copy_from_slice(&((duty * 100.0).round() as u16).to_be_bytes());
-                }
-            }
-        }
-        Crc16Usb::seal(&mut target);
-        if target == fresh {
-            return Ok(false);
-        }
-        Self::check_diff(&fresh, &target, edits)?;
-        self.dev.set(&target)?;
-        self.dev.settle(Self::READBACK_MS);
-        if self.fresh()? != target {
-            return Err("readback differs from what was written".into());
-        }
-        Ok(true)
-    }
-}
-
-pub type Factory = Box<dyn Fn() -> Result<Box<dyn D5Control>, String>>;
-
-pub struct D5Actuator {
-    factory: Factory,
-    guard: Option<Guard>,
-    floors: [(f64, f64); 2],
-}
-
-impl D5Actuator {
-    pub fn new(factory: Factory, cfg: &ControlConfig) -> D5Actuator {
-        let bound = |k, o: &ChannelOverride| ChannelConfig::resolve(k, o).unwrap_or_else(|_| ChannelConfig::defaults(k));
-        let (f, p) = (bound(ControlKind::Fan, &cfg.fan), bound(ControlKind::Pump, &cfg.pump));
-        D5Actuator { factory, guard: None, floors: [(f.floor_duty, f.max_duty), (p.floor_duty, p.max_duty)] }
-    }
-    fn guard(&mut self) -> Result<&mut Guard, String> {
-        if self.guard.is_none() {
-            self.guard = Some(Guard::new((self.factory)()?));
-        }
-        Ok(self.guard.as_mut().unwrap())
-    }
-    fn edits(&self, set: &[(ControlKind, Setting)]) -> Vec<(Spec, Setting)> {
-        set.iter()
-            .map(|(k, s)| {
-                let spec = Spec::of(*k);
-                let (lo, hi) = self.floors[Spec::ALL.iter().position(|x| x.kind == *k).unwrap()];
-                (spec, if let Setting::Duty(d) = s { Setting::Duty(d.clamp(lo, hi)) } else { *s })
-            })
-            .collect()
-    }
-}
-
-impl Actuator for D5Actuator {
-    fn apply(&mut self, set: &[(ControlKind, Setting)]) -> Result<(), String> {
-        let edits = self.edits(set);
-        let r = self.guard().and_then(|g| g.write(&edits));
-        if r.is_err() {
-            self.guard = None;
-        }
-        r.map(|_| ())
-    }
-    fn recover(&mut self) -> Result<Vec<ControlKind>, String> {
-        let modes = self.guard().and_then(|g| g.modes());
-        let stuck: Vec<ControlKind> = match modes {
-            Ok(m) => m.iter().filter(|(_, b)| *b == 0).map(|(s, _)| s.kind).collect(),
-            Err(e) => {
-                self.guard = None;
-                return Err(e);
-            }
-        };
-        if !stuck.is_empty() {
-            let set: Vec<(ControlKind, Setting)> = stuck.iter().map(|k| (*k, Setting::Firmware)).collect();
-            self.apply(&set)?;
-        }
-        Ok(stuck)
     }
 }
 
@@ -479,13 +241,18 @@ struct Chan {
     mode: Mode,
     drive: Drive,
     target: Option<f64>,
+    wanted: Option<f64>,
     duty_cmd: Option<f64>,
     wrote_ms: i64,
     fallback: Option<String>,
+    limit_trip: bool,
     note: Option<String>,
     release_due: bool,
     follow_since: Option<i64>,
     autostart: bool,
+    day: i64,
+    used: u32,
+    over: bool,
 }
 
 impl Chan {
@@ -494,7 +261,7 @@ impl Chan {
             log::error!("control: invalid {kind:?} channel config ({e}), defaults used");
             ChannelConfig::defaults(kind)
         });
-        Chan { spec: Spec::of(kind), cal: cfg.calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, duty_cmd: None, wrote_ms: 0, fallback: None, note: None, release_due: false, follow_since: None }
+        Chan { spec: Spec::of(kind), cal: cfg.calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, day: 0, used: 0, over: false }
     }
     fn rpm_channel(&self) -> String {
         format!("d5next/{}/rpm", self.spec.name)
@@ -523,16 +290,25 @@ pub struct Control {
     writes: bool,
     chans: Vec<Chan>,
     act: Box<dyn Actuator>,
+    store: Ownership,
+    owned: Vec<ControlKind>,
+    booted: bool,
+    boot_next: i64,
+    foreign: Vec<ControlKind>,
     model: Option<Box<dyn Model>>,
     model_error: Option<String>,
     last: HashMap<String, (i64, f64)>,
+    cpu_avg: Option<(i64, f64)>,
     start: i64,
     started: bool,
     weight: f64,
     plan: Option<(Plan, i64)>,
+    plan_prev: Option<(f64, f64)>,
+    shown: Option<[Option<f64>; 3]>,
     last_decision: Option<i64>,
     last_write: i64,
     last_release: i64,
+    release_gap: i64,
     test: Option<StepTest>,
     since: BTreeMap<(String, String), i64>,
     cpu_hot: Option<i64>,
@@ -543,6 +319,11 @@ pub struct Control {
 }
 
 impl Control {
+    const RELEASE_GAP_MS: i64 = 2000;
+    const RELEASE_GAP_MAX_MS: i64 = 60_000;
+    const BOOT_RETRY_MS: i64 = 5000;
+    const FOREIGN_RECHECK_MS: i64 = 60_000;
+
     pub fn new(cfg: &Config, act: Box<dyn Actuator>, model: Result<Box<dyn Model>, String>) -> Control {
         let cc = match cfg.control.validate() {
             Ok(()) => cfg.control.clone(),
@@ -556,7 +337,9 @@ impl Control {
             Err(e) => (None, Some(e)),
         };
         let chans = vec![Chan::new(ControlKind::Fan, &cc.fan), Chan::new(ControlKind::Pump, &cc.pump)];
-        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, model, model_error, last: HashMap::new(), start: 0, started: false, plan: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, test: None, since: BTreeMap::new(), cpu_hot: None, pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0 }
+        let store = Ownership::new(cfg.state_dir());
+        let owned = store.read();
+        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: None, start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), cpu_hot: None, pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0 }
     }
 
     fn ix(&self, id: &str) -> Result<usize, String> {
@@ -573,6 +356,10 @@ impl Control {
     }
     fn temps(&self, now: i64) -> Temps {
         Temps { water: self.fresh(&self.cfg.water_channel, now), cpu: self.fresh(&self.cfg.cpu_channel, now), gpu: self.fresh(&self.cfg.gpu_channel, now) }
+    }
+    fn plan_temps(&self, now: i64) -> Temps {
+        let t = self.temps(now);
+        Temps { cpu: t.cpu.map(|c| self.cpu_avg.filter(|(at, _)| now - at <= self.stale_ms()).map_or(c, |a| a.1)), ..t }
     }
     fn watched(&self) -> Vec<String> {
         let mut w = vec![self.cfg.water_channel.clone(), self.cfg.cpu_channel.clone(), self.cfg.gpu_channel.clone()];
@@ -592,40 +379,86 @@ impl Control {
         let ch = |s: &str| format!("d5next/{}/{s}", c.spec.name);
         Some(Operating { duty: self.fresh(&ch("duty"), now)?, rpm: self.fresh(&ch("rpm"), now)?, power: self.fresh(&ch("power"), now), current: self.fresh(&ch("current"), now) })
     }
-
-    fn global_fault(&self, now: i64) -> Option<String> {
-        if self.model.is_none() {
-            return Some(format!("Modell nicht geladen: {}", self.model_error.clone().unwrap_or_default()));
-        }
-        self.sensor_fault(now)
+    fn day(&self, now: i64) -> i64 {
+        (now + self.wall_off).div_euclid(86_400_000)
     }
 
-    fn sensor_fault(&self, now: i64) -> Option<String> {
+    fn global_fault(&self, now: i64) -> Option<(String, bool)> {
+        if self.model.is_none() {
+            return Some((format!("Modell nicht geladen: {}", self.model_error.clone().unwrap_or_default()), false));
+        }
+        self.sensor_fault(now).or_else(|| (self.warm_left() > 0).then(|| (format!("Modell nicht warm, noch {} min", (self.warm_left() + 59) / 60), false)))
+    }
+
+    fn sensor_fault(&self, now: i64) -> Option<(String, bool)> {
         let t = self.temps(now);
         for (v, name) in [(t.water, "Wassertemperatur"), (t.cpu, "CPU-Temperatur"), (t.gpu, "GPU-Temperatur")] {
             if v.is_none() {
-                return Some(format!("{name} veraltet (> {:.0} s)", self.cfg.stale_secs));
+                return Some((format!("{name} veraltet (> {:.0} s)", self.cfg.stale_secs), false));
             }
         }
         if t.water.is_some_and(|w| w >= self.cfg.water_limit) {
-            return Some(format!("Wasser {:.1} °C am Limit {:.0} °C", t.water.unwrap(), self.cfg.water_limit));
+            return Some((format!("Wasser {:.1} °C am Limit {:.0} °C", t.water.unwrap(), self.cfg.water_limit), true));
         }
         if self.cpu_hot.is_some_and(|s| now - s >= (self.cfg.cpu_hold_secs * 1000.0) as i64) {
-            return Some(format!("CPU seit {:.0} s über {:.0} °C", self.cfg.cpu_hold_secs, self.cfg.cpu_limit));
+            return Some((format!("CPU seit {:.0} s über {:.0} °C", self.cfg.cpu_hold_secs, self.cfg.cpu_limit), true));
         }
         None
     }
 
-    fn startup(&mut self, now: i64) {
-        self.start = now;
-        if !self.writes {
+    fn disown(&mut self, kind: ControlKind) {
+        if self.owned.contains(&kind) {
+            let next: Vec<ControlKind> = self.owned.iter().copied().filter(|k| *k != kind).collect();
+            match self.store.store(&next) {
+                Ok(()) => self.owned = next,
+                Err(e) => log::error!("control: ownership marker could not be cleared: {e}"),
+            }
+        }
+    }
+
+    fn boot_check(&mut self, now: i64) {
+        if now < self.boot_next || (self.booted && self.foreign.is_empty()) {
             return;
         }
-        match self.act.recover() {
-            Ok(k) if !k.is_empty() => log::warn!("control: {k:?} was in duty mode at start, returned to the firmware PID"),
-            Ok(_) => {}
-            Err(e) => log::error!("control: start check of the D5 mode bytes failed: {e}"),
+        self.boot_next = now + if self.booted { Self::FOREIGN_RECHECK_MS } else { Self::BOOT_RETRY_MS };
+        let readings = match self.act.modes() {
+            Ok(r) => r,
+            Err(e) => {
+                if !self.booted {
+                    log::error!("control: check of the D5 mode bytes failed, retrying: {e}");
+                }
+                return;
+            }
+        };
+        let (mut stuck, mut foreign) = (Vec::new(), Vec::new());
+        for r in readings {
+            let c = self.chans.iter().find(|c| c.spec.kind == r.kind).unwrap();
+            if c.driving() || c.release_due {
+                continue;
+            }
+            match (r.mode == 0, self.owned.contains(&r.kind)) {
+                (true, true) if self.writes => stuck.push(r.kind),
+                (true, _) => foreign.push(r.kind),
+                (false, true) => self.disown(r.kind),
+                _ => {}
+            }
         }
+        if !stuck.is_empty() {
+            let set: Vec<(ControlKind, Setting)> = stuck.iter().map(|k| (*k, Setting::Firmware)).collect();
+            if let Err(e) = self.act.apply(&set) {
+                log::error!("control: return of {stuck:?} to the firmware PID failed, retrying: {e}");
+                return;
+            }
+            log::warn!("control: {stuck:?} was left in duty mode by daisyloop, returned to the firmware PID");
+            for k in stuck {
+                self.disown(k);
+            }
+        }
+        if !foreign.is_empty() && self.foreign != foreign {
+            log::warn!("control: {foreign:?} is in duty mode but not owned by daisyloop, left untouched");
+        }
+        self.foreign = foreign;
+        self.booted = true;
     }
 
     fn absorb(&mut self, rows: &[Row], now: i64, epoch: i64) {
@@ -634,6 +467,13 @@ impl Control {
             if let Some(v) = map.get(&w).filter(|v| v.is_finite()) {
                 self.last.insert(w, (now, *v));
             }
+        }
+        if let Some(v) = map.get(&self.cfg.cpu_channel).filter(|v| v.is_finite()) {
+            let tau = (self.cfg.cpu_smooth_secs * 1000.0).max(1.0);
+            self.cpu_avg = Some((now, match self.cpu_avg.filter(|(t, _)| now - t <= self.stale_ms()) {
+                Some((t, a)) => a + (v - a) * (1.0 - (-((now - t) as f64) / tau).exp()),
+                None => *v,
+            }));
         }
         for c in &self.chans {
             for s in ["power", "current"] {
@@ -689,21 +529,37 @@ impl Control {
         for (ch, f) in falls {
             self.raise(&mut out, AlarmKind::Fallback, &ch, format!("Rückfall auf Firmware-PID: {f}"), None, None, now);
         }
+        if !self.booted {
+            if let Some(k) = self.owned.first().copied() {
+                let ch = self.chans.iter().find(|c| c.spec.kind == k).unwrap().rpm_channel();
+                self.raise(&mut out, AlarmKind::Fallback, &ch, "Start: Rückfall auf die Firmware-PID steht aus, wird wiederholt".into(), None, None, now);
+            }
+        }
+        for k in self.foreign.clone() {
+            let ch = self.chans.iter().find(|c| c.spec.kind == k).unwrap().rpm_channel();
+            let msg = if self.writes { "Kanal steht im Duty-Modus, nicht von daisyloop gesetzt, bleibt unberührt" } else { "Kanal steht im Duty-Modus (Schreiben deaktiviert), daisyloop ändert nichts" };
+            self.raise(&mut out, AlarmKind::Foreign, &ch, msg.into(), None, None, now);
+        }
+        let over: Vec<(String, u32)> = self.chans.iter().filter(|c| c.over).map(|c| (c.rpm_channel(), c.cfg.daily_writes)).collect();
+        for (ch, n) in over {
+            self.raise(&mut out, AlarmKind::Budget, &ch, format!("Tagesbudget von {n} Schreibvorgängen erreicht, Duty bleibt auf dem letzten Wert"), None, None, now);
+        }
         let active: Vec<(String, String)> = out.iter().map(|a| (format!("{:?}", a.kind), a.channel.clone())).collect();
         self.since.retain(|k, _| active.contains(k));
         self.alarms = out;
     }
 
-    fn fall_back(&mut self, i: usize, why: &str) {
+    fn fall_back(&mut self, i: usize, why: &str, limit: bool) {
         if self.chans[i].mode == Mode::Active || self.chans[i].driving() {
-            self.trip(i, why);
+            self.trip(i, why, limit);
         }
     }
 
-    fn trip(&mut self, i: usize, why: &str) {
+    fn trip(&mut self, i: usize, why: &str, limit: bool) {
         let c = &mut self.chans[i];
         log::error!("control: {} falls back to the firmware PID: {why}", c.spec.name);
         c.fallback = Some(why.to_string());
+        c.limit_trip = limit;
         c.mode = Mode::Shadow;
         c.release_due = true;
         c.target = None;
@@ -719,8 +575,8 @@ impl Control {
                 continue;
             }
             let global = if self.chans[i].mode == Mode::Active { self.global_fault(now) } else { self.sensor_fault(now) };
-            if let Some(g) = &global {
-                self.fall_back(i, g);
+            if let Some((g, limit)) = &global {
+                self.fall_back(i, g, *limit);
                 continue;
             }
             let c = &self.chans[i];
@@ -731,57 +587,111 @@ impl Control {
             let since = if off { c.follow_since.or(Some(now)) } else { None };
             self.chans[i].follow_since = since;
             if since.is_some_and(|s| now - s >= (self.cfg.follow_secs * 1000.0) as i64) {
-                self.fall_back(i, &format!("Drehzahl folgt dem Befehl nicht (Soll {:.0}, Ist {})", self.chans[i].cal.rpm(cmd), rpm.map_or("fehlt".into(), |r| format!("{r:.0}"))));
+                self.fall_back(i, &format!("Drehzahl folgt dem Befehl nicht (Soll {:.0}, Ist {})", self.chans[i].cal.rpm(cmd), rpm.map_or("fehlt".into(), |r| format!("{r:.0}"))), false);
             }
         }
     }
 
     fn write(&mut self, set: &[(ControlKind, Setting)], now: i64, drive: Drive) -> bool {
-        match self.act.apply(set) {
+        let day = self.day(now);
+        let mut allowed = Vec::new();
+        for (k, s) in set {
+            let c = self.chans.iter_mut().find(|c| c.spec.kind == *k).unwrap();
+            if matches!(s, Setting::Duty(_)) {
+                if c.day != day {
+                    (c.day, c.used, c.over) = (day, 0, false);
+                }
+                if c.used >= c.cfg.daily_writes {
+                    if !c.over {
+                        c.over = true;
+                        log::error!("control: {} reached its daily budget of {} duty writes, holding the last value", c.spec.name, c.cfg.daily_writes);
+                    }
+                    continue;
+                }
+            }
+            allowed.push((*k, *s));
+        }
+        if allowed.is_empty() {
+            return false;
+        }
+        let mut owned = self.owned.clone();
+        for (k, s) in &allowed {
+            if matches!(s, Setting::Duty(_)) && !owned.contains(k) {
+                owned.push(*k);
+            }
+        }
+        if owned != self.owned {
+            if let Err(e) = self.store.store(&owned) {
+                for (k, _) in &allowed {
+                    let i = self.chans.iter().position(|c| c.spec.kind == *k).unwrap();
+                    self.trip(i, &format!("Besitzmarke nicht schreibbar: {e}"), false);
+                }
+                return false;
+            }
+            self.owned = owned;
+        }
+        match self.act.apply(&allowed) {
             Ok(()) => {
                 self.last_write = now;
-                for (k, s) in set {
+                for (k, s) in &allowed {
                     let c = self.chans.iter_mut().find(|c| c.spec.kind == *k).unwrap();
                     if let Setting::Duty(d) = s {
                         c.duty_cmd = Some(d.clamp(c.cfg.floor_duty, c.cfg.max_duty));
                         c.drive = drive;
                         c.wrote_ms = now;
+                        c.used += 1;
+                        log::info!("control: {} duty {:.1} % written ({}/{} today)", c.spec.name, d, c.used, c.cfg.daily_writes);
                     }
                 }
                 true
             }
             Err(e) => {
-                for (k, _) in set {
+                for (k, _) in &allowed {
                     let i = self.chans.iter().position(|c| c.spec.kind == *k).unwrap();
-                    self.trip(i, &format!("Schreibfehler: {e}"));
+                    self.trip(i, &format!("Schreibfehler: {e}"), false);
                 }
                 false
             }
         }
     }
 
+    fn setpoints(&mut self) -> Option<String> {
+        let r = self.act.modes().ok()?;
+        Some(r.iter().map(|x| format!("{} {:.1} °C", if x.kind == ControlKind::Fan { "Lüfter" } else { "Pumpe" }, x.setpoint)).collect::<Vec<_>>().join(", "))
+    }
+
     fn try_release(&mut self, now: i64, force: bool) {
         let due: Vec<usize> = (0..self.chans.len()).filter(|i| self.chans[*i].release_due).collect();
-        if due.is_empty() || (!force && now - self.last_release < 2000) {
+        if due.is_empty() || (!force && now - self.last_release < self.release_gap) {
             return;
         }
         self.last_release = now;
-        let set: Vec<(ControlKind, Setting)> = due.iter().map(|i| (self.chans[*i].spec.kind, Setting::Firmware)).collect();
-        let mut r = self.act.apply(&set);
+        let mine: Vec<usize> = due.iter().copied().filter(|i| self.owned.contains(&self.chans[*i].spec.kind)).collect();
+        let set: Vec<(ControlKind, Setting)> = mine.iter().map(|i| (self.chans[*i].spec.kind, Setting::Firmware)).collect();
+        let mut r = if set.is_empty() { Ok(()) } else { self.act.apply(&set) };
         if r.is_err() && force {
             r = self.act.apply(&set);
         }
+        self.release_gap = if r.is_ok() { Self::RELEASE_GAP_MS } else { (self.release_gap * 2).min(Self::RELEASE_GAP_MAX_MS) };
+        let points = if r.is_ok() && due.iter().any(|i| self.chans[*i].limit_trip) { self.setpoints() } else { None };
         for i in due {
-            let c = &mut self.chans[i];
             match &r {
                 Ok(()) => {
+                    let kind = self.chans[i].spec.kind;
+                    self.disown(kind);
+                    let c = &mut self.chans[i];
                     c.release_due = false;
                     c.drive = Drive::Firmware;
                     c.duty_cmd = None;
                     c.note = None;
+                    if let (true, Some(p), Some(f)) = (c.limit_trip, &points, c.fallback.as_mut()) {
+                        f.push_str(&format!(" (Firmware-Sollwerte: {p})"));
+                    }
+                    c.limit_trip = false;
                     log::info!("control: {} is back on the firmware PID", c.spec.name);
                 }
                 Err(e) => {
+                    let c = &mut self.chans[i];
                     c.note = Some(format!("Rückfall fehlgeschlagen, neuer Versuch: {e}"));
                     log::error!("control: release of {} failed: {e}", c.spec.name);
                 }
@@ -823,6 +733,7 @@ impl Control {
         }
         self.last_decision = Some(now);
         self.plan = None;
+        self.shown = None;
         let Some(model) = self.model.as_ref() else {
             for c in &mut self.chans {
                 c.note = Some("Modell nicht geladen".into());
@@ -836,10 +747,15 @@ impl Control {
             }
             return;
         };
+        let any_active = self.chans.iter().any(|c| c.mode == Mode::Active);
+        let free = |c: &Chan| if any_active { c.mode == Mode::Active } else { c.mode != Mode::Off };
         let (fan_c, pump_c) = (&self.chans[0], &self.chans[1]);
-        let fan = Axis { name: "fan", cfg: &fan_c.cfg, cal: &fan_c.cal, free: fan_c.mode != Mode::Off, base: fb };
-        let pump = Axis { name: "pump", cfg: &pump_c.cfg, cal: &pump_c.cal, free: pump_c.mode != Mode::Off, base: pb };
-        let result = Planner { cfg: &self.cfg }.plan(model.as_ref(), &fan, &pump, &self.temps(now), self.weight);
+        let fan = Axis { name: "fan", cfg: &fan_c.cfg, cal: &fan_c.cal, free: free(fan_c), base: fb };
+        let pump = Axis { name: "pump", cfg: &pump_c.cfg, cal: &pump_c.cal, free: free(pump_c), base: pb };
+        let prev = self.plan_prev;
+        let result = Planner { cfg: &self.cfg }.plan(model.as_ref(), &fan, &pump, &self.plan_temps(now), self.weight, prev);
+        let now_t = self.temps(now);
+        let direct = model.forecast(&HashMap::new(), 0, self.cfg.horizon_secs).ok();
         let warm = self.warm_left() == 0;
         let plan = match result {
             Ok(p) => p,
@@ -847,7 +763,7 @@ impl Control {
                 self.model_error = Some(e.clone());
                 for i in 0..self.chans.len() {
                     if self.chans[i].mode == Mode::Active {
-                        self.fall_back(i, &format!("Modellfehler: {e}"));
+                        self.fall_back(i, &format!("Modellfehler: {e}"), false);
                     }
                 }
                 return;
@@ -855,27 +771,37 @@ impl Control {
         };
         self.model_error = None;
         self.plan = Some((plan, now));
+        self.plan_prev = Some((plan.fan_rpm, plan.pump_rpm));
+        self.shown = direct.map(|d| [now_t.water.map(|t| t + d.water), now_t.cpu.map(|t| t + d.cpu), now_t.gpu.map(|t| t + d.gpu)]);
         let mut set = Vec::new();
         for i in 0..self.chans.len() {
+            let ident = self.identified(i);
             let c = &mut self.chans[i];
             if c.mode == Mode::Off {
                 c.target = None;
+                c.wanted = None;
                 continue;
             }
             let base_op = if i == 0 { fb } else { pb };
             let (lo, hi) = c.rpm_range();
-            let want = if i == 0 { plan.fan_rpm } else { plan.pump_rpm };
-            let from = if c.mode == Mode::Active { c.target.unwrap_or(base_op.rpm) } else { base_op.rpm };
-            let new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - c.cfg.step_down_rpm) }.clamp(lo, hi);
-            c.target = Some(new);
+            let want = (if i == 0 { plan.fan_rpm } else { plan.pump_rpm }).clamp(lo, hi);
+            c.wanted = Some(want);
             if c.mode != Mode::Active {
-                c.note = Some(if warm { "nur berechnet".into() } else { "nur berechnet, Modell noch nicht warm".into() });
+                c.target = None;
+                let mut note = String::from(if warm { "nur berechnet" } else { "nur berechnet, Modell noch nicht warm" });
+                if !ident {
+                    note.push_str(", nicht identifiziert");
+                }
+                c.note = Some(note);
                 continue;
             }
             if !warm {
                 c.note = Some("Modell wärmt auf".into());
                 continue;
             }
+            let from = c.target.unwrap_or(base_op.rpm);
+            let new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - c.cfg.step_down_rpm) }.clamp(lo, hi);
+            c.target = Some(new);
             c.note = None;
             let duty = c.cal.duty(new).clamp(c.cfg.floor_duty, c.cfg.max_duty);
             if c.duty_cmd.is_none_or(|d| (d - duty).abs() >= c.cfg.deadband_duty) || c.drive == Drive::Firmware {
@@ -911,18 +837,26 @@ impl Control {
             if self.warm_left() > 0 {
                 return Err(format!("Modell wärmt auf, noch {} min", (self.warm_left() + 59) / 60));
             }
-            if let Some(f) = self.global_fault(now) {
+            if let Some((f, _)) = self.global_fault(now) {
                 return Err(f);
             }
+        }
+        if mode == Mode::Off && self.test.as_ref().is_some_and(|t| t.chan == i) {
+            self.test = None;
+            self.chans[i].release_due = true;
         }
         let c = &mut self.chans[i];
         c.mode = mode;
         c.fallback = None;
+        c.limit_trip = false;
         c.note = if mode == Mode::Active { Some("wartet auf die nächste Entscheidung".into()) } else { None };
         c.target = None;
+        c.wanted = None;
         c.follow_since = None;
         if mode != Mode::Active && c.driving() && self.test.as_ref().is_none_or(|t| t.chan != i) {
             c.release_due = true;
+        }
+        if mode != Mode::Active && self.chans[i].release_due {
             self.try_release(now, true);
             if self.chans[i].release_due {
                 return Err("Rückfall auf Firmware-PID fehlgeschlagen, wird wiederholt".into());
@@ -954,7 +888,7 @@ impl Control {
         if now - self.last_write < (self.cfg.decision_secs * 1000.0) as i64 {
             return Err("Schreibpause: letzter Schreibvorgang liegt weniger als ein Entscheidungsintervall zurück".into());
         }
-        if let Some(f) = self.sensor_fault(now) {
+        if let Some((f, _)) = self.sensor_fault(now) {
             return Err(f);
         }
         let steps = if self.chans[i].spec.kind == ControlKind::Fan { self.cfg.step_test.fan.clone() } else { self.cfg.step_test.pump.clone() };
@@ -990,7 +924,7 @@ impl Control {
             }
             match self.set_mode(&format!("d5.{}", self.chans[i].spec.name), Mode::Active, true, now) {
                 Ok(()) => self.chans[i].autostart = false,
-                Err(e) if now - self.start > 300_000 => {
+                Err(e) if now - self.start > 300_000 && self.warm_left() == 0 => {
                     log::error!("control: autostart of {} gave up: {e}", self.chans[i].spec.name);
                     self.chans[i].autostart = false;
                 }
@@ -1002,9 +936,10 @@ impl Control {
     pub fn step(&mut self, rows: &mut Vec<Row>, now: i64, epoch: i64) {
         if !self.started {
             self.started = true;
-            self.startup(now);
+            self.start = now;
         }
         self.wall_off = epoch * 1000 - now;
+        self.boot_check(now);
         self.absorb(rows, now, epoch);
         self.refresh_alarms(now);
         self.check_faults(now);
@@ -1018,25 +953,35 @@ impl Control {
     fn telemetry(&self) -> Vec<Row> {
         let row = |ch: String, text: String, unit: &str, v: f64, role: &'static str| Row::new("daisyloop", format!("daisyloop/{ch}"), text, "other", unit, v).role(role);
         let mut rows = Vec::new();
-        for c in &self.chans {
+        for (i, c) in self.chans.iter().enumerate() {
             let n = c.spec.name;
             rows.push(row(format!("{n}/mode"), format!("{n} mode (0 off, 1 shadow, 2 active)"), "", c.mode as u8 as f64, "input"));
             rows.push(row(format!("{n}/drive"), format!("{n} drive (0 firmware, 1 duty, 2 test)"), "", c.drive as u8 as f64, "input"));
             rows.push(row(format!("{n}/fallback"), format!("{n} fallback active"), "", c.fallback.is_some() as u8 as f64, "aux"));
-            if let Some(t) = c.target {
-                rows.push(row(format!("{n}/target_rpm"), format!("{n} target rpm"), "rpm", t, "aux"));
+            rows.push(row(format!("{n}/identified"), format!("{n} response identified by the model (0 means target and forecast are not trustworthy)"), "", self.identified(i) as u8 as f64, "aux"));
+            if let Some(t) = c.wanted {
+                rows.push(row(format!("{n}/target_rpm"), format!("{n} plan target rpm"), "rpm", t, "aux"));
             }
             if let Some(d) = c.duty_cmd {
                 rows.push(row(format!("{n}/duty_cmd"), format!("{n} commanded duty"), "%", d, "input"));
             }
         }
         if let Some((p, _)) = &self.plan {
+            let ahead = self.cfg.rollout_secs + self.cfg.horizon_secs;
             for (ch, v) in [("water", p.water), ("cpu", p.cpu), ("gpu", p.gpu)] {
                 if let Some(v) = v {
-                    rows.push(row(format!("plan/{ch}"), format!("predicted {ch} temperature"), "degC", v, "aux"));
+                    rows.push(row(format!("plan/{ch}"), format!("plan estimate of {ch} temperature, rpm held {} s then {} s change", self.cfg.rollout_secs, self.cfg.horizon_secs), "degC", v, "aux"));
                 }
             }
             rows.push(row("plan/feasible".into(), "plan within limits".into(), "", p.feasible as u8 as f64, "aux"));
+            rows.push(row("plan/ahead".into(), "plan estimate lookahead".into(), "s", ahead as f64, "aux"));
+        }
+        if let Some(s) = &self.shown {
+            for (ch, v) in [("water", s[0]), ("cpu", s[1]), ("gpu", s[2])] {
+                if let Some(v) = v {
+                    rows.push(row(format!("forecast/{ch}"), format!("direct forecast of {ch} temperature in {} s", self.cfg.horizon_secs), "degC", v, "aux"));
+                }
+            }
         }
         if let Some(t) = &self.test {
             rows.push(row("step/phase".into(), "step test phase".into(), "", (t.idx + 1) as f64, "input"));
@@ -1063,7 +1008,7 @@ impl Control {
                     allowed: self.writes,
                     identified: self.identified(i),
                     drive: c.drive,
-                    target_rpm: c.target,
+                    target_rpm: c.wanted,
                     actual_rpm: self.fresh(&c.rpm_channel(), now),
                     duty: self.fresh(&c.duty_channel(), now),
                     commanded_duty: c.duty_cmd,
@@ -1077,7 +1022,10 @@ impl Control {
             .collect();
         let left = self.warm_left();
         let model = ModelInfo { loaded: self.model.is_some(), warm: self.model.is_some() && left == 0, warmup_left_s: left as u32, fan_identified: self.identified(0), pump_identified: self.identified(1), error: self.model_error.clone() };
-        let predicted = self.plan.as_ref().map(|(p, at)| Predicted { horizon_s: self.cfg.horizon_secs, water: p.water, cpu: p.cpu, gpu: p.gpu, water_limit: self.cfg.water_plan_limit, cpu_limit: self.cfg.cpu_plan_limit, gpu_limit: self.cfg.gpu_plan_limit, feasible: p.feasible, age_ms: now - at });
+        let predicted = self.plan.as_ref().map(|(p, at)| {
+            let s = self.shown.unwrap_or_default();
+            Predicted { horizon_s: self.cfg.horizon_secs, water: s[0], cpu: s[1], gpu: s[2], water_limit: p.limits[0], cpu_limit: p.limits[1], gpu_limit: p.limits[2], feasible: p.feasible, age_ms: now - at }
+        });
         let step = self.test.as_ref().map(|t| StepStatus { id: format!("d5.{}", self.chans[t.chan].spec.name), phase: t.idx as u32 + 1, phases: t.steps.len() as u32, duty: self.step_duty(t), left_s: ((t.steps[t.idx][1] * 1000.0 - (now - t.since) as f64) / 1000.0).max(0.0) as u32 });
         let limits = vec![
             Limit { channel: self.cfg.water_channel.clone(), low: None, high: Some(self.cfg.water_limit) },

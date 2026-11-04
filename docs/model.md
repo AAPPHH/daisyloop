@@ -65,3 +65,23 @@ Fan excitation as listed above (the one thing that makes the fan term identifiab
 ## How to run
 
 Python 3.12 of the `other_project` venv (the only one with Ray 2.54.1 matching the running cluster), `PYTHONPATH` = worktree `python` plus a directory with xgboost 3.4 and onnx (`pip install --target`). `python experiments.py build|stage1|stage2|stage3`, `python export.py`, `python test_features.py`. Compute attaches with `ray.init(address="auto")`; the cluster belongs to another project and was not started or touched.
+
+## Shadow pipeline replay and review fixes
+
+- Replay (`src/replay_tests.rs`, runs with `cargo test replay`): the 2 h golden window (11-04 07:00 to 09:00, 1 Hz, 44 raw channels, LHM present from about 07:36) goes through `Control::step` with the real `XgbModel`, shadow mode, `writes_enabled=false`, a simulated actuator (0 SETs asserted). The golden file has no pump rpm and duty, so 19.8 % and 2570 rpm are assumed for the pump. One decision every 30 s; the model counts as warm after 1800 s of complete features (about 55 min of the window).
+- Results, warm decisions only (110 decisions, 96 scorable): fan and pump targets sit at the floor (65 %) or at the maximum (35 %) and never in between; the plan changed once in 55 min (one max to floor flip between 4700 s and 5100 s when the CPU load dropped). Over all 203 decisions including the warm-up: 8 changes and 7 floor/max flips without hysteresis, 5 and 3 with the 0.3 K hysteresis, so the plan is two-level, not oscillating once the margin is in place, but not graded either. The target is the plan target now: 441 rpm / 3132 rpm at the floor, 1470 / 4800 at the maximum, while the real fan stays at about 1460 rpm under the firmware PID (shadow does not write).
+- The choice flips on the feasibility threshold (water plan limit 38 minus 2.5 K at weight 0.5 = 35.5 C): the fan response in the model is small (fan grid moves the 2 min water forecast by 0.06 K on average, review of 11-04), so the grid takes the quietest feasible candidate or the maximum. That is bang-bang by construction until the fan response is identified; the telemetry flag `daisyloop/<channel>/identified` stays 0 and the UI marks every target and forecast "nicht identifiziert".
+- Forecast skill in the replay (direct prediction, +120 s, warm, n 96): water RMSE 0.266 K against persistence 0.355 K, CPU core max 8.35 K against 9.07 K (instantaneous max, not predictable), GPU 1.81 K against 1.86 K. Water at +120 s is real skill, CPU and GPU are not usable for decisions at that horizon beyond persistence.
+- Sample of warm decisions (water and CPU in C, rpm; predicted is the direct +120 s forecast, actual is the recorded water 120 s later):
+
+| t (s) | water | CPU | fan target (actual) | pump target | predicted water | actual water | feasible |
+|---|---|---|---|---|---|---|---|
+| 4110 | 35.77 | 86 | 1470 (1457) | 4800 | 35.72 | 35.78 | no |
+| 4710 | 35.82 | 92 | 1470 (1457) | 4800 | 35.77 | 35.89 | no |
+| 5310 | 34.11 | 64 | 441 (1459) | 3132 | 33.98 | 33.63 | yes |
+| 5910 | 32.34 | 62 | 441 (1458) | 3132 | 32.40 | 32.16 | yes |
+| 6210 | 31.92 | 64 | 441 (1457) | 3132 | 32.04 | 32.23 | yes |
+| 6510 | 33.01 | 84 | 441 (1463) | 3132 | 33.32 | 33.45 | yes |
+| 6810 | 33.72 | 94 | 441 (1463) | 3132 | 33.86 | 33.99 | yes |
+- Display uses the direct forecast (no rollout, labelled with its horizon); the plan estimate is published separately as `plan/*` with its own lookahead (rollout 120 s plus horizon 120 s). The plan holds missing raw values at their last value for 10 s like the engine does, the CPU input to the plan is a 30 s average, warm requires all deployed features finite, a gap over 10 s resets the engine.
+- Pump and fan rpm and duty are now deployed features: `python/experiments.py stage2` trains `x44aug` (the 40 by gain plus `fan_duty`, `fan_rpm`, `pump_duty`, `pump_rpm`) and `python/export.py` exports it and regenerates the golden file. Not yet run (no Ray cluster was running); the shipped `model_deploy.json` is still `x40aug`. The training data has the pump at 100 % except for the last hours, so the pump terms stay unidentified (`identified` stays false).
