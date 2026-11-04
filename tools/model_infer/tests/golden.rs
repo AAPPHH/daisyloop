@@ -50,3 +50,13 @@ fn matches_python_golden() {
     assert!(worst_f < 1e-9, "feature mismatch {worst_f}");
     assert!(worst_p < 1e-4, "prediction mismatch {worst_p}");
 }
+
+#[test]
+fn shipped_model_is_not_identified_and_bad_files_are_errors() {
+    let p = Predictor::load(&models("feature_spec_deploy.json"), &models("model_deploy.json")).unwrap();
+    assert!(!p.model.identified.fan && !p.model.identified.pump);
+    assert!(p.model.target_names().contains(&"water_120"));
+    let bare = models("model_deploy.json").replace("\"identified\":{\"fan\":false,\"pump\":false},", "");
+    assert!(!Predictor::load(&models("feature_spec_deploy.json"), &bare).unwrap().model.identified.fan);
+    assert!(Predictor::load("{}", &models("model_deploy.json")).is_err());
+}

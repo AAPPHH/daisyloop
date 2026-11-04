@@ -57,7 +57,7 @@ try {
     New-Item -ItemType Directory -Force (Join-Path $install 'sidecar') | Out-Null
     Copy-Item (Join-Path $newSidecar '*') (Join-Path $install 'sidecar') -Recurse -Force
     if (-not (Test-Path $configPath)) {
-        $text = "data_dir = '$base'`r`nfan_control_enabled = false`r`npump_control_enabled = false`r`ncontrol_mode_fan = 'shadow'`r`ncontrol_mode_pump = 'shadow'`r`n`r`n[control.fan]`r`nautostart = false`r`ntarget_water = 33.0`r`n`r`n[control.pump]`r`nautostart = false`r`n"
+        $text = "data_dir = '$base'`r`nwrites_enabled = false`r`n"
         [IO.File]::WriteAllText($configPath, $text, (New-Object Text.UTF8Encoding($false)))
     }
     if (-not (Select-String -Path $configPath -Pattern '^\s*data_dir\s*=' -Quiet)) { throw "$configPath has no data_dir line" }

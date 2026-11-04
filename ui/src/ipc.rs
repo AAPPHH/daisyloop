@@ -33,7 +33,7 @@ impl Framed {
 }
 
 pub enum Job {
-    Command(Command),
+    Command(Command, Sender<Result<(), String>>),
     History(u64, HistoryQuery),
 }
 
@@ -60,6 +60,10 @@ impl Link {
                         on_event(LinkEvent::Down(e.to_string()));
                         match rx.recv_timeout(POLL) {
                             Err(RecvTimeoutError::Disconnected) => return,
+                            Ok(Job::Command(_, reply)) => {
+                                let _ = reply.send(Err("Daemon nicht erreichbar".into()));
+                                continue;
+                            }
                             _ => continue,
                         }
                     }
@@ -74,7 +78,7 @@ impl Link {
                     };
                     next_id += 1;
                     let body = match &job {
-                        Some(Job::Command(c)) => RequestBody::Command(c.clone()),
+                        Some(Job::Command(c, _)) => RequestBody::Command(c.clone()),
                         Some(Job::History(_, q)) => RequestBody::History(q.clone()),
                         None => RequestBody::Snapshot,
                     };
@@ -89,8 +93,14 @@ impl Link {
                             on_event(LinkEvent::Snapshot(s));
                         }
                         (ResponseBody::History(h), Some(Job::History(tag, _))) => on_event(LinkEvent::History(tag, h)),
+                        (ResponseBody::Error { message }, Some(Job::Command(_, reply))) => {
+                            let _ = reply.send(Err(message));
+                        }
                         (ResponseBody::Error { message }, _) => on_event(LinkEvent::Error(message)),
-                        (ResponseBody::Ack, Some(Job::Command(_))) => due = Instant::now(),
+                        (ResponseBody::Ack, Some(Job::Command(_, reply))) => {
+                            let _ = reply.send(Ok(()));
+                            due = Instant::now();
+                        }
                         _ => {}
                     }
                 })();
@@ -106,8 +116,10 @@ impl Link {
         Self { jobs }
     }
 
-    pub fn command(&self, c: Command) {
-        let _ = self.jobs.send(Job::Command(c));
+    pub fn command(&self, c: Command) -> Result<(), String> {
+        let (tx, rx) = channel();
+        self.jobs.send(Job::Command(c, tx)).map_err(|_| "Verbindung beendet".to_string())?;
+        rx.recv_timeout(Duration::from_secs(8)).map_err(|_| "Keine Antwort vom Daemon".to_string())?
     }
 
     pub fn history(&self, tag: u64, q: HistoryQuery) {

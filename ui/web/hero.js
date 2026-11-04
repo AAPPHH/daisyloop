@@ -1,6 +1,5 @@
-import { $, Tween, heat, heatRGB, norm, WATER, COMPONENT, clamp, num, drag, frac, motion, fmt } from './ui.js';
-import { S, KEYS, value, trend, send, alarmed } from './state.js';
-import { editPid, effectivePid } from './controls.js';
+import { $, Tween, heat, heatRGB, norm, WATER, COMPONENT, clamp, num, motion, fmt, ageText, h } from './ui.js';
+import { S, KEYS, value, trend, isStale, ageMs } from './state.js';
 
 const TAU = Math.PI * 2;
 const smooth = (a, b, x) => {
@@ -23,42 +22,15 @@ export class Hero {
       pumpDuty: new Tween($('#pump-duty'), 0),
       fanRpm: new Tween($('#fan-rpm'), 0),
       fanDuty: new Tween($('#fan-duty'), 0),
+      pumpTarget: new Tween($('#pump-target'), 0),
+      fanTarget: new Tween($('#fan-target'), 0),
     };
     this.m = { water: 30, cpuP: 0, gpuP: 0, pumpRpm: 0, fanRpm: 0 };
     this.sm = { ...this.m };
     this.phase = 0;
     this.pumpAng = 0;
     this.fanAng = 0;
-    this.setpoint = null;
-    this.setupSetpoint();
     new ResizeObserver(() => this.layout()).observe(this.stage);
-  }
-
-  setupSetpoint() {
-    const track = $('#hero-track');
-    const knob = $('#hero-knob');
-    const move = (ev) => {
-      const ctl = S.ctl.get(KEYS.fan);
-      if (!ctl) return;
-      const v = Math.round((WATER[0] + frac(track, ev) * (WATER[1] - WATER[0])) * 2) / 2;
-      this.setpoint = v;
-      this.showSetpoint(v);
-      editPid(ctl.id, { setpoint: v });
-    };
-    drag(track, move);
-    knob.addEventListener('keydown', (e) => {
-      const ctl = S.ctl.get(KEYS.fan);
-      if (!ctl || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
-      const v = clamp((this.setpoint ?? ctl.pid.setpoint) + (e.key === 'ArrowRight' ? 0.5 : -0.5), WATER[0], WATER[1]);
-      this.setpoint = v;
-      this.showSetpoint(v);
-      editPid(ctl.id, { setpoint: v });
-    });
-  }
-
-  showSetpoint(v) {
-    $('#hero-knob').style.left = norm(v, WATER) * 100 + '%';
-    $('#hero-set-v').textContent = num(v, 1) + ' °C';
   }
 
   layout() {
@@ -134,9 +106,12 @@ export class Hero {
     set('gpuP', value(KEYS.gpuPower));
     const pump = ctl(KEYS.pump), fan = ctl(KEYS.fan);
     set('pumpRpm', pump ? value(pump.rpm_channel) : null);
-    set('pumpDuty', pump ? pump.state.output : null);
+    set('pumpDuty', pump ? value(pump.duty_channel) : null);
     set('fanRpm', fan ? value(fan.rpm_channel) : null);
-    set('fanDuty', fan ? fan.state.output : null);
+    set('fanDuty', fan ? value(fan.duty_channel) : null);
+    set('pumpTarget', pump?.target_rpm ?? null);
+    set('fanTarget', fan?.target_rpm ?? null);
+    for (const [id, c] of [['pump', pump], ['fan', fan]]) $('#n-' + id).classList.toggle('shadow', c?.mode === 'shadow');
     this.m = { water: water ?? this.m.water, cpuP: v(KEYS.cpuPower) ?? this.m.cpuP, gpuP: v(KEYS.gpuPower) ?? this.m.gpuP, pumpRpm: rpm(pump) ?? 0, fanRpm: rpm(fan) ?? 0 };
     const root = document.documentElement.style;
     if (water != null) root.setProperty('--heat', heat(norm(Math.round(water * 2) / 2, WATER)));
@@ -147,28 +122,45 @@ export class Hero {
     nodeHeat('#n-gpu', gpuT);
     const tr = trend(KEYS.water, 60);
     $('#water-trend').innerHTML = !live ? '&nbsp;' : tr == null ? '&nbsp;' : `<b>${tr >= 0 ? '+' : '−'}${num(Math.abs(tr), 1)} K</b> pro Minute`;
-    if (water != null) {
-      const n = $('#hero-now');
-      n.style.left = clamp(norm(water, WATER), 0, 1) * 100 + '%';
-      n.dataset.v = 'Ist ' + num(water, 1);
-    }
-    if (fan) {
-      this.setpoint = effectivePid(fan).setpoint;
-      this.showSetpoint(this.setpoint);
-    }
+    this.agePills();
+    this.forecast(live);
     const pill = $('#alarm-pill');
     const alarms = S.snap?.alarms ?? [];
     if (live && alarms.length) {
-      const a = alarms[0];
-      const c = S.ch.get(a.channel);
       pill.className = 'pill bad';
-      pill.textContent = `${alarms.length} Alarm${alarms.length > 1 ? 'e' : ''}: ${c?.label ?? a.channel} ${fmt(a.value, c?.unit)} ${a.side === 'high' ? '>' : '<'} ${fmt(a.limit, c?.unit)}`;
+      pill.textContent = alarms.length > 1 ? `${alarms.length} Alarme: ${alarms[0].message} …` : alarms[0].message;
     } else {
       pill.className = 'pill ' + (live ? 'ok' : '');
       pill.textContent = live ? 'Alle Werte im Rahmen' : 'Keine aktuellen Werte';
     }
     document.body.classList.toggle('alarm', live && alarms.length > 0);
     if (!this.animating()) this.draw();
+  }
+
+  agePills() {
+    for (const [node, ids] of [['cpu', [KEYS.cpuTemp, KEYS.cpuPower]], ['gpu', [KEYS.gpuTemp, KEYS.gpuPower]], ['pump', [S.ctl.get(KEYS.pump)?.rpm_channel]], ['fan', [S.ctl.get(KEYS.fan)?.rpm_channel]]]) {
+      const stale = ids.filter(Boolean).some(isStale);
+      const el = $('#n-' + node);
+      el.classList.toggle('stale', stale);
+      $('#' + node + '-age').textContent = stale ? `veraltet, seit ${ageText(Math.max(...ids.filter(Boolean).map(ageMs)) / 1000)}` : '';
+    }
+    $('.hero-copy').classList.toggle('stale', isStale(KEYS.water));
+  }
+
+  forecast(live) {
+    const p = S.snap?.predicted;
+    const el = $('#hero-pred');
+    el.classList.toggle('off', !p || !live);
+    const m = S.snap?.model;
+    $('#pred-title').textContent = p ? `Prognose in ${Math.round(p.horizon_s / 60)} min` : 'Prognose';
+    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : !m.warm ? `Modell wärmt auf (${Math.ceil(m.warmup_left_s / 60)} min)` : p ? (p.feasible ? 'nur berechnet, innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewählt') : '';
+    for (const [k, lim] of [['water', 'water_limit'], ['cpu', 'cpu_limit'], ['gpu', 'gpu_limit']]) {
+      $('#pred-' + k).textContent = p?.[k] != null ? num(p[k], 1) + ' °C' : '–';
+      $('#pred-' + k).classList.toggle('over', p?.[k] != null && p[k] > p[lim]);
+      $('#pred-' + k + '-lim').textContent = p ? `Grenze ${num(p[lim], 0)}` : '';
+    }
+    const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
+    $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));
   }
 
   animating() {

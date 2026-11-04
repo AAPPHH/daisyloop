@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 struct RawNode {
@@ -17,6 +18,7 @@ struct RawSpec {
     nodes: Vec<RawNode>,
 }
 
+#[derive(Clone)]
 enum Op {
     Raw { ffill: i64, zero_nan: bool },
     Lin { coef: Vec<f64>, off: f64 },
@@ -47,12 +49,14 @@ struct State {
     init: bool,
 }
 
+#[derive(Clone)]
 struct Node {
     op: Op,
     ins: Vec<usize>,
     raw_col: usize,
 }
 
+#[derive(Clone)]
 pub struct Engine {
     nodes: Vec<Node>,
     state: Vec<State>,
@@ -253,21 +257,34 @@ struct Target {
     trees: Vec<Tree>,
 }
 
+#[derive(Deserialize, Clone, Copy, Default, Debug)]
+pub struct Identified {
+    pub fan: bool,
+    pub pump: bool,
+}
+
 #[derive(Deserialize)]
 struct RawModel {
     features: Vec<String>,
+    #[serde(default)]
+    identified: Identified,
     targets: std::collections::BTreeMap<String, Target>,
 }
 
 pub struct Model {
     pub features: Vec<String>,
+    pub identified: Identified,
     targets: Vec<(String, Target)>,
 }
 
 impl Model {
     pub fn from_json(text: &str) -> Model {
         let m: RawModel = serde_json::from_str(text).unwrap();
-        Model { features: m.features, targets: m.targets.into_iter().collect() }
+        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect() }
+    }
+
+    pub fn target_names(&self) -> Vec<&str> {
+        self.targets.iter().map(|t| t.0.as_str()).collect()
     }
 
     pub fn predict(&self, x: &[f64]) -> Vec<(String, f64)> {
@@ -291,24 +308,33 @@ impl Model {
     }
 }
 
+#[derive(Clone)]
 pub struct Predictor {
     pub engine: Engine,
-    pub model: Model,
+    pub model: Arc<Model>,
     order: Vec<usize>,
 }
 
 impl Predictor {
     pub fn new(spec_json: &str, model_json: &str) -> Predictor {
         let engine = Engine::from_json(spec_json);
-        let model = Model::from_json(model_json);
+        let model = Arc::new(Model::from_json(model_json));
         let pos: HashMap<&String, usize> = engine.outputs.iter().enumerate().map(|(i, s)| (s, i)).collect();
         let order = model.features.iter().map(|f| pos[f]).collect();
         Predictor { engine, model, order }
     }
 
-    pub fn step(&mut self, raw: &[f64], k: i64) -> (Vec<f64>, Vec<(String, f64)>) {
+    pub fn load(spec_json: &str, model_json: &str) -> Result<Predictor, String> {
+        std::panic::catch_unwind(|| Predictor::new(spec_json, model_json)).map_err(|_| "feature spec or model file is malformed".to_string())
+    }
+
+    pub fn features(&mut self, raw: &[f64], k: i64) -> Vec<f64> {
         let out = self.engine.step(raw, k);
-        let x: Vec<f64> = self.order.iter().map(|&i| out[i]).collect();
+        self.order.iter().map(|&i| out[i]).collect()
+    }
+
+    pub fn step(&mut self, raw: &[f64], k: i64) -> (Vec<f64>, Vec<(String, f64)>) {
+        let x = self.features(raw, k);
         let p = self.model.predict(&x);
         (x, p)
     }

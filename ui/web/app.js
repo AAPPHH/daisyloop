@@ -1,7 +1,7 @@
-import { $, motion, stepTweens, ageText } from './ui.js';
+import { $, h, motion, stepTweens, ageText } from './ui.js';
 import { S, ingest, age, STALE_AFTER } from './state.js';
 import { Hero } from './hero.js';
-import { updateControls } from './controls.js';
+import { updateControls, initControls, toast } from './controls.js';
 import { History } from './history.js';
 import { Sensors } from './sensors.js';
 
@@ -52,10 +52,18 @@ function setLive(live) {
   }
 }
 
+function alarmBar() {
+  const bar = $('#alarm-bar');
+  const alarms = S.snap?.alarms ?? [];
+  bar.hidden = !alarms.length;
+  bar.replaceChildren(...alarms.map((a) => h('div', { class: 'al ' + a.kind }, h('b', {}, a.message), h('span', {}, ageText((Date.now() - a.since_ms) / 1000)))));
+}
+
 function render() {
   if (!S.visible) return;
   setLive(true);
   hero.update(true);
+  alarmBar();
   updateControls();
   sensors.render();
   history.chips();
@@ -85,9 +93,10 @@ tauri.event.listen('link-down', (e) => {
   S.err = e.payload;
   setLive(false);
 });
-tauri.event.listen('link-error', (e) => (S.err = e.payload));
+tauri.event.listen('link-error', (e) => ((S.err = e.payload), toast(String(e.payload))));
 tauri.event.listen('visibility', (e) => setVisible(e.payload));
-document.addEventListener('visibilitychange', () => document.hidden && setVisible(false));
+document.addEventListener('visibilitychange', () => setVisible(!document.hidden));
+initControls();
 
 setInterval(() => {
   if (!S.visible) return;
