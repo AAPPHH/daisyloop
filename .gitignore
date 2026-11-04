@@ -5,3 +5,4 @@ __pycache__/
 /sidecar/obj
 /sidecar/publish
 .claude/
+/tools/d5_probe/target
