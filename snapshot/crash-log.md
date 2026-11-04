@@ -30,6 +30,8 @@ Change by the user in BIOS, booted 2026-11-04 16:37. Hypothesis: deep C-states c
 
 Fixed before the result: supported if there is no event 41 during 72 h of normal use including load (about 2 % chance at the baseline rate). Falsified as the sole cause by any event 41 in that window. Each new event gets a row here with the collector's last data.
 
+Result: failed as the sole cause. Event 41 logged at the 2026-11-04 18:18 boot, event 6008 time 17:32:52, 55 min after the C6 boot. No power button timestamp, bugcheck 0. Last data 17:32:47: CPU ~58 W (144 W peak in 4 min), core max ~67 C (82 C peak), load ~22 %, GPU ~116 W and 75 % (training), water ~36 C, pump 100 %. Not thermal: this is the coolest, lowest-CPU outage with GPU training on. Whether the user's BIOS change took effect is taken from the user's report; not verified from software.
+
 ## Other suspects, unchanged so far
 
 - RAM: CUDIMM per user, 8200 MT/s, 1.40 V, 2 x 24 GB (Win32_PhysicalMemory). Normal for CUDIMM XMP, but above the CPU's official DDR5-6400 as far as known, unverified here. Next test if C6 fails: XMP off or 6400.
