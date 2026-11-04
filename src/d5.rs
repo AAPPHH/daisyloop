@@ -2,6 +2,7 @@ use crate::control::{ChannelConfig, ChannelOverride, ControlConfig};
 use crate::protocol::ControlKind;
 use crate::Config;
 use hidapi::{HidApi, HidDevice};
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub struct Crc16Usb;
@@ -62,7 +63,6 @@ impl D5Control for HidControl {
         if report.len() != Guard::LEN || report[0] != Guard::ID {
             return Err("refused: only the 809 byte report 0x03 may be sent".into());
         }
-        std::thread::sleep(Duration::from_millis(200));
         self.dev.send_feature_report(report).map_err(|e| e.to_string())
     }
     fn settle(&mut self, ms: u64) {
@@ -79,11 +79,12 @@ pub struct Spec {
     pub kind: ControlKind,
     pub name: &'static str,
     pub base: usize,
+    pub hard_min: f64,
 }
 
 impl Spec {
-    pub const FAN: Spec = Spec { kind: ControlKind::Fan, name: "fan", base: 0x41 };
-    pub const PUMP: Spec = Spec { kind: ControlKind::Pump, name: "pump", base: 0x96 };
+    pub const FAN: Spec = Spec { kind: ControlKind::Fan, name: "fan", base: 0x41, hard_min: 20.0 };
+    pub const PUMP: Spec = Spec { kind: ControlKind::Pump, name: "pump", base: 0x96, hard_min: 30.0 };
     pub const ALL: [Spec; 2] = [Spec::FAN, Spec::PUMP];
     pub fn of(kind: ControlKind) -> Spec {
         Spec::ALL[Spec::ALL.iter().position(|s| s.kind == kind).unwrap()]
@@ -94,6 +95,9 @@ impl Spec {
     pub fn preset(&self) -> usize {
         self.base + 1
     }
+    pub fn setpoint(&self) -> usize {
+        self.base + 5
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,9 +106,44 @@ pub enum Setting {
     Duty(f64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reading {
+    pub kind: ControlKind,
+    pub mode: u8,
+    pub setpoint: f64,
+}
+
 pub trait Actuator {
     fn apply(&mut self, set: &[(ControlKind, Setting)]) -> Result<(), String>;
-    fn recover(&mut self) -> Result<Vec<ControlKind>, String>;
+    fn modes(&mut self) -> Result<Vec<Reading>, String>;
+}
+
+pub struct Ownership {
+    path: PathBuf,
+}
+
+impl Ownership {
+    pub fn new(dir: PathBuf) -> Ownership {
+        Ownership { path: dir.join("d5-owned") }
+    }
+    pub fn read(&self) -> Vec<ControlKind> {
+        let text = std::fs::read_to_string(&self.path).unwrap_or_default();
+        Spec::ALL.iter().filter(|s| text.split_whitespace().any(|w| w == s.name)).map(|s| s.kind).collect()
+    }
+    pub fn store(&self, kinds: &[ControlKind]) -> Result<(), String> {
+        if kinds.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+                _ => Ok(()),
+            };
+        }
+        let names: Vec<&str> = Spec::ALL.iter().filter(|s| kinds.contains(&s.kind)).map(|s| s.name).collect();
+        if let Some(d) = self.path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        std::fs::write(&self.path, names.join("
+")).map_err(|e| e.to_string())
+    }
 }
 
 pub struct Guard {
@@ -116,6 +155,7 @@ impl Guard {
     pub const ID: u8 = 3;
     pub const CRC: usize = 0x327;
     pub const READBACK_MS: u64 = 500;
+    pub const PAUSE_MS: u64 = 200;
 
     pub fn new(dev: Box<dyn D5Control>) -> Guard {
         Guard { dev }
@@ -139,8 +179,12 @@ impl Guard {
             allowed.push(spec.mode());
             if matches!(setting, Setting::Duty(_)) {
                 allowed.extend([spec.preset(), spec.preset() + 1]);
-                if be16(target, spec.preset()) > 10000 {
+                let preset = be16(target, spec.preset());
+                if preset > 10000 {
                     return Err(format!("{} preset above 100 %", spec.name));
+                }
+                if (preset as f64) < spec.hard_min * 100.0 {
+                    return Err(format!("{} preset below the hard minimum of {:.0} %", spec.name, spec.hard_min));
                 }
             }
             if target[spec.mode()] > 1 {
@@ -157,17 +201,27 @@ impl Guard {
         Self::validate(&r)?;
         Ok(r)
     }
-    pub fn modes(&mut self) -> Result<Vec<(Spec, u8)>, String> {
+    pub fn modes(&mut self) -> Result<Vec<Reading>, String> {
         let r = self.fresh()?;
-        Ok(Spec::ALL.iter().map(|s| (*s, r[s.mode()])).collect())
+        Ok(Spec::ALL.iter().map(|s| Reading { kind: s.kind, mode: r[s.mode()], setpoint: be16(&r, s.setpoint()) as f64 / 100.0 }).collect())
     }
-    pub fn write(&mut self, edits: &[(Spec, Setting)]) -> Result<bool, String> {
+    pub fn write(&mut self, wanted: &[(Spec, Setting)]) -> Result<bool, String> {
+        if wanted.iter().any(|(_, s)| matches!(s, Setting::Duty(d) if !d.is_finite())) {
+            return Err("duty is not a number".into());
+        }
         let fresh = self.fresh()?;
         let mut target = fresh.clone();
-        for (spec, setting) in edits {
+        let mut edits = Vec::new();
+        for (spec, setting) in wanted {
             if fresh[spec.mode()] > 1 {
-                return Err(format!("{} is in mode {}, refusing to touch it", spec.name, fresh[spec.mode()]));
+                if matches!(setting, Setting::Duty(_)) {
+                    return Err(format!("{} is in mode {}, refusing to touch it", spec.name, fresh[spec.mode()]));
+                }
+                continue;
             }
+            edits.push((*spec, *setting));
+        }
+        for (spec, setting) in &edits {
             match setting {
                 Setting::Firmware => target[spec.mode()] = 1,
                 Setting::Duty(duty) => {
@@ -180,7 +234,11 @@ impl Guard {
         if target == fresh {
             return Ok(false);
         }
-        Self::check_diff(&fresh, &target, edits)?;
+        Self::check_diff(&fresh, &target, &edits)?;
+        self.dev.settle(Self::PAUSE_MS);
+        if self.fresh()? != fresh {
+            return Err("device report changed while the write was prepared, nothing sent".into());
+        }
         self.dev.set(&target)?;
         self.dev.settle(Self::READBACK_MS);
         if self.fresh()? != target {
@@ -200,6 +258,7 @@ pub struct D5Actuator {
 
 impl D5Actuator {
     pub fn new(factory: Factory, cfg: &ControlConfig) -> D5Actuator {
+        let cfg = if cfg.validate().is_ok() { cfg.clone() } else { ControlConfig::default() };
         let bound = |k, o: &ChannelOverride| ChannelConfig::resolve(k, o).unwrap_or_else(|_| ChannelConfig::defaults(k));
         let (f, p) = (bound(ControlKind::Fan, &cfg.fan), bound(ControlKind::Pump, &cfg.pump));
         D5Actuator { factory, guard: None, floors: [(f.floor_duty, f.max_duty), (p.floor_duty, p.max_duty)] }
@@ -215,7 +274,7 @@ impl D5Actuator {
             .map(|(k, s)| {
                 let spec = Spec::of(*k);
                 let (lo, hi) = self.floors[Spec::ALL.iter().position(|x| x.kind == *k).unwrap()];
-                (spec, if let Setting::Duty(d) = s { Setting::Duty(d.clamp(lo, hi)) } else { *s })
+                (spec, if let Setting::Duty(d) = s { Setting::Duty(d.clamp(lo.max(spec.hard_min), hi)) } else { *s })
             })
             .collect()
     }
@@ -230,19 +289,11 @@ impl Actuator for D5Actuator {
         }
         r.map(|_| ())
     }
-    fn recover(&mut self) -> Result<Vec<ControlKind>, String> {
-        let modes = self.guard().and_then(|g| g.modes());
-        let stuck: Vec<ControlKind> = match modes {
-            Ok(m) => m.iter().filter(|(_, b)| *b == 0).map(|(s, _)| s.kind).collect(),
-            Err(e) => {
-                self.guard = None;
-                return Err(e);
-            }
-        };
-        if !stuck.is_empty() {
-            let set: Vec<(ControlKind, Setting)> = stuck.iter().map(|k| (*k, Setting::Firmware)).collect();
-            self.apply(&set)?;
+    fn modes(&mut self) -> Result<Vec<Reading>, String> {
+        let r = self.guard().and_then(|g| g.modes());
+        if r.is_err() {
+            self.guard = None;
         }
-        Ok(stuck)
+        r
     }
 }

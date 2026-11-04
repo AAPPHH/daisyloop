@@ -74,7 +74,7 @@ impl Config {
     fn dev_data_dir(env_dir: Option<PathBuf>, local: Option<PathBuf>) -> PathBuf {
         env_dir.unwrap_or_else(|| local.unwrap_or_else(std::env::temp_dir).join("daisyloop"))
     }
-    const ADMIN_KEYS: [&'static str; 8] = ["data_dir", "sidecar", "writes_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
+    const ADMIN_KEYS: [&'static str; 9] = ["interval_secs", "data_dir", "sidecar", "writes_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
     pub fn program_dir() -> PathBuf {
         std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")).join("daisyloop")
     }
@@ -309,6 +309,8 @@ impl Collector {
                 }
                 Some(t) if t.elapsed() > Duration::from_secs(self.cfg.stall_secs) => {
                     log::error!("{} poll hung, exiting", w.name);
+                    let now = self.start.elapsed().as_millis() as i64;
+                    self.control.shutdown(now);
                     std::process::exit(2);
                 }
                 Some(_) => {}
@@ -399,6 +401,8 @@ impl Collector {
             let _ = std::fs::write(&heartbeat, now_micros().to_string());
             if !self.committer.alive() {
                 log::error!("commit thread died, exiting");
+                let now = self.mono();
+                self.control.shutdown(now);
                 std::process::exit(4);
             }
             if stop_file.exists() {

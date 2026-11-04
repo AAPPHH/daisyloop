@@ -53,6 +53,8 @@ pub enum AlarmKind {
     FanStopped,
     Stale,
     Fallback,
+    Foreign,
+    Budget,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

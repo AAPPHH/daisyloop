@@ -14,6 +14,8 @@ struct World {
     force: [Option<f64>; 2],
     opens: u32,
     now: i64,
+    ignore_sets: bool,
+    on_settle: Option<fn(&mut Vec<u8>)>,
 }
 
 #[derive(Clone)]
@@ -28,7 +30,7 @@ impl Sim {
             r[s.preset()..s.preset() + 2].copy_from_slice(&10000u16.to_be_bytes());
         }
         Crc16Usb::seal(&mut r);
-        Sim(Rc::new(RefCell::new(World { report: r, sets: vec![], fail_get: false, fail_sets: 0, corrupt_readback: false, freeze_rpm: false, force: [None, None], opens: 0, now: 0 })))
+        Sim(Rc::new(RefCell::new(World { report: r, sets: vec![], fail_get: false, fail_sets: 0, corrupt_readback: false, freeze_rpm: false, force: [None, None], opens: 0, now: 0, ignore_sets: false, on_settle: None })))
     }
     fn report(&self) -> Vec<u8> {
         self.0.borrow().report.clone()
@@ -60,6 +62,13 @@ impl D5Control for Sim {
         }
         Ok(w.report.clone())
     }
+    fn settle(&mut self, _: u64) {
+        let mut w = self.0.borrow_mut();
+        if let Some(f) = w.on_settle.take() {
+            f(&mut w.report);
+            Crc16Usb::seal(&mut w.report);
+        }
+    }
     fn set(&mut self, report: &[u8]) -> Result<(), String> {
         let mut w = self.0.borrow_mut();
         if w.fail_sets > 0 {
@@ -68,6 +77,9 @@ impl D5Control for Sim {
         }
         let now = w.now;
         w.sets.push((now, report.to_vec()));
+        if w.ignore_sets {
+            return Ok(());
+        }
         w.report = report.to_vec();
         if w.corrupt_readback {
             w.report[0x10] ^= 1;
@@ -79,8 +91,8 @@ impl D5Control for Sim {
 
 struct Fake {
     ident: (bool, bool),
-    warm: i64,
-    heat: f64,
+    warm: Rc<Cell<i64>>,
+    heat: Rc<Cell<f64>>,
     fail: Rc<Cell<bool>>,
 }
 
@@ -90,14 +102,14 @@ impl Model for Fake {
         self.ident
     }
     fn warm_secs(&self) -> i64 {
-        self.warm
+        self.warm.get()
     }
     fn forecast(&self, hold: &HashMap<String, f64>, _: u32, _: u32) -> Result<crate::model::Forecast, String> {
         if self.fail.get() {
             return Err("boom".into());
         }
-        let (f, p) = (hold["d5next/fan/rpm"], hold["d5next/pump/rpm"]);
-        Ok(crate::model::Forecast { water: self.heat - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0, cpu: 0.0, gpu: 0.0 })
+        let (f, p) = (hold.get("d5next/fan/rpm").copied().unwrap_or(1470.0), hold.get("d5next/pump/rpm").copied().unwrap_or(4800.0));
+        Ok(crate::model::Forecast { water: self.heat.get() - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0, cpu: 0.0, gpu: 0.0 })
     }
 }
 
@@ -109,10 +121,15 @@ struct Rig {
     cpu: f64,
     gpu: Option<f64>,
     model_fail: Rc<Cell<bool>>,
+    warm: Rc<Cell<i64>>,
+    heat: Rc<Cell<f64>>,
+    dir: std::path::PathBuf,
 }
 
 fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
-    let mut cfg = Config { writes_enabled: true, ..Config::default() };
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!("daisyloop-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let mut cfg = Config { writes_enabled: true, data_dir: dir, ..Config::default() };
     cfg.control.decision_secs = 30.0;
     tweak(&mut cfg);
     cfg
@@ -123,16 +140,24 @@ impl Rig {
         Rig::with_sim(Sim::new(), ident, heat, tweak)
     }
     fn with_sim(sim: Sim, ident: (bool, bool), heat: f64, tweak: impl Fn(&mut Config)) -> Rig {
+        Rig::with_marker(sim, &[], ident, heat, tweak)
+    }
+    fn with_marker(sim: Sim, owned: &[ControlKind], ident: (bool, bool), heat: f64, tweak: impl Fn(&mut Config)) -> Rig {
         let cfg = base_cfg(tweak);
+        if !owned.is_empty() {
+            Ownership::new(cfg.state_dir()).store(owned).unwrap();
+        }
         let s = sim.clone();
         let factory: Factory = Box::new(move || {
             s.0.borrow_mut().opens += 1;
             Ok(Box::new(s.clone()) as Box<dyn D5Control>)
         });
         let model_fail = Rc::new(Cell::new(false));
-        let model = Fake { ident, warm: 5000, heat, fail: model_fail.clone() };
+        let warm = Rc::new(Cell::new(5000));
+        let heat = Rc::new(Cell::new(heat));
+        let model = Fake { ident, warm: warm.clone(), heat: heat.clone(), fail: model_fail.clone() };
         let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
-        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail }
+        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, dir: cfg.state_dir() }
     }
     fn rows(&self) -> Vec<Row> {
         let r = self.sim.report();
@@ -172,6 +197,9 @@ impl Rig {
     }
     fn ctl(&self, id: &str) -> PControl {
         self.status().controls.into_iter().find(|c| c.id == id).unwrap()
+    }
+    fn marker(&self) -> Vec<ControlKind> {
+        Ownership::new(self.dir.clone()).read()
     }
     fn alarm(&self, k: AlarmKind) -> bool {
         self.status().alarms.iter().any(|a| a.kind == k)
@@ -306,7 +334,7 @@ fn active_is_refused_with_a_reason() {
     assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).unwrap_err().contains("GPU"));
     assert_eq!(ok.sim.sets(), 0);
     let mut cold = Rig::new((true, true), 6.0, |_| {});
-    cold.c.model = Some(Box::new(Fake { ident: (true, true), warm: 60, heat: 6.0, fail: Rc::new(Cell::new(false)) }));
+    cold.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(60)), heat: Rc::new(Cell::new(6.0)), fail: Rc::new(Cell::new(false)) }));
     cold.run(5);
     assert!(cold.c.set_mode("d5.fan", Mode::Active, true, cold.now).unwrap_err().contains("wärmt"));
     let mut none = Rig::new((true, true), 6.0, |_| {});
@@ -343,11 +371,12 @@ fn target_moves_down_slowly_and_up_fast() {
     rig.run(5);
     rig.active("d5.fan");
     rig.run(35);
-    let high = rig.ctl("d5.fan").target_rpm.unwrap();
-    rig.c.model = Some(Box::new(Fake { ident: (true, true), warm: 5000, heat: 0.0, fail: rig.model_fail.clone() }));
+    let (high, high_cmd) = (rig.ctl("d5.fan").target_rpm.unwrap(), rig.ctl("d5.fan").commanded_duty.unwrap() * 14.7);
+    rig.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(5000)), heat: Rc::new(Cell::new(0.0)), fail: rig.model_fail.clone() }));
     rig.run(31);
-    let low = rig.ctl("d5.fan").target_rpm.unwrap();
-    assert!(high - low <= 150.0 + 1e-6 && low < high);
+    let (low, low_cmd) = (rig.ctl("d5.fan").target_rpm.unwrap(), rig.ctl("d5.fan").commanded_duty.unwrap() * 14.7);
+    assert!(high - low > 150.0, "published target is the plan, not the rate limited step: {high} {low}");
+    assert!(high_cmd - low_cmd <= 150.0 + 1e-6 && low_cmd < high_cmd, "{high_cmd} {low_cmd}");
 }
 
 #[test]
@@ -465,7 +494,7 @@ fn failed_release_is_retried_with_a_reopened_handle() {
     rig.run(12);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
     assert!(rig.ctl("d5.fan").note.unwrap().contains("Rückfall fehlgeschlagen"));
-    rig.run(8);
+    rig.run(12);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
     assert!(rig.sim.0.borrow().opens >= opens + 2);
     assert!(!rig.ctl("d5.fan").note.unwrap_or_default().contains("Rückfall"));
@@ -486,17 +515,17 @@ fn write_failure_falls_back_instead_of_retrying_the_duty() {
 }
 
 #[test]
-fn start_releases_a_channel_left_in_duty_mode_only_with_writes_enabled() {
+fn start_releases_only_a_channel_marked_as_owned_and_only_with_writes_enabled() {
     let sim = Sim::new();
     sim.set_raw(|r| r[Spec::FAN.mode()] = 0);
-    let mut rig = Rig::with_sim(sim.clone(), (false, false), 3.0, |_| {});
+    let mut rig = Rig::with_marker(sim.clone(), &[ControlKind::Fan], (false, false), 3.0, |_| {});
     rig.run(2);
-    assert_eq!(sim.mode(Spec::FAN), 1);
+    assert_eq!((sim.mode(Spec::FAN), rig.marker()), (1, vec![]));
     let sim = Sim::new();
     sim.set_raw(|r| r[Spec::FAN.mode()] = 0);
-    let mut ro = Rig::with_sim(sim.clone(), (false, false), 3.0, |c| c.writes_enabled = false);
+    let mut ro = Rig::with_marker(sim.clone(), &[ControlKind::Fan], (false, false), 3.0, |c| c.writes_enabled = false);
     ro.run(2);
-    assert_eq!((sim.mode(Spec::FAN), sim.sets()), (0, 0));
+    assert_eq!((sim.mode(Spec::FAN), sim.sets(), ro.marker()), (0, 0, vec![ControlKind::Fan]));
 }
 
 #[test]
@@ -609,3 +638,6 @@ fn alarms_cover_pump_fan_and_stale_sources() {
     let a = rig.status().alarms;
     assert!(a.len() == 1 && a[0].kind == AlarmKind::Stale && a[0].channel == "nvml/0/temp");
 }
+
+#[path = "safety_tests.rs"]
+mod safety;
