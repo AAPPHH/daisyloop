@@ -53,6 +53,7 @@ try {
     if (Test-Path $exe) { Copy-Item $exe $prev -Force }
     Copy-Item $newExe $exe -Force
     $swappedExe = $true
+    Get-ChildItem $base -Filter 'committed-*' -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Copy-Item (Join-Path $PSScriptRoot 'watchdog.ps1') (Join-Path $install 'watchdog.ps1') -Force
     New-Item -ItemType Directory -Force (Join-Path $install 'sidecar') | Out-Null
     Copy-Item (Join-Path $newSidecar '*') (Join-Path $install 'sidecar') -Recurse -Force
@@ -103,7 +104,7 @@ try {
         if ($last -match 'unavailable') { throw "$src unavailable: $last" }
         if ($src -eq 'lhm' -and -not $last) { throw 'no LHM data from the sidecar' }
     }
-    if (-not ($fresh -match '\] committed \d+ telemetry')) { throw 'no commit by the new collector' }
+    if (-not ($fresh -match '\] committed [1-9]\d* telemetry')) { throw 'no commit by the new collector' }
     $cutover = $true
     Unregister-ScheduledTask -TaskName 'daisyloop' -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName 'LibreHardwareMonitor' -Confirm:$false -ErrorAction SilentlyContinue
