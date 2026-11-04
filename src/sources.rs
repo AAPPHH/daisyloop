@@ -293,16 +293,3 @@ mod tests {
         assert_eq!((rows[1].kind.as_str(), rows[1].role.as_str()), ("temperature", "state"));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sidecar_line() {
-        let rows = Lhm::parse(r#"{"seq":1,"sensors":[{"id":"/intelcpu/0/temperature/0","hw":"CPU","name":"Core","type":"Temperature","unit":"°C","value":41.5},{"id":"/x/fan/0","hw":"B","name":"F","type":"Fan","unit":"RPM","value":700}]}"#).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].kind.as_str(), rows[0].role.as_str(), rows[0].label.as_str()), ("temperature", "state", "CPU Core"));
-        assert_eq!(rows[1].kind, "rpm");
-    }
-}
