@@ -18,7 +18,11 @@ Time of the unexpected shutdown per event 6008: 11-01 06:03:25, 11-02 22:11:55, 
 
 Corrections: the collector's data ended 11-03 13:12:38 with an idle PC, but the machine ran on until 03:42:45, so that is a silent collector stop by the old build for an unknown reason, 14.5 h before the crash, and there is no data for the 03:42 crash. 11-02 22:10:58 was a requested shutdown (event 1074) which then failed uncleanly at 22:11:55.
 
-No common load pattern across the outages with data, which are too few (3) to conclude much.
+Event 6008's time runs early: other_project_rl metric files were written later, at 03:43:40, 09:24:12 and 16:11:44 (reported by the other project session). So the true resets are at or after those times.
+
+Load at the resets (other project session): 03:43, 09:24 and 16:11 under full RL training (long-run profile: CPU 60 %, GPU 71 %, 106 W, 256 envs; sampled 2026-11-04 16:47..16:53), with low-priority other_tests tests possibly on top; 09:24 also had reading agents. 16:31 was 2 min after a job start, GPU 11..28 W, cause open (possibly a reset by the user). 2026-11-04 14:57 was no reset, but a process death with 0xC0000005 in a job's start phase that didn't recur on retry.
+
+So 3 of 4 outages fall in partial-load training. How much of the uptime that makes up is not computed, so this is no correlation yet. Too few outages with data to conclude much.
 
 ## Test: package C-states limited to C6
 
