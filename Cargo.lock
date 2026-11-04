@@ -658,6 +658,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "crc32fast",
  "hidapi",
  "iceberg",
  "iceberg-catalog-sql",

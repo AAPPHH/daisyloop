@@ -125,7 +125,7 @@ impl Nvidia {
         add("clock_mem", "memory clock", "clock", "MHz", d.clock_info(Clock::Memory).map_err(e)? as f64);
         add("power_limit", "power limit", "power", "W", d.power_management_limit().map_err(e)? as f64 / 1000.0);
         if let Some(last) = rows.last_mut() {
-            last.role = "aux";
+            last.role = "aux".into();
         }
         Ok(rows)
     }
