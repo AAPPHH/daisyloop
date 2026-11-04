@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod control;
 mod lake;
 mod sources;
 use lake::{Committer, Lake, Tick, Wal};
@@ -26,6 +27,9 @@ pub struct Config {
     pub d5_vid: u16,
     pub d5_pid: u16,
     pub d5_usage_page: u16,
+    pub fan_control_enabled: bool,
+    pub pump_control_enabled: bool,
+    pub control: control::ControlConfig,
 }
 
 impl Default for Config {
@@ -43,6 +47,9 @@ impl Default for Config {
             d5_vid: 0x0C70,
             d5_pid: 0xF00E,
             d5_usage_page: 0xFF00,
+            fan_control_enabled: false,
+            pump_control_enabled: false,
+            control: control::ControlConfig::default(),
         }
     }
 }
