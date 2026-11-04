@@ -103,11 +103,9 @@ impl Wal {
         Ok(sealed)
     }
 
-    pub fn read(path: &Path) -> Vec<Tick> {
+    pub fn read(path: &Path) -> Result<Vec<Tick>, String> {
         let mut buf = Vec::new();
-        if File::open(path).and_then(|mut f| f.read_to_end(&mut buf)).is_err() {
-            return Vec::new();
-        }
+        File::open(path).and_then(|mut f| f.read_to_end(&mut buf)).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut ticks = Vec::new();
         let mut at = 0;
         while at + Self::HEADER <= buf.len() {
@@ -123,7 +121,18 @@ impl Wal {
             }
             at = end;
         }
-        ticks
+        if ticks.is_empty() && !buf.is_empty() {
+            return Err(format!("{}: no readable record in {} bytes", path.display(), buf.len()));
+        }
+        Ok(ticks)
+    }
+
+    pub fn sealed_bytes(dir: &Path) -> u64 {
+        Self::sealed(dir).iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+    }
+
+    pub fn live_bytes(&self) -> u64 {
+        self.bytes
     }
 
     pub fn sealed(dir: &Path) -> Vec<PathBuf> {
@@ -356,8 +365,17 @@ impl Committer {
     }
 
     pub fn process(lake: &Lake, dir: &Path) -> bool {
+        let mut all_ok = true;
         for path in Wal::sealed(dir) {
-            let ticks = Wal::read(&path);
+            let ticks = match Wal::read(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    let bad = path.with_extension("bad");
+                    log::error!("wal unreadable, moved to {}: {e}", bad.display());
+                    let _ = std::fs::rename(&path, bad);
+                    continue;
+                }
+            };
             let started = Instant::now();
             let marker = |tag: &str| PathBuf::from(format!("{}.{tag}", path.display()));
             let mut done = |tag: &str| -> bool {
@@ -371,19 +389,19 @@ impl Committer {
             };
             match lake.commit(&ticks, &mut done) {
                 Ok((a, b)) => {
+                    let _ = std::fs::remove_file(&path);
                     for tag in ["t", "r"] {
                         let _ = std::fs::remove_file(marker(tag));
                     }
-                    let _ = std::fs::remove_file(&path);
                     log::info!("committed {a} telemetry rows, {b} raw reports in {} ms", started.elapsed().as_millis());
                 }
                 Err(e) => {
                     log::error!("commit of {} failed, kept on disk: {e}", path.display());
-                    return false;
+                    all_ok = false;
                 }
             }
         }
-        true
+        all_ok
     }
 }
 
@@ -414,7 +432,7 @@ mod tests {
         assert!(!w.rotate().unwrap());
         let sealed = Wal::sealed(&d);
         assert_eq!(sealed.len(), 1);
-        assert_eq!(Wal::read(&sealed[0]), ticks);
+        assert_eq!(Wal::read(&sealed[0]).unwrap(), ticks);
     }
 
     #[test]
@@ -428,12 +446,12 @@ mod tests {
         let p = d.join("wal.log");
         let len = std::fs::metadata(&p).unwrap().len();
         OpenOptions::new().write(true).open(&p).unwrap().set_len(len - 7).unwrap();
-        assert_eq!(Wal::read(&p), (0..9).map(tick).collect::<Vec<_>>());
+        assert_eq!(Wal::read(&p).unwrap(), (0..9).map(tick).collect::<Vec<_>>());
         let mut bytes = std::fs::read(&p).unwrap();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xff;
         std::fs::write(&p, bytes).unwrap();
-        assert!(Wal::read(&p).len() < 9);
+        assert!(Wal::read(&p).map_or(true, |t| t.len() < 9));
     }
 
     #[test]
@@ -447,8 +465,18 @@ mod tests {
         let mut again = Wal::open(&d, Duration::from_secs(10)).unwrap();
         let sealed = Wal::sealed(&d);
         assert_eq!(sealed.len(), 1);
-        assert_eq!(Wal::read(&sealed[0]).len(), 5);
+        assert_eq!(Wal::read(&sealed[0]).unwrap().len(), 5);
         again.append(&tick(9)).unwrap();
-        assert_eq!(Wal::read(&d.join("wal.log")).len(), 1);
+        assert_eq!(Wal::read(&d.join("wal.log")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unreadable_wal_is_an_error() {
+        let d = dir("unreadable");
+        assert!(Wal::read(&d.join("missing.sealed")).is_err());
+        std::fs::write(d.join("junk.sealed"), vec![0xffu8; 64]).unwrap();
+        assert!(Wal::read(&d.join("junk.sealed")).is_err());
+        std::fs::write(d.join("empty.sealed"), b"").unwrap();
+        assert!(Wal::read(&d.join("empty.sealed")).unwrap().is_empty());
     }
 }
