@@ -121,7 +121,8 @@ class LakeResilience(unittest.TestCase):
         self.assertIsNotNone(Lake.verified(data, b"")[1])
         self.assertIsNotNone(Lake.verified(data, bytes(64))[1])
         self.assertIsNotNone(Lake.verified(data, bytes(range(64)))[1])
-        self.assertIsNone(Lake.verified(data[:1920], b"")[1])
+        self.assertIsNone(Lake.verified(data[:768], b"")[1])
+        self.assertIsNotNone(Lake.verified(data[:1920], b"")[1])
 
     def test_refresh_after_fetchone_and_time_range(self):
         lake = self.lake()

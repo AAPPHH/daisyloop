@@ -615,9 +615,18 @@ impl Rotation {
                 (format!("{a} telemetry rows, {b} raw reports from {name}"), a > 0, (a + b > 0, loaded.flaw))
             }
             Some(table) => {
-                let loaded = match HotStore::read(path) {
+                let guard = PathBuf::from(format!("{}.reading", path.display()));
+                if guard.exists() {
+                    let _ = std::fs::remove_file(&guard);
+                    return self.park(path, "the previous read of this file crashed the process", "bad");
+                }
+                let _ = File::create(&guard);
+                let read = HotStore::read(path);
+                let _ = std::fs::remove_file(&guard);
+                let loaded = match read {
                     Ok(b) => b,
-                    Err(e) => return self.park(path, &e, "bad"),
+                    Err(e) if e.retry => return Err(e.msg.into()),
+                    Err(e) => return self.park(path, &e.msg, "bad"),
                 };
                 let n = self.lake.commit(table, &loaded.items, stem)?;
                 match (n, table) {
@@ -788,6 +797,17 @@ mod tests {
     fn sealed_telemetry(d: &Path, ticks: i64) -> PathBuf {
         hot_dir_with(d, ticks);
         HotStore::sealed(d).into_iter().find(|p| HotStore::table_of(p) == Some(Table::Telemetry)).unwrap()
+    }
+
+    #[test]
+    fn a_file_whose_read_crashed_the_process_is_parked_instead_of_crashing_again() {
+        let (d, rotation, tid) = rotation_in("reading-guard");
+        let sealed = sealed_telemetry(&d, 4);
+        let guard = PathBuf::from(format!("{}.reading", sealed.display()));
+        std::fs::write(&guard, b"").unwrap();
+        assert!(rotation.pass());
+        assert!(sealed.with_extension("bad").exists() && !sealed.exists() && !guard.exists());
+        assert_eq!(total_records(&rotation.lake, &tid), 0);
     }
 
     #[test]

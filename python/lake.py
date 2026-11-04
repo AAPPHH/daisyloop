@@ -36,6 +36,7 @@ MARK = struct.Struct("<QII")
 BODY = 12
 TAIL_FLOOR = 128 << 10
 TAIL_SPANS = 8
+SCHEMA_MAX = 1024
 LOG = logging.getLogger("lake")
 
 
@@ -110,7 +111,9 @@ class Lake:
     def verified(cls, data, marks):
         at, flaw, widest = cls.walk(data, marks)
         tail, limit = len(data) - at, max(TAIL_FLOOR, TAIL_SPANS * widest)
-        if flaw is None and tail > limit:
+        if flaw is None and at == 0 and tail > SCHEMA_MAX:
+            flaw = f"no valid sync mark for {tail} bytes, a healthy file marks its schema first"
+        elif flaw is None and tail > limit:
             flaw = f"unsynced tail of {tail} bytes exceeds the {limit} bytes one sync interval can write"
         return at, flaw
 

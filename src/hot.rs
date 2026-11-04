@@ -23,7 +23,31 @@ const MAX_FILE: u64 = 4 << 30;
 const SLACK_MICROS: i64 = 86_400_000_000;
 const TAIL_FLOOR: usize = 128 << 10;
 const TAIL_SPANS: usize = 8;
-const CREATE_RETRY: Duration = Duration::from_secs(30);
+const CREATE_RETRY_MIN: Duration = Duration::from_secs(1);
+const CREATE_RETRY_MAX: Duration = Duration::from_secs(30);
+const SCHEMA_MAX: usize = 1024;
+
+#[derive(Debug)]
+pub struct ReadError {
+    pub msg: String,
+    pub retry: bool,
+}
+
+impl ReadError {
+    fn bad(msg: String) -> Self {
+        ReadError { msg, retry: false }
+    }
+
+    fn io(e: &std::io::Error, msg: String) -> Self {
+        ReadError { msg, retry: e.kind() != std::io::ErrorKind::NotFound }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
 
 #[derive(Debug)]
 pub struct Loaded<T> {
@@ -214,7 +238,7 @@ pub struct HotStore {
     sync_every: Duration,
     last_sync: Instant,
     streams: Vec<Stream>,
-    blocked: HashMap<Table, Instant>,
+    blocked: HashMap<Table, (Instant, Duration)>,
 }
 
 impl HotStore {
@@ -268,7 +292,7 @@ impl HotStore {
     }
 
     fn create(&mut self, table: Table) -> Res<Option<Stream>> {
-        if self.blocked.get(&table).is_some_and(|t| t.elapsed() < CREATE_RETRY) {
+        if self.blocked.get(&table).is_some_and(|(at, wait)| at.elapsed() < *wait) {
             return Ok(None);
         }
         match Stream::create(&self.dir, table, crate::now_micros()) {
@@ -277,7 +301,8 @@ impl HotStore {
                 Ok(Some(s))
             }
             Err(e) => {
-                self.blocked.insert(table, Instant::now());
+                let wait = self.blocked.get(&table).map_or(CREATE_RETRY_MIN, |(_, w)| (*w * 2).min(CREATE_RETRY_MAX));
+                self.blocked.insert(table, (Instant::now(), wait));
                 Err(e)
             }
         }
@@ -344,6 +369,9 @@ impl HotStore {
         for mut s in self.streams.drain(..) {
             if let Err(e) = s.checkpoint() {
                 log::error!("final sync of {} failed, sealing only the verified bytes: {e}", s.path.display());
+                Self::seal(s);
+                sealed = true;
+                continue;
             }
             match std::fs::rename(&s.path, Self::with(&s.path, SEALED)) {
                 Ok(()) => sealed = true,
@@ -405,7 +433,10 @@ impl HotStore {
                     total -= size;
                     log::error!("parked files exceed the budget of {max_bytes} bytes, deleted the oldest: {} ({size} bytes)", path.display());
                 }
-                Err(e) => log::error!("parked files exceed the budget of {max_bytes} bytes, could not delete {}: {e}", path.display()),
+                Err(e) => {
+                    total = total.saturating_sub(size);
+                    log::error!("parked files exceed the budget of {max_bytes} bytes, could not delete {}, retried next time: {e}", path.display());
+                }
             }
         }
     }
@@ -420,6 +451,7 @@ impl HotStore {
         let tail = data.len() - at;
         let limit = TAIL_FLOOR.max(TAIL_SPANS * widest);
         match flaw {
+            None if at == 0 && tail > SCHEMA_MAX => (at, Some(format!("no valid sync mark for {tail} bytes, a healthy file marks its schema first"))),
             None if tail > limit => (at, Some(format!("unsynced tail of {tail} bytes exceeds the {limit} bytes one sync interval can write"))),
             f => (at, f),
         }
@@ -499,28 +531,32 @@ impl HotStore {
         Ok((batches, consumed, flaw))
     }
 
-    pub fn read(path: &Path) -> Result<Loaded<RecordBatch>, String> {
+    pub fn read(path: &Path) -> Result<Loaded<RecordBatch>, ReadError> {
         let at = |e: String| format!("{}: {e}", path.display());
-        let marks = std::fs::read(Self::sync_path(path));
-        let mut file = File::open(path).map_err(|e| at(e.to_string()))?;
+        let marks = match std::fs::read(Self::sync_path(path)) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(ReadError::io(&e, at(format!("sidecar unreadable: {e}")))),
+        };
+        let mut file = File::open(path).map_err(|e| ReadError::io(&e, at(e.to_string())))?;
         if file.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE {
-            return Err(at(format!("larger than {MAX_FILE} bytes")));
+            return Err(ReadError::bad(at(format!("larger than {MAX_FILE} bytes"))));
         }
         let mut data = Vec::new();
-        file.read_to_end(&mut data).map_err(|e| at(e.to_string()))?;
+        file.read_to_end(&mut data).map_err(|e| ReadError::io(&e, at(e.to_string())))?;
         let (verified, mut flaw) = Self::verify(&data, marks.as_deref().unwrap_or_default());
-        if marks.is_err() && !data.is_empty() {
+        if marks.is_none() && !data.is_empty() {
             flaw = Some("no sync file, nothing is verified".into());
         }
         if data.len() > verified && flaw.is_none() {
             log::warn!("{}: dropped {} unsynced tail bytes after the last verified mark", path.display(), data.len() - verified);
         }
-        let (batches, consumed, parse_flaw) = catch_unwind(AssertUnwindSafe(|| Self::parse(&data[..verified]))).map_err(|_| at("reader panicked".into()))?.map_err(at)?;
+        let (batches, consumed, parse_flaw) = catch_unwind(AssertUnwindSafe(|| Self::parse(&data[..verified]))).map_err(|_| ReadError::bad(at("reader panicked".into())))?.map_err(|e| ReadError::bad(at(e)))?;
         if flaw.is_none() && (consumed != verified || parse_flaw.is_some()) {
             flaw = Some(format!("parsed {consumed} of {verified} verified bytes: {}", parse_flaw.unwrap_or_default()));
         }
         if let Some(table) = Self::table_of(path) {
-            Self::sane(path, table, &batches).map_err(at)?;
+            Self::sane(path, table, &batches).map_err(|e| ReadError::bad(at(e)))?;
         }
         Ok(Loaded { items: batches, flaw: flaw.map(at) })
     }
@@ -656,7 +692,7 @@ mod tests {
         let mut hot = HotStore::open(&d, Duration::ZERO).unwrap();
         hot.append(&Tick { ts: 5, ..tick(1, 3) }).unwrap();
         assert!(hot.rotate().unwrap());
-        assert!(HotStore::read(&telemetry_file(&d, false)).unwrap_err().contains("plausible"));
+        assert!(HotStore::read(&telemetry_file(&d, false)).unwrap_err().msg.contains("plausible"));
     }
 
     #[test]
@@ -675,7 +711,7 @@ mod tests {
         let check = crc32fast::hash(&rec[..12]);
         rec[12..].copy_from_slice(&check.to_le_bytes());
         std::fs::write(HotStore::sync_path(&p), rec).unwrap();
-        assert!(HotStore::read(&p).unwrap_err().contains("unreadable header"));
+        assert!(HotStore::read(&p).unwrap_err().msg.contains("unreadable header"));
     }
 
     #[test]
@@ -699,10 +735,107 @@ mod tests {
         assert!(Stream::create(&hot_dir, Table::Telemetry, 5).is_err());
         assert!(blocker.exists() && !HotStore::sync_path(&blocker).exists());
         std::fs::remove_file(&blocker).unwrap();
-        hot.blocked.insert(Table::Telemetry, Instant::now());
+        hot.blocked.insert(Table::Telemetry, (Instant::now(), CREATE_RETRY_MAX));
         assert!(hot.append(&t).is_ok());
         assert_eq!(HotStore::open_files(&d).len(), 1);
         assert_eq!(HotStore::open_files(&d).iter().filter(|p| HotStore::table_of(p) == Some(Table::Raw)).count(), 1);
+    }
+
+    #[cfg(windows)]
+    fn locked(p: &Path, share: u32) -> File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).share_mode(share).open(p).unwrap()
+    }
+
+    #[test]
+    fn sidecar_without_a_valid_mark_on_a_small_file_is_a_flaw() {
+        let d = dir("hot-nomark");
+        let mut hot = HotStore::open(&d, Duration::from_secs(3600)).unwrap();
+        for ts in 0..5 {
+            hot.append(&tick(ts, 40)).unwrap();
+        }
+        assert!(hot.rotate().unwrap());
+        let p = telemetry_file(&d, false);
+        let data = std::fs::read(&p).unwrap();
+        assert!(data.len() < TAIL_FLOOR);
+        let marks = std::fs::read(HotStore::sync_path(&p)).unwrap();
+        for damaged in [Vec::new(), vec![0u8; marks.len()], marks[..9].to_vec()] {
+            assert!(HotStore::verify(&data, &damaged).1.is_some());
+        }
+        assert_eq!(HotStore::verify(&data[..700], &[]), (0, None));
+        assert_eq!(HotStore::verify(&data, &marks), (data.len(), None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_final_sync_with_a_blocked_rename_does_not_keep_the_stream() {
+        let d = dir("hot-final-sync");
+        let mut hot = HotStore::open(&d, Duration::from_secs(3600)).unwrap();
+        for ts in 0..3 {
+            hot.append(&tick(ts, 5)).unwrap();
+        }
+        let p = telemetry_file(&d, true);
+        let _block = locked(&p, 3);
+        let s = hot.streams.iter_mut().find(|s| s.table == Table::Telemetry).unwrap();
+        s.marks = locked(&HotStore::sync_path(&p), 7);
+        assert!(!hot.rotate().unwrap() || !hot.streams.iter().any(|s| s.table == Table::Telemetry));
+        assert!(hot.streams.iter().all(|s| s.table != Table::Telemetry));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_sidecar_is_retryable_and_a_missing_one_is_not() {
+        let d = dir("hot-sidecar-lock");
+        let mut hot = HotStore::open(&d, Duration::ZERO).unwrap();
+        for ts in 0..3 {
+            hot.append(&tick(ts, 5)).unwrap();
+        }
+        assert!(hot.rotate().unwrap());
+        let p = telemetry_file(&d, false);
+        let sync = HotStore::sync_path(&p);
+        let guard = locked(&sync, 0);
+        let err = HotStore::read(&p).unwrap_err();
+        assert!(err.retry, "{err}");
+        drop(guard);
+        assert!(HotStore::read(&p).unwrap().flaw.is_none());
+        std::fs::remove_file(&sync).unwrap();
+        let read = HotStore::read(&p).unwrap();
+        assert!(read.flaw.unwrap().contains("no sync file"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_parked_file_does_not_make_younger_ones_pay() {
+        let d = dir("hot-trim-lock");
+        let hot = HotStore::dir(&d);
+        std::fs::create_dir_all(&hot).unwrap();
+        let old = hot.join("a.bad");
+        std::fs::write(&old, vec![0u8; 1000]).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        for n in ["b.partial", "c.partial", "d.partial"] {
+            std::fs::write(hot.join(n), vec![0u8; 1000]).unwrap();
+        }
+        let _guard = locked(&old, 3);
+        HotStore::trim_parked(&d, 2000);
+        let left: Vec<String> = HotStore::parked(&d).iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(left, ["a.bad", "c.partial", "d.partial"]);
+    }
+
+    #[test]
+    fn create_retry_backs_off_from_one_second() {
+        let d = dir("hot-backoff");
+        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        let hot_dir = HotStore::dir(&d);
+        std::fs::remove_dir_all(&hot_dir).unwrap();
+        std::fs::write(&hot_dir, b"x").unwrap();
+        assert!(hot.append(&tick(0, 3)).is_err());
+        std::fs::remove_file(&hot_dir).unwrap();
+        std::fs::create_dir(&hot_dir).unwrap();
+        assert!(hot.append(&tick(1, 3)).is_ok());
+        assert!(HotStore::open_files(&d).is_empty());
+        std::thread::sleep(CREATE_RETRY_MIN + Duration::from_millis(100));
+        assert!(hot.append(&tick(2, 3)).is_ok());
+        assert_eq!(HotStore::open_files(&d).len(), 2);
     }
 
     #[test]

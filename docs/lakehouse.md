@@ -17,20 +17,20 @@ After every fsync of a data file the writer appends one 16 byte record to `<file
 
 Readers (Rust committer, Python view) verify before any Arrow parse and trust only the verified prefix:
 
-- Bytes after the last valid mark are the unsynced tail of a crashed file. A tail of at most `max(128 KiB, 8 x the widest synced span)` (one tick is about 13 KB, a crash tail 0 to about 2 KB) is dropped with a warning and the file is committed as usual. A larger tail means a damaged sidecar (empty, short, all NUL, garbage, half the marks): it is a flaw, the verified prefix is committed and the file is parked as `.partial`. The view applies the same bound. A file whose data ends at the last mark and holds only the schema is removed without a line.
+- Bytes after the last valid mark are the unsynced tail of a crashed file. A tail of at most `max(128 KiB, 8 x the widest synced span)` (one tick is about 13 KB, a crash tail is a few ticks) is dropped with a warning and the file is committed as usual. A larger tail means a damaged sidecar (empty, short, all NUL, garbage, half the marks): it is a flaw, as is a file without any valid mark and more than 1 KiB of data (a healthy file marks its schema first), the verified prefix is committed and the file is parked as `.partial`. The view applies the same bound. A file whose data ends at the last mark and holds only the schema is removed without a line.
 - A last mark that is itself torn is part of that tail. A bad mark or checksum mismatch in the middle, a mark beyond the end of the data, or a data file without a `.sync` file keep the verified prefix and mark the file damaged: the Rust committer commits the prefix, logs an error and moves the file to `.partial`. The Python view logs the same and shows the prefix.
-- The parse of the verified prefix runs under `catch_unwind` and must consume exactly the verified length, else the file is damaged as above. A panic or unreadable header moves the file to `.bad`.
+- The parse of the verified prefix runs under `catch_unwind` and must consume exactly the verified length, else the file is damaged as above. A panic or unreadable header moves the file to `.bad`. A `<file>.reading` guard exists while the committer parses a file; if one is found at the next pass the earlier read crashed the process and the file moves to `.bad`. A sidecar or data file that cannot be read for a reason other than not existing (a lock) is retried at the next pass, never parked.
 - Before a commit every batch is checked: schema equals the table schema, `ts` inside `[start - 1 day, max(start, mtime) + 1 day]` of the file, no empty channel. Otherwise the file goes to `.bad`.
 - The file being written is readable in the view up to its last mark, at most `wal_sync_secs` old.
-- Writer side: a failed stream create removes its half-made `.arrows` and `.sync`, does not skip the other stream and is retried at most every 30 s per table; the first error is returned after both streams were tried. Any append, flush, fsync or dictionary overflow error abandons that stream, seals it (its tail past the last mark is dropped by the readers), logs an error and opens a fresh stream. A failed final sync in a rotation seals what is verified.
+- Writer side: a failed stream create removes its half-made `.arrows` and `.sync`, does not skip the other stream and is retried per table with a backoff of 1 s doubling up to 30 s; the first error is returned after both streams were tried. Any append, flush, fsync or dictionary overflow error abandons that stream, seals it (its tail past the last mark is dropped by the readers), logs an error and opens a fresh stream. A failed final sync in a rotation seals what is verified.
 - The legacy JSON WAL has a crc per record. A torn tail is dropped; a bad or unparsable record in the middle keeps the prefix and moves the file to `.partial`. A NaN stored as `null` reads back as NaN.
 
 A `.partial` that committed rows logs `committed N ...` and sets the first-commit marker like a clean commit.
 
 ## Known gaps
 
-- A tick that was partly written before an append error is written again to the fresh stream, so it can appear twice.
-- A legacy WAL whose torn tail leaves a garbage record length above 64 MiB is parked as `.partial` instead of dropped as a torn tail.
+- A tick that was partly written before an append error is written again to the fresh stream, so it can appear twice. The same happens when the mark write succeeds, its fsync fails and the fresh stream then opens: the tick lands in both files.
+- A legacy WAL record whose corrupted length lands past the end of the file but stays under 64 MiB is taken for a torn tail: the rest of that file is dropped silently and the file is deleted. Only a length above 64 MiB is a flaw and parks the file as `.partial`.
 
 ## Rotation gate
 
