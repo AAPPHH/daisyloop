@@ -6,3 +6,10 @@ __pycache__/
 /sidecar/publish
 .claude/
 /tools/d5_probe/target
+/models/*.pkl
+/models/rich_*.json
+/models/small_*.json
+/models/xsmall_*.json
+/models/x40*.json
+/models/nn_*.json
+/tools/model_infer/target

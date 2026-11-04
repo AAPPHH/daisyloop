@@ -1,0 +1,1734 @@
+{
+"meta": {
+"version": 1,
+"ffill_s": 10,
+"kept_raw": [
+"d5next/12v/voltage",
+"d5next/5v/voltage",
+"d5next/fan/current",
+"d5next/fan/duty",
+"d5next/fan/power",
+"d5next/fan/rpm",
+"d5next/pump/current",
+"d5next/pump/duty",
+"d5next/pump/power",
+"d5next/pump/rpm",
+"d5next/water/temp",
+"nvml/0/clock_graphics",
+"nvml/0/clock_mem",
+"nvml/0/power",
+"nvml/0/temp",
+"nvml/0/util_gpu",
+"nvml/0/util_mem",
+"/gpu-nvidia/0/clock/0",
+"/gpu-nvidia/0/clock/4",
+"/gpu-nvidia/0/control/1",
+"/gpu-nvidia/0/load/0",
+"/gpu-nvidia/0/load/1",
+"/gpu-nvidia/0/load/10",
+"/gpu-nvidia/0/load/16",
+"/gpu-nvidia/0/load/17",
+"/gpu-nvidia/0/load/2",
+"/gpu-nvidia/0/load/3",
+"/gpu-nvidia/0/load/4",
+"/gpu-nvidia/0/load/5",
+"/gpu-nvidia/0/load/9",
+"/gpu-nvidia/0/power/0",
+"/gpu-nvidia/0/smalldata/0",
+"/gpu-nvidia/0/smalldata/4",
+"/gpu-nvidia/0/temperature/0",
+"/gpu-nvidia/0/temperature/2",
+"/gpu-nvidia/0/temperature/3",
+"/gpu-nvidia/0/throughput/0",
+"/gpu-nvidia/0/throughput/1",
+"/gpu-nvidia/0/voltage/0",
+"/intelcpu/0/clock/0",
+"/intelcpu/0/clock/1",
+"/intelcpu/0/clock/10",
+"/intelcpu/0/clock/11",
+"/intelcpu/0/clock/12",
+"/intelcpu/0/clock/13",
+"/intelcpu/0/clock/14",
+"/intelcpu/0/clock/15",
+"/intelcpu/0/clock/16",
+"/intelcpu/0/clock/17",
+"/intelcpu/0/clock/18",
+"/intelcpu/0/clock/19",
+"/intelcpu/0/clock/2",
+"/intelcpu/0/clock/20",
+"/intelcpu/0/clock/21",
+"/intelcpu/0/clock/22",
+"/intelcpu/0/clock/23",
+"/intelcpu/0/clock/24",
+"/intelcpu/0/clock/3",
+"/intelcpu/0/clock/4",
+"/intelcpu/0/clock/5",
+"/intelcpu/0/clock/6",
+"/intelcpu/0/clock/7",
+"/intelcpu/0/clock/8",
+"/intelcpu/0/clock/9",
+"/intelcpu/0/load/0",
+"/intelcpu/0/load/1",
+"/intelcpu/0/load/10",
+"/intelcpu/0/load/11",
+"/intelcpu/0/load/12",
+"/intelcpu/0/load/13",
+"/intelcpu/0/load/14",
+"/intelcpu/0/load/15",
+"/intelcpu/0/load/16",
+"/intelcpu/0/load/17",
+"/intelcpu/0/load/18",
+"/intelcpu/0/load/19",
+"/intelcpu/0/load/2",
+"/intelcpu/0/load/20",
+"/intelcpu/0/load/21",
+"/intelcpu/0/load/22",
+"/intelcpu/0/load/23",
+"/intelcpu/0/load/24",
+"/intelcpu/0/load/25",
+"/intelcpu/0/load/3",
+"/intelcpu/0/load/4",
+"/intelcpu/0/load/5",
+"/intelcpu/0/load/6",
+"/intelcpu/0/load/7",
+"/intelcpu/0/load/8",
+"/intelcpu/0/load/9",
+"/intelcpu/0/power/0",
+"/intelcpu/0/temperature/0",
+"/intelcpu/0/temperature/1",
+"/intelcpu/0/temperature/10",
+"/intelcpu/0/temperature/12",
+"/intelcpu/0/temperature/13",
+"/intelcpu/0/temperature/14",
+"/intelcpu/0/temperature/15",
+"/intelcpu/0/temperature/16",
+"/intelcpu/0/temperature/18",
+"/intelcpu/0/temperature/19",
+"/intelcpu/0/temperature/2",
+"/intelcpu/0/temperature/20",
+"/intelcpu/0/temperature/21",
+"/intelcpu/0/temperature/22",
+"/intelcpu/0/temperature/23",
+"/intelcpu/0/temperature/24",
+"/intelcpu/0/temperature/25",
+"/intelcpu/0/temperature/26",
+"/intelcpu/0/temperature/3",
+"/intelcpu/0/temperature/4",
+"/intelcpu/0/temperature/6",
+"/intelcpu/0/temperature/8",
+"/intelcpu/0/voltage/0",
+"/intelcpu/0/voltage/1",
+"/intelcpu/0/voltage/10",
+"/intelcpu/0/voltage/11",
+"/intelcpu/0/voltage/12",
+"/intelcpu/0/voltage/13",
+"/intelcpu/0/voltage/14",
+"/intelcpu/0/voltage/15",
+"/intelcpu/0/voltage/16",
+"/intelcpu/0/voltage/17",
+"/intelcpu/0/voltage/18",
+"/intelcpu/0/voltage/19",
+"/intelcpu/0/voltage/2",
+"/intelcpu/0/voltage/20",
+"/intelcpu/0/voltage/21",
+"/intelcpu/0/voltage/22",
+"/intelcpu/0/voltage/23",
+"/intelcpu/0/voltage/24",
+"/intelcpu/0/voltage/3",
+"/intelcpu/0/voltage/4",
+"/intelcpu/0/voltage/5",
+"/intelcpu/0/voltage/6",
+"/intelcpu/0/voltage/7",
+"/intelcpu/0/voltage/8",
+"/intelcpu/0/voltage/9",
+"/lpc/nct6687dr/0/control/0",
+"/lpc/nct6687dr/0/control/10",
+"/lpc/nct6687dr/0/control/11",
+"/lpc/nct6687dr/0/fan/11",
+"/lpc/nct6687dr/0/temperature/0",
+"/lpc/nct6687dr/0/temperature/1",
+"/lpc/nct6687dr/0/temperature/2",
+"/lpc/nct6687dr/0/temperature/3",
+"/lpc/nct6687dr/0/voltage/0",
+"/lpc/nct6687dr/0/voltage/1",
+"/lpc/nct6687dr/0/voltage/10",
+"/lpc/nct6687dr/0/voltage/11",
+"/lpc/nct6687dr/0/voltage/12",
+"/lpc/nct6687dr/0/voltage/13",
+"/lpc/nct6687dr/0/voltage/2",
+"/lpc/nct6687dr/0/voltage/3",
+"/lpc/nct6687dr/0/voltage/4",
+"/lpc/nct6687dr/0/voltage/5",
+"/lpc/nct6687dr/0/voltage/7",
+"/lpc/nct6687dr/0/voltage/8",
+"/lpc/nct6687dr/0/voltage/9",
+"/memory/dimm/1/temperature/0",
+"/memory/dimm/3/temperature/0",
+"/nic/%7B00000000-0000-4000-8000-000000000001%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-000000000002%7D/load/1",
+"/nic/%7B00000000-0000-4000-8000-000000000002%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-000000000002%7D/throughput/8",
+"/nic/%7B00000000-0000-4000-8000-000000000004%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-000000000004%7D/throughput/8",
+"/nic/%7B00000000-0000-4000-8000-000000000006%7D/load/1",
+"/nic/%7B00000000-0000-4000-8000-000000000006%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-000000000006%7D/throughput/8",
+"/nic/%7B00000000-0000-4000-8000-000000000008%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-000000000008%7D/throughput/8",
+"/nic/%7B00000000-0000-4000-8000-000000000009%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-000000000009%7D/throughput/8",
+"/nic/%7B00000000-0000-4000-8000-00000000000a%7D/throughput/7",
+"/nic/%7B00000000-0000-4000-8000-00000000000b%7D/throughput/7",
+"/nvme/1/load/30",
+"/nvme/1/load/51",
+"/nvme/1/load/52",
+"/nvme/1/load/53",
+"/nvme/1/temperature/0",
+"/nvme/1/temperature/10",
+"/nvme/1/throughput/54",
+"/nvme/1/throughput/55",
+"/nvme/2/load/30",
+"/nvme/2/load/51",
+"/nvme/2/load/52",
+"/nvme/2/load/53",
+"/nvme/2/temperature/0",
+"/nvme/2/throughput/54",
+"/nvme/2/throughput/55",
+"/nvme/3/load/30",
+"/nvme/3/load/51",
+"/nvme/3/load/52",
+"/nvme/3/load/53",
+"/nvme/3/temperature/0",
+"/nvme/3/throughput/54",
+"/nvme/3/throughput/55",
+"/nvme/4/load/30",
+"/nvme/4/load/51",
+"/nvme/4/load/52",
+"/nvme/4/load/53",
+"/nvme/4/temperature/0",
+"/nvme/4/throughput/54",
+"/nvme/4/throughput/55",
+"/ram/data/0",
+"/ram/load/0",
+"/ssd/0/load/51",
+"/ssd/0/load/52",
+"/ssd/0/load/53",
+"/ssd/0/temperature/0",
+"/ssd/0/throughput/54",
+"/ssd/0/throughput/55"
+],
+"dropped_raw": {
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/clock/0": "rule",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/0": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/1": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/10": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/11": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/12": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/13": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/2": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/3": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/4": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/5": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/6": "rule",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/7": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/8": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/load/9": "constant",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/power/0": "rule",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/smalldata/0": "rule",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/smalldata/1": "rule",
+"/gpu-intel-integrated/%5C%5C%3F%5CPCI%23VEN_8086%26DEV_7D67%26SUBSYS_7E191462%26REV_06%233%2611583659%260%2610%23%7B1ca05180-a699-450a-9a0c-de4fbe3ddd89%7D/smalldata/2": "rule",
+"/gpu-nvidia/0/fan/1": "constant",
+"/gpu-nvidia/0/fan/2": "constant",
+"/gpu-nvidia/0/load/11": "constant",
+"/gpu-nvidia/0/load/12": "constant",
+"/gpu-nvidia/0/load/13": "constant",
+"/gpu-nvidia/0/load/14": "constant",
+"/gpu-nvidia/0/load/15": "constant",
+"/gpu-nvidia/0/load/18": "constant",
+"/gpu-nvidia/0/load/19": "constant",
+"/gpu-nvidia/0/load/20": "constant",
+"/gpu-nvidia/0/load/7": "rule",
+"/gpu-nvidia/0/load/8": "constant",
+"/gpu-nvidia/0/smalldata/2": "rule",
+"/intelcpu/0/power/3": "constant",
+"/intelcpu/0/power/4": "constant",
+"/intelcpu/0/temperature/27": "rule",
+"/intelcpu/0/temperature/28": "rule",
+"/intelcpu/0/temperature/29": "rule",
+"/intelcpu/0/temperature/30": "rule",
+"/intelcpu/0/temperature/31": "rule",
+"/intelcpu/0/temperature/32": "rule",
+"/intelcpu/0/temperature/33": "rule",
+"/intelcpu/0/temperature/34": "rule",
+"/intelcpu/0/temperature/35": "rule",
+"/intelcpu/0/temperature/36": "rule",
+"/intelcpu/0/temperature/37": "rule",
+"/intelcpu/0/temperature/38": "rule",
+"/intelcpu/0/temperature/39": "rule",
+"/intelcpu/0/temperature/40": "rule",
+"/intelcpu/0/temperature/41": "rule",
+"/intelcpu/0/temperature/42": "rule",
+"/intelcpu/0/temperature/43": "rule",
+"/intelcpu/0/temperature/44": "rule",
+"/intelcpu/0/temperature/45": "rule",
+"/intelcpu/0/temperature/46": "rule",
+"/intelcpu/0/temperature/47": "rule",
+"/intelcpu/0/temperature/48": "rule",
+"/intelcpu/0/temperature/49": "rule",
+"/intelcpu/0/temperature/50": "rule",
+"/lpc/nct6687dr/0/control/1": "constant",
+"/lpc/nct6687dr/0/control/2": "constant",
+"/lpc/nct6687dr/0/fan/0": "constant",
+"/lpc/nct6687dr/0/fan/1": "constant",
+"/lpc/nct6687dr/0/fan/10": "constant",
+"/lpc/nct6687dr/0/fan/12": "constant",
+"/lpc/nct6687dr/0/fan/13": "constant",
+"/lpc/nct6687dr/0/fan/14": "constant",
+"/lpc/nct6687dr/0/fan/15": "constant",
+"/lpc/nct6687dr/0/fan/2": "constant",
+"/lpc/nct6687dr/0/fan/3": "constant",
+"/memory/dimm/1/data/50": "constant",
+"/memory/dimm/1/temperature/1": "constant",
+"/memory/dimm/1/temperature/2": "constant",
+"/memory/dimm/1/temperature/3": "constant",
+"/memory/dimm/1/temperature/4": "constant",
+"/memory/dimm/1/temperature/5": "constant",
+"/memory/dimm/1/timing/20": "rule",
+"/memory/dimm/1/timing/21": "rule",
+"/memory/dimm/1/timing/22": "constant",
+"/memory/dimm/1/timing/23": "constant",
+"/memory/dimm/1/timing/24": "constant",
+"/memory/dimm/1/timing/25": "constant",
+"/memory/dimm/1/timing/26": "constant",
+"/memory/dimm/1/timing/27": "constant",
+"/memory/dimm/1/timing/28": "constant",
+"/memory/dimm/1/timing/29": "constant",
+"/memory/dimm/1/timing/30": "constant",
+"/memory/dimm/1/timing/31": "constant",
+"/memory/dimm/1/timing/32": "constant",
+"/memory/dimm/1/timing/33": "constant",
+"/memory/dimm/3/data/50": "constant",
+"/memory/dimm/3/temperature/1": "constant",
+"/memory/dimm/3/temperature/2": "constant",
+"/memory/dimm/3/temperature/3": "constant",
+"/memory/dimm/3/temperature/4": "constant",
+"/memory/dimm/3/temperature/5": "constant",
+"/memory/dimm/3/timing/20": "rule",
+"/memory/dimm/3/timing/21": "rule",
+"/memory/dimm/3/timing/22": "constant",
+"/memory/dimm/3/timing/23": "constant",
+"/memory/dimm/3/timing/24": "constant",
+"/memory/dimm/3/timing/25": "constant",
+"/memory/dimm/3/timing/26": "constant",
+"/memory/dimm/3/timing/27": "constant",
+"/memory/dimm/3/timing/28": "constant",
+"/memory/dimm/3/timing/29": "constant",
+"/memory/dimm/3/timing/30": "constant",
+"/memory/dimm/3/timing/31": "constant",
+"/memory/dimm/3/timing/32": "constant",
+"/memory/dimm/3/timing/33": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000001%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000001%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000001%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000001%7D/throughput/8": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000002%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000002%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000003%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000003%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000003%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000003%7D/throughput/7": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000003%7D/throughput/8": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000004%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000004%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000004%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000005%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000005%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000005%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000005%7D/throughput/7": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000005%7D/throughput/8": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000006%7D/data/2": "rule",
+"/nic/%7B00000000-0000-4000-8000-000000000006%7D/data/3": "rule",
+"/nic/%7B00000000-0000-4000-8000-000000000007%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000007%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000007%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000007%7D/throughput/7": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000007%7D/throughput/8": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000008%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000008%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000008%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000009%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000009%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-000000000009%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000a%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000a%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000a%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000a%7D/throughput/8": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000b%7D/data/2": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000b%7D/data/3": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000b%7D/load/1": "constant",
+"/nic/%7B00000000-0000-4000-8000-00000000000b%7D/throughput/8": "constant",
+"/nvme/1/data/21": "rule",
+"/nvme/1/data/22": "rule",
+"/nvme/1/data/31": "rule",
+"/nvme/1/data/32": "rule",
+"/nvme/1/factor/23": "rule",
+"/nvme/1/factor/24": "rule",
+"/nvme/1/level/100": "rule",
+"/nvme/1/level/101": "rule",
+"/nvme/1/level/102": "rule",
+"/nvme/1/level/20": "rule",
+"/nvme/2/data/21": "rule",
+"/nvme/2/data/22": "rule",
+"/nvme/2/data/31": "rule",
+"/nvme/2/data/32": "rule",
+"/nvme/2/factor/23": "rule",
+"/nvme/2/factor/24": "rule",
+"/nvme/2/level/100": "rule",
+"/nvme/2/level/101": "rule",
+"/nvme/2/level/102": "rule",
+"/nvme/2/level/20": "rule",
+"/nvme/3/data/21": "rule",
+"/nvme/3/data/22": "rule",
+"/nvme/3/data/31": "rule",
+"/nvme/3/data/32": "rule",
+"/nvme/3/factor/23": "rule",
+"/nvme/3/factor/24": "rule",
+"/nvme/3/level/100": "rule",
+"/nvme/3/level/101": "rule",
+"/nvme/3/level/102": "constant",
+"/nvme/3/level/20": "rule",
+"/nvme/4/data/21": "rule",
+"/nvme/4/data/22": "rule",
+"/nvme/4/data/31": "rule",
+"/nvme/4/data/32": "constant",
+"/nvme/4/factor/23": "rule",
+"/nvme/4/factor/24": "rule",
+"/nvme/4/level/100": "rule",
+"/nvme/4/level/101": "rule",
+"/nvme/4/level/102": "rule",
+"/nvme/4/level/20": "rule",
+"/ssd/0/data/21": "rule",
+"/ssd/0/data/22": "rule",
+"/ssd/0/data/31": "constant",
+"/ssd/0/data/32": "rule",
+"/ssd/0/factor/23": "rule",
+"/ssd/0/factor/24": "rule",
+"/ssd/0/level/20": "rule",
+"/ssd/0/load/30": "constant",
+"/usbhid/0C70/F00E/00000-00000/control/0": "rule",
+"/usbhid/0C70/F00E/00000-00000/control/1": "rule",
+"/usbhid/0C70/F00E/00000-00000/fan/0": "rule",
+"/usbhid/0C70/F00E/00000-00000/fan/1": "rule",
+"/usbhid/0C70/F00E/00000-00000/flow/0": "constant",
+"/usbhid/0C70/F00E/00000-00000/power/0": "rule",
+"/usbhid/0C70/F00E/00000-00000/power/1": "rule",
+"/usbhid/0C70/F00E/00000-00000/temperature/0": "rule",
+"/usbhid/0C70/F00E/00000-00000/voltage/0": "rule",
+"/usbhid/0C70/F00E/00000-00000/voltage/1": "rule",
+"/usbhid/0C70/F00E/00000-00000/voltage/2": "rule",
+"/usbhid/0C70/F00E/00000-00000/voltage/3": "rule",
+"/vram/data/2": "rule",
+"/vram/data/3": "rule",
+"/vram/load/1": "rule",
+"nvml/0/fan0": "constant",
+"nvml/0/fan1": "constant",
+"nvml/0/power_limit": "constant",
+"d5next/fan/voltage": "duplicate_of:d5next/12v/voltage",
+"d5next/pump/voltage": "duplicate_of:d5next/12v/voltage",
+"/gpu-nvidia/0/control/2": "duplicate_of:/gpu-nvidia/0/control/1",
+"/gpu-nvidia/0/smalldata/1": "duplicate_of:/gpu-nvidia/0/smalldata/0",
+"/gpu-nvidia/0/smalldata/3": "duplicate_of:/gpu-nvidia/0/smalldata/0",
+"/intelcpu/0/power/1": "duplicate_of:/intelcpu/0/power/0",
+"/intelcpu/0/temperature/11": "duplicate_of:/intelcpu/0/temperature/10",
+"/intelcpu/0/temperature/17": "duplicate_of:/intelcpu/0/temperature/16",
+"/intelcpu/0/temperature/5": "duplicate_of:/intelcpu/0/temperature/4",
+"/intelcpu/0/temperature/7": "duplicate_of:/intelcpu/0/temperature/6",
+"/intelcpu/0/temperature/9": "duplicate_of:/intelcpu/0/temperature/8",
+"/lpc/nct6687dr/0/control/12": "duplicate_of:/lpc/nct6687dr/0/control/10",
+"/lpc/nct6687dr/0/control/13": "duplicate_of:/lpc/nct6687dr/0/control/10",
+"/lpc/nct6687dr/0/control/14": "duplicate_of:/lpc/nct6687dr/0/control/10",
+"/lpc/nct6687dr/0/control/15": "duplicate_of:/lpc/nct6687dr/0/control/10",
+"/lpc/nct6687dr/0/control/3": "duplicate_of:/lpc/nct6687dr/0/control/10",
+"/nvme/1/temperature/11": "duplicate_of:/nvme/1/temperature/10",
+"/nvme/2/temperature/1": "duplicate_of:/nvme/2/temperature/0",
+"/nvme/2/temperature/10": "duplicate_of:/nvme/1/temperature/10",
+"/nvme/2/temperature/11": "duplicate_of:/nvme/1/temperature/10",
+"/nvme/3/temperature/10": "duplicate_of:/nvme/1/temperature/10",
+"/nvme/3/temperature/11": "duplicate_of:/nvme/1/temperature/10",
+"/nvme/4/temperature/1": "duplicate_of:/nvme/4/temperature/0",
+"/nvme/4/temperature/10": "duplicate_of:/nvme/1/temperature/10",
+"/nvme/4/temperature/11": "duplicate_of:/nvme/1/temperature/10",
+"/ram/data/1": "duplicate_of:/ram/data/0"
+},
+"config": {
+"taus": [
+5,
+30,
+120,
+600,
+1800
+],
+"deriv_lags": [
+10,
+30,
+120,
+600
+],
+"vrm_frac": 0.07,
+"g_assumed_w_per_k": 25.0,
+"heat_flag_w": {
+"idle": 80.0,
+"heavy": 100.0,
+"dominance": 30.0
+},
+"p_cores": 8
+},
+"inferred": [
+"amb_board_floor",
+"water_floor",
+"amb_est",
+"vrm_est_w",
+"water_minus_amb",
+"water_minus_wfloor"
+],
+"deployed_outputs": [
+"cpu_core_t",
+"cpupkg_m_water",
+"cpucore_m_water",
+"fan_rpm3.ewm600",
+"gpu_temp",
+"p_cpu_gpu",
+"temperature_P_max",
+"water.ewm600",
+"temperature_all_max",
+"p_excess",
+"gpu_m_water",
+"fan_rpm.ewm1800",
+"p_total.ewm5.d120",
+"r:/gpu-nvidia/0/power/0",
+"water_m_sys.ewm600",
+"fan_rpm.ewm600",
+"fan_duty.ewm1800",
+"gpu_temp.ewm30",
+"water.ewm120",
+"r:/gpu-nvidia/0/load/3",
+"p_excess.int1800",
+"p_total",
+"r:/gpu-nvidia/0/smalldata/0",
+"water_m_sys.ewm30",
+"p_total.int1800",
+"p_excess.ewm1800",
+"cpu_pkg_w.ewm1800",
+"fan_duty.ewm600",
+"gpu_w.ewm120",
+"gpu_util.ewm1800",
+"p_excess.int600",
+"fan_x_dT.ewm30",
+"water_floor",
+"r:/ram/load/0",
+"p_total.ewm1800",
+"gpuhot_m_water",
+"water.ewm5.d10",
+"gpu_temp.ewm30.d300",
+"cpu_load.ewm600",
+"gpu_m_water.ewm600"
+]
+},
+"nodes": [
+{
+"name": "water",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "d5next/water/temp",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "water_fan_pump",
+"out": false
+},
+{
+"name": "fan_duty",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "d5next/fan/duty",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "water_fan_pump",
+"out": false
+},
+{
+"name": "fan_rpm",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "d5next/fan/rpm",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "water_fan_pump",
+"out": false
+},
+{
+"name": "pump_pow",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "d5next/pump/power",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "water_fan_pump",
+"out": false
+},
+{
+"name": "cpu_pkg_w",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/power/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "cpu_raw",
+"out": false
+},
+{
+"name": "gpu_w",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "nvml/0/power",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": false
+},
+{
+"name": "gpu_temp",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "nvml/0/temp",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": true
+},
+{
+"name": "cpu_core_t",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "cpu_raw",
+"out": true
+},
+{
+"name": "cpu_pkg_t",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/26",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "cpu_raw",
+"out": false
+},
+{
+"name": "gpu_hot",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/gpu-nvidia/0/temperature/2",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": false
+},
+{
+"name": "sys_t",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/lpc/nct6687dr/0/temperature/1",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "board_raw",
+"out": false
+},
+{
+"name": "dimm_t",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/memory/dimm/1/temperature/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "mem_storage_raw",
+"out": false
+},
+{
+"name": "ssd_t",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/ssd/0/temperature/0",
+"ffill": 10,
+"zero_nan": true
+},
+"group": "mem_storage_raw",
+"out": false
+},
+{
+"name": "nvme_t",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/nvme/1/temperature/0",
+"ffill": 10,
+"zero_nan": true
+},
+"group": "mem_storage_raw",
+"out": false
+},
+{
+"name": "gpu_util",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "nvml/0/util_gpu",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": false
+},
+{
+"name": "cpu_load",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/load/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "cpu_raw",
+"out": false
+},
+{
+"name": "r:/gpu-nvidia/0/load/3",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/gpu-nvidia/0/load/3",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": true
+},
+{
+"name": "r:/gpu-nvidia/0/power/0",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/gpu-nvidia/0/power/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": true
+},
+{
+"name": "r:/gpu-nvidia/0/smalldata/0",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/gpu-nvidia/0/smalldata/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "gpu_raw",
+"out": true
+},
+{
+"name": "r:/ram/load/0",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/ram/load/0",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "mem_storage_raw",
+"out": true
+},
+{
+"name": "c:/intelcpu/0/temperature/2",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/2",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/3",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/3",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/12",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/12",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/13",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/13",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/14",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/14",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/15",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/15",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/24",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/24",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/25",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/25",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "temperature_P_max",
+"op": "gmax",
+"in": [
+"c:/intelcpu/0/temperature/2",
+"c:/intelcpu/0/temperature/3",
+"c:/intelcpu/0/temperature/12",
+"c:/intelcpu/0/temperature/13",
+"c:/intelcpu/0/temperature/14",
+"c:/intelcpu/0/temperature/15",
+"c:/intelcpu/0/temperature/24",
+"c:/intelcpu/0/temperature/25"
+],
+"p": {},
+"group": "core_agg",
+"out": true
+},
+{
+"name": "c:/intelcpu/0/temperature/4",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/4",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/5",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/5",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/6",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/6",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/7",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/7",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/8",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/8",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/9",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/9",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/10",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/10",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/11",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/11",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/16",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/16",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/17",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/17",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/18",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/18",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/19",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/19",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/20",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/20",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/21",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/21",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/22",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/22",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "c:/intelcpu/0/temperature/23",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "/intelcpu/0/temperature/23",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "_",
+"out": false
+},
+{
+"name": "temperature_all_max",
+"op": "gmax",
+"in": [
+"c:/intelcpu/0/temperature/2",
+"c:/intelcpu/0/temperature/3",
+"c:/intelcpu/0/temperature/12",
+"c:/intelcpu/0/temperature/13",
+"c:/intelcpu/0/temperature/14",
+"c:/intelcpu/0/temperature/15",
+"c:/intelcpu/0/temperature/24",
+"c:/intelcpu/0/temperature/25",
+"c:/intelcpu/0/temperature/4",
+"c:/intelcpu/0/temperature/5",
+"c:/intelcpu/0/temperature/6",
+"c:/intelcpu/0/temperature/7",
+"c:/intelcpu/0/temperature/8",
+"c:/intelcpu/0/temperature/9",
+"c:/intelcpu/0/temperature/10",
+"c:/intelcpu/0/temperature/11",
+"c:/intelcpu/0/temperature/16",
+"c:/intelcpu/0/temperature/17",
+"c:/intelcpu/0/temperature/18",
+"c:/intelcpu/0/temperature/19",
+"c:/intelcpu/0/temperature/20",
+"c:/intelcpu/0/temperature/21",
+"c:/intelcpu/0/temperature/22",
+"c:/intelcpu/0/temperature/23"
+],
+"p": {},
+"group": "core_agg",
+"out": true
+},
+{
+"name": "vrm_est_w",
+"op": "lin",
+"in": [
+"cpu_pkg_w"
+],
+"p": {
+"coef": [
+0.07
+],
+"off": 0.0
+},
+"group": "heat_proxy",
+"out": false
+},
+{
+"name": "p_total",
+"op": "lin",
+"in": [
+"cpu_pkg_w",
+"gpu_w",
+"pump_pow",
+"vrm_est_w"
+],
+"p": {
+"coef": [
+1,
+1,
+1,
+1
+],
+"off": 0.0
+},
+"group": "heat_proxy",
+"out": true
+},
+{
+"name": "p_cpu_gpu",
+"op": "lin",
+"in": [
+"cpu_pkg_w",
+"gpu_w"
+],
+"p": {
+"coef": [
+1,
+1
+],
+"off": 0.0
+},
+"group": "heat_proxy",
+"out": true
+},
+{
+"name": "amb_board",
+"op": "gmin",
+"in": [
+"dimm_t",
+"ssd_t",
+"nvme_t"
+],
+"p": {},
+"group": "_",
+"out": false
+},
+{
+"name": "amb_board_floor",
+"op": "leakymin",
+"in": [
+"amb_board"
+],
+"p": {
+"rise": 0.0002777777777777778
+},
+"group": "ambient",
+"out": false
+},
+{
+"name": "water_floor",
+"op": "leakymin",
+"in": [
+"water"
+],
+"p": {
+"rise": 0.0002777777777777778
+},
+"group": "ambient",
+"out": true
+},
+{
+"name": "amb_est",
+"op": "lin",
+"in": [
+"amb_board_floor",
+"water_floor"
+],
+"p": {
+"coef": [
+0.5,
+0.5
+],
+"off": 0.0
+},
+"group": "ambient",
+"out": false
+},
+{
+"name": "water_minus_amb",
+"op": "lin",
+"in": [
+"water",
+"amb_est"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "ambient",
+"out": false
+},
+{
+"name": "water.ewm5",
+"op": "ewm",
+"in": [
+"water"
+],
+"p": {
+"tau": 5.0
+},
+"group": "ewm_water",
+"out": false
+},
+{
+"name": "water.ewm120",
+"op": "ewm",
+"in": [
+"water"
+],
+"p": {
+"tau": 120.0
+},
+"group": "ewm_water",
+"out": true
+},
+{
+"name": "water.ewm600",
+"op": "ewm",
+"in": [
+"water"
+],
+"p": {
+"tau": 600.0
+},
+"group": "ewm_water",
+"out": true
+},
+{
+"name": "p_total.ewm5",
+"op": "ewm",
+"in": [
+"p_total"
+],
+"p": {
+"tau": 5.0
+},
+"group": "ewm_power",
+"out": false
+},
+{
+"name": "p_total.ewm1800",
+"op": "ewm",
+"in": [
+"p_total"
+],
+"p": {
+"tau": 1800.0
+},
+"group": "ewm_power",
+"out": true
+},
+{
+"name": "cpu_pkg_w.ewm1800",
+"op": "ewm",
+"in": [
+"cpu_pkg_w"
+],
+"p": {
+"tau": 1800.0
+},
+"group": "ewm_power",
+"out": true
+},
+{
+"name": "gpu_w.ewm120",
+"op": "ewm",
+"in": [
+"gpu_w"
+],
+"p": {
+"tau": 120.0
+},
+"group": "ewm_power",
+"out": true
+},
+{
+"name": "gpu_temp.ewm30",
+"op": "ewm",
+"in": [
+"gpu_temp"
+],
+"p": {
+"tau": 30.0
+},
+"group": "ewm_temp",
+"out": true
+},
+{
+"name": "cpu_load.ewm600",
+"op": "ewm",
+"in": [
+"cpu_load"
+],
+"p": {
+"tau": 600.0
+},
+"group": "ewm_power",
+"out": true
+},
+{
+"name": "gpu_util.ewm1800",
+"op": "ewm",
+"in": [
+"gpu_util"
+],
+"p": {
+"tau": 1800.0
+},
+"group": "ewm_power",
+"out": true
+},
+{
+"name": "fan_duty.ewm600",
+"op": "ewm",
+"in": [
+"fan_duty"
+],
+"p": {
+"tau": 600.0
+},
+"group": "ewm_water",
+"out": true
+},
+{
+"name": "fan_duty.ewm1800",
+"op": "ewm",
+"in": [
+"fan_duty"
+],
+"p": {
+"tau": 1800.0
+},
+"group": "ewm_water",
+"out": true
+},
+{
+"name": "fan_rpm.ewm600",
+"op": "ewm",
+"in": [
+"fan_rpm"
+],
+"p": {
+"tau": 600.0
+},
+"group": "ewm_water",
+"out": true
+},
+{
+"name": "fan_rpm.ewm1800",
+"op": "ewm",
+"in": [
+"fan_rpm"
+],
+"p": {
+"tau": 1800.0
+},
+"group": "ewm_water",
+"out": true
+},
+{
+"name": "water.ewm5.d10",
+"op": "diff",
+"in": [
+"water.ewm5"
+],
+"p": {
+"n": 10
+},
+"group": "deriv",
+"out": true
+},
+{
+"name": "p_total.ewm5.d120",
+"op": "diff",
+"in": [
+"p_total.ewm5"
+],
+"p": {
+"n": 120
+},
+"group": "deriv",
+"out": true
+},
+{
+"name": "gpu_temp.ewm30.d300",
+"op": "diff",
+"in": [
+"gpu_temp.ewm30"
+],
+"p": {
+"n": 300
+},
+"group": "deriv",
+"out": true
+},
+{
+"name": "p_total.int1800",
+"op": "scale",
+"in": [
+"p_total.ewm1800"
+],
+"p": {
+"c": 1800.0
+},
+"group": "integral",
+"out": true
+},
+{
+"name": "p_removed",
+"op": "lin",
+"in": [
+"water_minus_amb"
+],
+"p": {
+"coef": [
+25.0
+],
+"off": 0.0
+},
+"group": "_",
+"out": false
+},
+{
+"name": "p_excess",
+"op": "lin",
+"in": [
+"p_total",
+"p_removed"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "integral",
+"out": true
+},
+{
+"name": "p_excess.ewm600",
+"op": "ewm",
+"in": [
+"p_excess"
+],
+"p": {
+"tau": 600.0
+},
+"group": "integral",
+"out": false
+},
+{
+"name": "p_excess.int600",
+"op": "scale",
+"in": [
+"p_excess.ewm600"
+],
+"p": {
+"c": 600.0
+},
+"group": "integral",
+"out": true
+},
+{
+"name": "p_excess.ewm1800",
+"op": "ewm",
+"in": [
+"p_excess"
+],
+"p": {
+"tau": 1800.0
+},
+"group": "integral",
+"out": true
+},
+{
+"name": "p_excess.int1800",
+"op": "scale",
+"in": [
+"p_excess.ewm1800"
+],
+"p": {
+"c": 1800.0
+},
+"group": "integral",
+"out": true
+},
+{
+"name": "water_m_sys",
+"op": "lin",
+"in": [
+"water",
+"sys_t"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "delta",
+"out": false
+},
+{
+"name": "cpucore_m_water",
+"op": "lin",
+"in": [
+"cpu_core_t",
+"water"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "cpupkg_m_water",
+"op": "lin",
+"in": [
+"cpu_pkg_t",
+"water"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "gpu_m_water",
+"op": "lin",
+"in": [
+"gpu_temp",
+"water"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "gpuhot_m_water",
+"op": "lin",
+"in": [
+"gpu_hot",
+"water"
+],
+"p": {
+"coef": [
+1,
+-1
+],
+"off": 0.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "water_m_sys.ewm30",
+"op": "ewm",
+"in": [
+"water_m_sys"
+],
+"p": {
+"tau": 30.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "gpu_m_water.ewm600",
+"op": "ewm",
+"in": [
+"gpu_m_water"
+],
+"p": {
+"tau": 600.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "water_m_sys.ewm600",
+"op": "ewm",
+"in": [
+"water_m_sys"
+],
+"p": {
+"tau": 600.0
+},
+"group": "delta",
+"out": true
+},
+{
+"name": "fan_frac",
+"op": "lin",
+"in": [
+"fan_duty"
+],
+"p": {
+"coef": [
+0.01
+],
+"off": 0.0
+},
+"group": "_",
+"out": false
+},
+{
+"name": "fan_rpm_n",
+"op": "lin",
+"in": [
+"fan_rpm"
+],
+"p": {
+"coef": [
+0.0006802721088435374
+],
+"off": 0.0
+},
+"group": "_",
+"out": false
+},
+{
+"name": "fan_rpm3",
+"op": "pow",
+"in": [
+"fan_rpm_n"
+],
+"p": {
+"e": 3
+},
+"group": "fan_pump_terms",
+"out": false
+},
+{
+"name": "fan_x_dT",
+"op": "mul",
+"in": [
+"fan_frac",
+"water_minus_amb"
+],
+"p": {},
+"group": "fan_pump_terms",
+"out": false
+},
+{
+"name": "fan_x_dT.ewm30",
+"op": "ewm",
+"in": [
+"fan_x_dT"
+],
+"p": {
+"tau": 30.0
+},
+"group": "fan_pump_terms",
+"out": true
+},
+{
+"name": "fan_rpm3.ewm600",
+"op": "ewm",
+"in": [
+"fan_rpm3"
+],
+"p": {
+"tau": 600.0
+},
+"group": "fan_pump_terms",
+"out": true
+}
+]
+}
