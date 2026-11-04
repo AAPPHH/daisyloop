@@ -10,14 +10,15 @@ Last collector data before each outage (up to 60 s missing, old build):
 
 | Last data | CPU package W | Core max C | CPU load % | GPU W | Water C |
 |---|---|---|---|---|---|
-| 11-03 13:12:38 | no data | no data | no data | 11 | 30 |
 | 11-04 09:24:11 | ~180 | ~97 (104 peak in 4 min) | ~43 | ~111 | 35 |
 | 11-04 16:11:12 | ~195 | ~98 (104 peak in 4 min) | ~52 | ~115 | 37 |
 | 11-04 16:31:12 | 50..130, bursting | 66..76 | 16..44 | ~15 | 31 |
 
-11-02 22:10 was a clean shutdown (event 1074), yet the next boot logged event 41 at 11-03 08:22.
+Time of the unexpected shutdown per event 6008: 11-01 06:03:25, 11-02 22:11:55, 11-04 03:42:45, 09:23:51, 16:11:15, 16:31:41 (the last possibly a reset by the user). They match the table within the collector's commit interval.
 
-No common load pattern across these outages.
+Corrections: the collector's data ended 11-03 13:12:38 with an idle PC, but the machine ran on until 03:42:45, so that is a silent collector stop by the old build for an unknown reason, 14.5 h before the crash, and there is no data for the 03:42 crash. 11-02 22:10:58 was a requested shutdown (event 1074) which then failed uncleanly at 22:11:55.
+
+No common load pattern across the outages with data, which are too few (3) to conclude much.
 
 ## Test: package C-states limited to C6
 
