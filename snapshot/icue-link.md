@@ -37,3 +37,16 @@ Research only, nothing was sent to any device. No LINK hub is attached yet, so n
 - Dead-man: daemon crash and PC hang must fail to a safe airflow; depends on the tests above. Until known, only a duty profile acceptable if frozen under load may be used: conservative minimum duty.
 - Writes only on change, read verify after write, per channel floor, RPM plausibility check per fan.
 - New fans change the thermal behaviour, so the fan response must be measured after the swap.
+
+## Planned fans: iCUE LINK RX360 II Unified Frame RGB (CO-9051061-WW, expansion kit)
+
+Sources: Corsair product page, RX II guide, quick start guide, TweakTown review (2026-11-04).
+
+- Hub not included in this kit ("iCUE LINK System Hub required"). The starter kit CO-9051059-WW includes one.
+- Hub needs firmware 3.11.646+ with iCUE 5.37+ per Corsair. iCUE isn't installed here; a firmware update presumably needs it once (inference).
+- Hub wiring: 6-pin PCIe power, internal USB 2.0 header. The 2-pin tach isn't needed without a LINK CPU cooler.
+- Duty range 0 %, 20..100 %, speed 0, 400..2100 rpm +-10 %, so duty 0 stops the fans (Zero RPM) and duty 1..19 is unspecified. Clamp to 20..100 and never send 0.
+- 3 fans in one frame, detected as a single device in iCUE. Whether the hub reports 1 or 3 RPM values isn't confirmed; TweakTown saw fans enter Zero RPM one by one, which suggests separate values.
+- 12 V, max 1.39 A, typ 0.8 A; 64.7 CFM, 3.57 mm-H2O, 10..32.8 dBA.
+- Built-in temperature sensor, potentially the missing air temperature for the model. Where it reads is unknown.
+- Protocol: `lsh.json` has no RX II entry by name. OpenLinkHub lists RX360 II RGB as supported, presumably through generic v2 device 26/0 "iCUE LINK FANS" with per-channel model query (EP 40). FanControl.CorsairLink's device list has no RX II entry by name. Verify the device table on the real hub first.
