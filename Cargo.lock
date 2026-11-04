@@ -657,7 +657,11 @@ name = "daisyloop"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-cast",
+ "arrow-ipc",
+ "arrow-ord",
  "arrow-schema",
+ "arrow-select",
  "crc32fast",
  "hidapi",
  "iceberg",

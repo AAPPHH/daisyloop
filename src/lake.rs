@@ -1,5 +1,9 @@
+use crate::hot::{HotStore, Table};
 use crate::{Config, Row};
-use arrow_array::{ArrayRef, LargeBinaryArray, Float64Array, RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow_array::{Array, ArrayRef, Float64Array, LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow_ord::sort::{lexsort_to_indices, SortColumn};
+use arrow_select::concat::concat_batches;
+use arrow_select::take::take_record_batch;
 use iceberg::arrow::schema_to_arrow_schema;
 use iceberg::io::LocalFsStorageFactory;
 use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema, Type};
@@ -15,16 +19,20 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::runtime::Runtime;
+use tokio::runtime::{Builder, Runtime};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
+
+const SOURCE_KEY: &str = "daisyloop.source";
+const CHUNK_ROWS: usize = 131072;
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct Tick {
@@ -33,74 +41,20 @@ pub struct Tick {
     pub raw: Option<Vec<u8>>,
 }
 
-pub struct Wal {
-    dir: PathBuf,
-    file: Option<BufWriter<File>>,
-    bytes: u64,
-    last_sync: Instant,
-    sync_every: Duration,
-}
+pub struct Legacy;
 
-impl Wal {
+impl Legacy {
     const HEADER: usize = 8;
     const MAX_RECORD: usize = 64 << 20;
 
-    pub fn open(dir: &Path, sync_every: Duration) -> std::io::Result<Wal> {
-        let mut wal = Wal { dir: dir.to_path_buf(), file: None, bytes: 0, last_sync: Instant::now(), sync_every };
-        if std::fs::metadata(wal.live()).map(|m| m.len() > 0).unwrap_or(false) {
-            wal.seal()?;
+    pub fn seal_leftover(dir: &Path) -> std::io::Result<bool> {
+        let live = dir.join("wal.log");
+        if !std::fs::metadata(&live).map(|m| m.len() > 0).unwrap_or(false) {
+            return Ok(false);
         }
-        wal.reopen()?;
-        Ok(wal)
-    }
-
-    fn live(&self) -> PathBuf {
-        self.dir.join("wal.log")
-    }
-
-    fn reopen(&mut self) -> std::io::Result<()> {
-        self.file = Some(BufWriter::new(OpenOptions::new().create(true).append(true).open(self.live())?));
-        self.bytes = 0;
-        Ok(())
-    }
-
-    fn seal(&self) -> std::io::Result<()> {
         let micros = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
-        std::fs::rename(self.live(), self.dir.join(format!("wal-{micros:020}.sealed")))
-    }
-
-    pub fn append(&mut self, tick: &Tick) -> std::io::Result<()> {
-        if self.file.is_none() {
-            self.reopen()?;
-        }
-        let payload = serde_json::to_vec(tick)?;
-        let mut frame = Vec::with_capacity(Self::HEADER + payload.len());
-        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
-        frame.extend_from_slice(&payload);
-        let f = self.file.as_mut().unwrap();
-        f.write_all(&frame)?;
-        f.flush()?;
-        self.bytes += frame.len() as u64;
-        if self.last_sync.elapsed() >= self.sync_every {
-            f.get_ref().sync_data()?;
-            self.last_sync = Instant::now();
-        }
-        Ok(())
-    }
-
-    pub fn rotate(&mut self) -> std::io::Result<bool> {
-        if let Some(mut f) = self.file.take() {
-            f.flush()?;
-            f.get_ref().sync_all()?;
-        }
-        self.last_sync = Instant::now();
-        let sealed = self.bytes > 0;
-        if sealed {
-            self.seal()?;
-        }
-        self.reopen()?;
-        Ok(sealed)
+        std::fs::rename(&live, dir.join(format!("wal-{micros:020}.sealed")))?;
+        Ok(true)
     }
 
     pub fn read(path: &Path) -> Result<Vec<Tick>, String> {
@@ -127,18 +81,171 @@ impl Wal {
         Ok(ticks)
     }
 
-    pub fn sealed_bytes(dir: &Path) -> u64 {
-        Self::sealed(dir).iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
-    }
-
-    pub fn live_bytes(&self) -> u64 {
-        self.bytes
-    }
-
     pub fn sealed(dir: &Path) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "sealed")).collect();
         v.sort();
         v
+    }
+
+    pub fn all_sealed(dir: &Path) -> Vec<PathBuf> {
+        let mut v = Self::sealed(dir);
+        v.extend(HotStore::sealed(dir));
+        v
+    }
+
+    pub fn backlog_bytes(dir: &Path) -> u64 {
+        Self::all_sealed(dir).iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+    }
+
+    pub fn batch(table: Table, ticks: &[Tick]) -> Option<RecordBatch> {
+        let ts = |v: Vec<i64>| -> ArrayRef { Arc::new(TimestampMicrosecondArray::from_iter_values(v).with_timezone("+00:00")) };
+        let cols: Vec<ArrayRef> = match table {
+            Table::Raw => {
+                let raws: Vec<(i64, &[u8])> = ticks.iter().filter_map(|t| t.raw.as_deref().map(|r| (t.ts, r))).collect();
+                vec![ts(raws.iter().map(|r| r.0).collect()), Arc::new(LargeBinaryArray::from_iter_values(raws.iter().map(|r| r.1)))]
+            }
+            Table::Telemetry => {
+                let rows: Vec<(i64, &Row)> = ticks.iter().flat_map(|t| t.rows.iter().map(|r| (t.ts, r))).collect();
+                let strings = |f: fn(&Row) -> &str| -> ArrayRef { Arc::new(StringArray::from_iter_values(rows.iter().map(|r| f(r.1)))) };
+                vec![
+                    ts(rows.iter().map(|r| r.0).collect()),
+                    strings(|r| &r.source),
+                    strings(|r| &r.channel),
+                    strings(|r| &r.label),
+                    strings(|r| &r.kind),
+                    strings(|r| &r.unit),
+                    strings(|r| &r.role),
+                    Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1.value))),
+                ]
+            }
+        };
+        if cols[0].is_empty() {
+            return None;
+        }
+        RecordBatch::try_from_iter(table.schema().fields().iter().map(|f| f.name().clone()).zip(cols)).ok()
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct GateConfig {
+    pub cpu_channel: String,
+    pub gpu_channel: String,
+    pub cpu_pct: f64,
+    pub gpu_pct: f64,
+    pub sustain_secs: u64,
+    pub fallback_age_secs: u64,
+    pub stale_secs: u64,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        GateConfig { cpu_channel: "/intelcpu/0/load/0".into(), gpu_channel: "nvml/0/util_gpu".into(), cpu_pct: 15.0, gpu_pct: 10.0, sustain_secs: 300, fallback_age_secs: 86400, stale_secs: 10 }
+    }
+}
+
+struct IdleState {
+    since: Option<Instant>,
+    seen: Option<Instant>,
+}
+
+pub struct Idle {
+    cfg: GateConfig,
+    state: Mutex<IdleState>,
+}
+
+impl Idle {
+    pub fn new(cfg: &GateConfig) -> Idle {
+        Idle { cfg: cfg.clone(), state: Mutex::new(IdleState { since: None, seen: None }) }
+    }
+
+    pub fn observe(&self, rows: &[Row]) {
+        let find = |ch: &str| rows.iter().find(|r| r.channel == ch).map(|r| r.value);
+        let busy = match (find(&self.cfg.cpu_channel), find(&self.cfg.gpu_channel)) {
+            (Some(c), Some(g)) => c.is_nan() || g.is_nan() || c >= self.cfg.cpu_pct || g >= self.cfg.gpu_pct,
+            _ => true,
+        };
+        let mut s = self.state.lock().unwrap();
+        s.seen = Some(Instant::now());
+        if busy {
+            s.since = None;
+        } else if s.since.is_none() {
+            s.since = Some(Instant::now());
+        }
+    }
+
+    pub fn idle(&self) -> bool {
+        let s = self.state.lock().unwrap();
+        let fresh = s.seen.is_some_and(|t| t.elapsed() <= Duration::from_secs(self.cfg.stale_secs));
+        fresh && s.since.is_some_and(|t| t.elapsed() >= Duration::from_secs(self.cfg.sustain_secs))
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    Run,
+    Fallback(&'static str),
+    Wait,
+}
+
+pub struct Gate {
+    cfg: GateConfig,
+    max_bytes: u64,
+    marker: PathBuf,
+    idle: Arc<Idle>,
+}
+
+impl Gate {
+    pub fn new(cfg: &Config, idle: Arc<Idle>) -> Gate {
+        Gate { cfg: cfg.gate.clone(), max_bytes: cfg.wal_max_bytes, marker: Self::build_marker(&cfg.data_dir), idle }
+    }
+
+    pub fn build_marker(dir: &Path) -> PathBuf {
+        let id = std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| format!("{}-{}", m.len(), m.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())))
+            .unwrap_or_default();
+        dir.join(format!("committed-{id}"))
+    }
+
+    pub fn first_pending(&self) -> bool {
+        !self.marker.exists()
+    }
+
+    pub fn decide(&self, oldest_age: Duration, sealed_bytes: u64) -> Verdict {
+        if self.first_pending() || self.idle.idle() {
+            Verdict::Run
+        } else if oldest_age >= Duration::from_secs(self.cfg.fallback_age_secs) {
+            Verdict::Fallback("oldest sealed file is past the age limit")
+        } else if sealed_bytes > self.max_bytes / 2 {
+            Verdict::Fallback("sealed data exceeds half of the disk cap")
+        } else {
+            Verdict::Wait
+        }
+    }
+}
+
+pub struct Priority;
+
+impl Priority {
+    pub fn low() {
+        Self::set(windows_sys::Win32::System::Threading::THREAD_PRIORITY_LOWEST);
+    }
+
+    pub fn lowest(on: bool) {
+        use windows_sys::Win32::System::Threading::{THREAD_MODE_BACKGROUND_BEGIN, THREAD_MODE_BACKGROUND_END};
+        Self::set(if on { THREAD_MODE_BACKGROUND_BEGIN } else { THREAD_MODE_BACKGROUND_END });
+        if !on {
+            Self::low();
+        }
+    }
+
+    fn set(level: i32) {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), level);
+        }
     }
 }
 
@@ -159,7 +266,7 @@ impl Lake {
         if cfg.keep_versions == 0 {
             return Err("keep_versions must be at least 1".into());
         }
-        let rt = Runtime::new()?;
+        let rt = Builder::new_current_thread().enable_all().build()?;
         let url = |p: std::path::PathBuf| p.to_string_lossy().replace('\\', "/");
         let props = HashMap::from([
             (SQL_CATALOG_PROP_URI.to_string(), format!("sqlite:{}?mode=rwc", url(cfg.catalog_db()))),
@@ -222,50 +329,50 @@ impl Lake {
         Ok(())
     }
 
-    pub fn commit(&self, ticks: &[Tick], done: &mut impl FnMut(&str) -> bool) -> Res<(usize, usize)> {
-        let rows: Vec<(i64, &Row)> = ticks.iter().flat_map(|t| t.rows.iter().map(|r| (t.ts, r))).collect();
-        let raws: Vec<(i64, &[u8])> = ticks.iter().filter_map(|t| t.raw.as_deref().map(|r| (t.ts, r))).collect();
-        if !rows.is_empty() && !done("t") {
-            self.rt.block_on(Self::append(&self.catalog, &self.telemetry, Self::telemetry_columns(&rows), self.keep))?;
-            done("t+");
+    fn ident(&self, table: Table) -> &TableIdent {
+        match table {
+            Table::Telemetry => &self.telemetry,
+            Table::Raw => &self.d5_raw,
         }
-        if !raws.is_empty() && !done("r") {
-            self.rt.block_on(Self::append(&self.catalog, &self.d5_raw, Self::raw_columns(&raws), self.keep))?;
-            done("r+");
+    }
+
+    fn sorted(table: Table, batches: &[RecordBatch]) -> Res<RecordBatch> {
+        let all = concat_batches(&batches[0].schema(), batches)?;
+        if table != Table::Telemetry {
+            return Ok(all);
         }
-        Ok((rows.len(), raws.len()))
+        let keys = [2usize, 0].map(|i| SortColumn { values: all.column(i).clone(), options: None });
+        Ok(take_record_batch(&all, &lexsort_to_indices(&keys, None)?)?)
     }
 
-    fn ts(v: impl Iterator<Item = i64>) -> ArrayRef {
-        Arc::new(TimestampMicrosecondArray::from_iter_values(v).with_timezone("+00:00"))
+    pub fn commit(&self, table: Table, batches: &[RecordBatch], source: &str) -> Res<Option<usize>> {
+        if batches.is_empty() {
+            return Ok(Some(0));
+        }
+        let batch = Self::sorted(table, batches)?;
+        let rows = batch.num_rows();
+        let done = self.rt.block_on(Self::append(&self.catalog, self.ident(table), batch, source, self.keep))?;
+        Ok(done.then_some(rows))
     }
 
-    fn strings<'a>(v: impl Iterator<Item = &'a str>) -> ArrayRef {
-        Arc::new(StringArray::from_iter_values(v))
+    pub fn commit_ticks(&self, ticks: &[Tick], stem: &str) -> Res<(usize, usize)> {
+        let mut n = [0, 0];
+        for (i, (table, tag)) in [(Table::Telemetry, "t"), (Table::Raw, "r")].into_iter().enumerate() {
+            if let Some(b) = Legacy::batch(table, ticks) {
+                n[i] = self.commit(table, &[b], &format!("{stem}#{tag}"))?.unwrap_or(0);
+            }
+        }
+        Ok((n[0], n[1]))
     }
 
-    fn telemetry_columns(rows: &[(i64, &Row)]) -> Vec<ArrayRef> {
-        vec![
-            Self::ts(rows.iter().map(|r| r.0)),
-            Self::strings(rows.iter().map(|r| r.1.source.as_str())),
-            Self::strings(rows.iter().map(|r| r.1.channel.as_str())),
-            Self::strings(rows.iter().map(|r| r.1.label.as_str())),
-            Self::strings(rows.iter().map(|r| r.1.kind.as_str())),
-            Self::strings(rows.iter().map(|r| r.1.unit.as_str())),
-            Self::strings(rows.iter().map(|r| r.1.role.as_str())),
-            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.1.value))),
-        ]
-    }
-
-    fn raw_columns(raws: &[(i64, &[u8])]) -> Vec<ArrayRef> {
-        vec![Self::ts(raws.iter().map(|r| r.0)), Arc::new(LargeBinaryArray::from_iter_values(raws.iter().map(|r| r.1)))]
-    }
-
-    async fn append(catalog: &SqlCatalog, ident: &TableIdent, cols: Vec<ArrayRef>, keep: usize) -> Res<()> {
+    async fn append(catalog: &SqlCatalog, ident: &TableIdent, batch: RecordBatch, source: &str, keep: usize) -> Res<bool> {
         let table = catalog.load_table(ident).await?;
+        if table.metadata().snapshots().any(|s| s.summary().additional_properties.get(SOURCE_KEY).is_some_and(|v| v == source)) {
+            return Ok(false);
+        }
         let meta = table.metadata();
-        let batch = RecordBatch::try_new(Arc::new(schema_to_arrow_schema(meta.current_schema())?), cols)?;
-        let props = WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default())).set_statistics_truncate_length(None).build();
+        let arrow = Arc::new(schema_to_arrow_schema(meta.current_schema())?);
+        let props = WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default())).set_statistics_truncate_length(None).set_max_row_group_row_count(Some(CHUNK_ROWS)).build();
         let parquet = ParquetWriterBuilder::new(props, meta.current_schema().clone());
         let rolling = RollingFileWriterBuilder::new_with_default_file_size(
             parquet,
@@ -274,10 +381,16 @@ impl Lake {
             DefaultFileNameGenerator::new(format!("daisyloop-{}", crate::now_micros()), None, DataFileFormat::Parquet),
         );
         let mut writer = DataFileWriterBuilder::new(rolling).build(None).await?;
-        writer.write(batch).await?;
+        let mut at = 0;
+        while at < batch.num_rows() {
+            let part = batch.slice(at, CHUNK_ROWS.min(batch.num_rows() - at));
+            let cols = part.columns().iter().zip(arrow.fields()).map(|(c, f)| arrow_cast::cast(c, f.data_type())).collect::<Result<Vec<_>, _>>()?;
+            writer.write(RecordBatch::try_new(arrow.clone(), cols)?).await?;
+            at += CHUNK_ROWS;
+        }
         let files = writer.close().await?;
         let tx = Transaction::new(&table);
-        let tx = tx.fast_append().add_data_files(files).apply(tx)?;
+        let tx = tx.fast_append().add_data_files(files).set_snapshot_properties(HashMap::from([(SOURCE_KEY.to_string(), source.to_string())])).apply(tx)?;
         let mut table = tx.commit(catalog).await?;
         if table.metadata().snapshots().len() > 2 * keep {
             let tx = Transaction::new(&table);
@@ -291,7 +404,7 @@ impl Lake {
             }
         }
         Self::prune(&table, keep);
-        Ok(())
+        Ok(true)
     }
 
     fn prune(table: &iceberg::table::Table, keep: usize) {
@@ -330,25 +443,35 @@ enum Msg {
 pub struct Committer {
     tx: Sender<Msg>,
     join: JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+}
+
+pub struct Rotation {
+    lake: Lake,
+    dir: PathBuf,
+    gate: Gate,
+    stop: Arc<AtomicBool>,
 }
 
 impl Committer {
-    pub fn spawn(lake: Lake, dir: PathBuf, retry: Duration) -> Committer {
+    pub fn spawn(lake: Lake, dir: PathBuf, retry: Duration, gate: Gate) -> Committer {
         let (tx, rx) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let rotation = Rotation { lake, dir, gate, stop: stop.clone() };
         let join = std::thread::Builder::new()
             .name("commit".into())
-            .spawn(move || loop {
-                Self::process(&lake, &dir);
-                match rx.recv_timeout(retry) {
-                    Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => {
-                        Self::process(&lake, &dir);
-                        break;
+            .spawn(move || {
+                Priority::low();
+                loop {
+                    rotation.pass();
+                    match rx.recv_timeout(retry) {
+                        Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+                        Ok(Msg::Notify) | Err(RecvTimeoutError::Timeout) => {}
                     }
-                    Ok(Msg::Notify) | Err(RecvTimeoutError::Timeout) => {}
                 }
             })
             .expect("commit thread");
-        Committer { tx, join }
+        Committer { tx, join, stop }
     }
 
     pub fn notify(&self) {
@@ -360,54 +483,114 @@ impl Committer {
     }
 
     pub fn finish(self) {
+        self.stop.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Stop);
         let _ = self.join.join();
     }
+}
 
-    pub fn process(lake: &Lake, dir: &Path) -> bool {
+impl Rotation {
+    pub fn new(lake: Lake, dir: PathBuf, gate: Gate) -> Rotation {
+        Rotation { lake, dir, gate, stop: Arc::new(AtomicBool::new(false)) }
+    }
+
+    fn oldest_age(files: &[PathBuf]) -> Duration {
+        files.iter().filter_map(|p| std::fs::metadata(p).ok()?.modified().ok()?.elapsed().ok()).max().unwrap_or_default()
+    }
+
+    pub fn pass(&self) -> bool {
         let mut all_ok = true;
-        for path in Wal::sealed(dir) {
-            let ticks = match Wal::read(&path) {
-                Ok(t) => t,
-                Err(e) => {
-                    let bad = path.with_extension("bad");
-                    log::error!("wal unreadable, moved to {}: {e}", bad.display());
-                    let _ = std::fs::rename(&path, bad);
-                    continue;
-                }
-            };
-            let started = Instant::now();
-            let marker = |tag: &str| PathBuf::from(format!("{}.{tag}", path.display()));
-            let mut done = |tag: &str| -> bool {
-                match tag.strip_suffix('+') {
-                    Some(t) => {
-                        let _ = File::create(marker(t));
-                        false
-                    }
-                    None => marker(tag).exists(),
-                }
-            };
-            match lake.commit(&ticks, &mut done) {
-                Ok((a, b)) => {
-                    let _ = std::fs::remove_file(&path);
-                    for tag in ["t", "r"] {
-                        let _ = std::fs::remove_file(marker(tag));
-                    }
-                    log::info!("committed {a} telemetry rows, {b} raw reports in {} ms", started.elapsed().as_millis());
-                }
-                Err(e) => {
-                    log::error!("commit of {} failed, kept on disk: {e}", path.display());
-                    all_ok = false;
-                }
+        let mut lowest = false;
+        for path in Legacy::all_sealed(&self.dir) {
+            if self.stop.load(Ordering::Relaxed) {
+                break;
             }
+            let files = Legacy::all_sealed(&self.dir);
+            let bytes = files.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum::<u64>();
+            match self.gate.decide(Self::oldest_age(&files), bytes) {
+                Verdict::Wait => break,
+                Verdict::Fallback(why) if !lowest => {
+                    log::warn!("committing outside an idle window ({why}): {bytes} bytes sealed, lowest priority");
+                    Priority::lowest(true);
+                    lowest = true;
+                }
+                _ => {}
+            }
+            all_ok &= self.one(&path);
+        }
+        if lowest {
+            Priority::lowest(false);
         }
         all_ok
+    }
+
+    fn one(&self, path: &Path) -> bool {
+        let started = Instant::now();
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let done = PathBuf::from(format!("{}.done", path.display()));
+        let result = if done.exists() { Ok(None) } else { self.commit(path, &name) };
+        match result {
+            Ok(msg) => {
+                if let Some(msg) = msg {
+                    log::info!("committed {msg} in {} ms", started.elapsed().as_millis());
+                }
+                let _ = File::create(&done);
+                if std::fs::remove_file(path).is_err() && path.exists() {
+                    log::error!("could not remove committed {}, retrying at the next pass", path.display());
+                    return false;
+                }
+                let _ = std::fs::remove_file(&done);
+                true
+            }
+            Err(e) => {
+                log::error!("commit of {} failed, kept on disk: {e}", path.display());
+                false
+            }
+        }
+    }
+
+    fn commit(&self, path: &Path, name: &str) -> Res<Option<String>> {
+        let stem = name.trim_end_matches(".sealed");
+        let (msg, telemetry) = match HotStore::table_of(path) {
+            None => {
+                let ticks = match Legacy::read(path) {
+                    Ok(t) => t,
+                    Err(e) => return self.quarantine(path, &e),
+                };
+                let (a, b) = self.lake.commit_ticks(&ticks, stem)?;
+                (format!("{a} telemetry rows, {b} raw reports from {name}"), a > 0)
+            }
+            Some(table) => {
+                let batches = match HotStore::read(path) {
+                    Ok(b) => b,
+                    Err(e) => return self.quarantine(path, &e),
+                };
+                match self.lake.commit(table, &batches, stem)? {
+                    Some(n) if table == Table::Telemetry => (format!("{n} telemetry rows from {name}"), true),
+                    Some(n) => (format!("{n} raw reports from {name}"), false),
+                    None => return Ok(None),
+                }
+            }
+        };
+        if telemetry {
+            let _ = File::create(&self.gate.marker);
+        }
+        Ok(Some(msg))
+    }
+
+    fn quarantine(&self, path: &Path, why: &str) -> Res<Option<String>> {
+        let bad = path.with_extension("bad");
+        log::error!("sealed file unreadable, moved to {}: {why}", bad.display());
+        std::fs::rename(path, bad)?;
+        Ok(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::io::Write;
 
     fn dir(name: &str) -> PathBuf {
         let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp").join(name);
@@ -420,75 +603,73 @@ mod tests {
         Tick { ts, rows: vec![Row::new("lhm", "a/b", "A B", "temperature", "degC", ts as f64)], raw: (ts % 2 == 0).then(|| vec![1, 2, ts as u8]) }
     }
 
-    #[test]
-    fn roundtrip() {
-        let d = dir("roundtrip");
-        let mut w = Wal::open(&d, Duration::from_secs(10)).unwrap();
-        let ticks: Vec<Tick> = (0..50).map(tick).collect();
-        for t in &ticks {
-            w.append(t).unwrap();
+    fn frame(t: &Tick) -> Vec<u8> {
+        let payload = serde_json::to_vec(t).unwrap();
+        let mut f = Vec::new();
+        f.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        f.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+        f.extend_from_slice(&payload);
+        f
+    }
+
+    fn legacy_file(d: &Path, name: &str, ticks: &[Tick]) -> PathBuf {
+        let p = d.join(name);
+        let mut f = File::create(&p).unwrap();
+        for t in ticks {
+            f.write_all(&frame(t)).unwrap();
         }
-        assert!(w.rotate().unwrap());
-        assert!(!w.rotate().unwrap());
-        let sealed = Wal::sealed(&d);
-        assert_eq!(sealed.len(), 1);
-        assert_eq!(Wal::read(&sealed[0]).unwrap(), ticks);
+        p
     }
 
     #[test]
-    fn torn_tail() {
-        let d = dir("torn");
-        let mut w = Wal::open(&d, Duration::from_secs(10)).unwrap();
-        for i in 0..10 {
-            w.append(&tick(i)).unwrap();
-        }
-        drop(w);
-        let p = d.join("wal.log");
+    fn legacy_roundtrip_and_torn_tail() {
+        let d = dir("legacy");
+        let ticks: Vec<Tick> = (0..10).map(tick).collect();
+        let p = legacy_file(&d, "wal.log", &ticks);
+        assert_eq!(Legacy::read(&p).unwrap(), ticks);
         let len = std::fs::metadata(&p).unwrap().len();
         OpenOptions::new().write(true).open(&p).unwrap().set_len(len - 7).unwrap();
-        assert_eq!(Wal::read(&p).unwrap(), (0..9).map(tick).collect::<Vec<_>>());
+        assert_eq!(Legacy::read(&p).unwrap(), (0..9).map(tick).collect::<Vec<_>>());
         let mut bytes = std::fs::read(&p).unwrap();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xff;
         std::fs::write(&p, bytes).unwrap();
-        assert!(Wal::read(&p).map_or(true, |t| t.len() < 9));
+        assert!(Legacy::read(&p).map_or(true, |t| t.len() < 9));
     }
 
     #[test]
-    fn replay_leftover() {
-        let d = dir("replay");
-        let mut w = Wal::open(&d, Duration::from_secs(10)).unwrap();
-        for i in 0..5 {
-            w.append(&tick(i)).unwrap();
-        }
-        drop(w);
-        let mut again = Wal::open(&d, Duration::from_secs(10)).unwrap();
-        let sealed = Wal::sealed(&d);
-        assert_eq!(sealed.len(), 1);
-        assert_eq!(Wal::read(&sealed[0]).unwrap().len(), 5);
-        again.append(&tick(9)).unwrap();
-        assert_eq!(Wal::read(&d.join("wal.log")).unwrap().len(), 1);
+    fn leftover_wal_log_is_sealed_once() {
+        let d = dir("leftover");
+        assert!(!Legacy::seal_leftover(&d).unwrap());
+        legacy_file(&d, "wal.log", &[tick(1)]);
+        assert!(Legacy::seal_leftover(&d).unwrap());
+        assert_eq!(Legacy::sealed(&d).len(), 1);
+        assert!(!d.join("wal.log").exists());
     }
 
     #[test]
-    fn unreadable_wal_is_an_error() {
+    fn unreadable_legacy_is_an_error() {
         let d = dir("unreadable");
-        assert!(Wal::read(&d.join("missing.sealed")).is_err());
+        assert!(Legacy::read(&d.join("missing.sealed")).is_err());
         std::fs::write(d.join("junk.sealed"), vec![0xffu8; 64]).unwrap();
-        assert!(Wal::read(&d.join("junk.sealed")).is_err());
+        assert!(Legacy::read(&d.join("junk.sealed")).is_err());
         std::fs::write(d.join("empty.sealed"), b"").unwrap();
-        assert!(Wal::read(&d.join("empty.sealed")).unwrap().is_empty());
+        assert!(Legacy::read(&d.join("empty.sealed")).unwrap().is_empty());
+    }
+
+    fn lake_in(name: &str) -> (PathBuf, Lake, Config) {
+        let d = dir(name);
+        let cfg = Config { data_dir: d.clone(), ..Config::default() };
+        (d, Lake::open(&cfg).unwrap(), cfg)
     }
 
     #[test]
     fn long_channel_bounds_reach_the_manifest() {
-        let d = dir("bounds");
-        let cfg = Config { data_dir: d.clone(), ..Config::default() };
-        let lake = Lake::open(&cfg).unwrap();
+        let (_d, lake, _) = lake_in("bounds");
         let long = format!("/lpc/%2F{}", "ab%20cd".repeat(20));
         assert!(long.len() > 100);
         let ticks: Vec<Tick> = (0..3).map(|i| Tick { ts: i, rows: vec![Row::new("lhm", long.clone(), "L", "load", "%", 1.0), Row::new("lhm", "short", "S", "load", "%", 2.0)], raw: None }).collect();
-        lake.commit(&ticks, &mut |_| false).unwrap();
+        lake.commit_ticks(&ticks, "bounds").unwrap();
         let (lo, hi) = lake.rt.block_on(async {
             let table = lake.catalog.load_table(&lake.telemetry).await.unwrap();
             let snap = table.metadata().current_snapshot().unwrap();
@@ -500,5 +681,95 @@ mod tests {
         });
         assert_eq!(lo.unwrap().to_bytes().unwrap().as_ref(), long.as_bytes());
         assert_eq!(hi.unwrap().to_bytes().unwrap().as_ref(), b"short");
+    }
+
+    fn total_records(lake: &Lake, id: &TableIdent) -> i64 {
+        lake.rt.block_on(async {
+            let table = lake.catalog.load_table(id).await.unwrap();
+            table.metadata().current_snapshot().and_then(|s| s.summary().additional_properties.get("total-records").and_then(|v| v.parse().ok())).unwrap_or(0)
+        })
+    }
+
+    fn hot_dir_with(d: &Path, ticks: i64) {
+        let mut hot = HotStore::open(d, Duration::from_secs(1)).unwrap();
+        for ts in 0..ticks {
+            hot.append(&Tick { ts, rows: vec![Row::new("lhm", "z/last", "Z", "load", "%", 1.0), Row::new("lhm", "a/first", "A", "load", "%", 2.0)], raw: (ts % 2 == 0).then(|| vec![1, 2, 3]) }).unwrap();
+        }
+        assert!(hot.rotate().unwrap());
+    }
+
+    #[test]
+    fn rotation_commits_sealed_hot_files_and_removes_them() {
+        let (d, lake, cfg) = lake_in("rotation");
+        hot_dir_with(&d, 40);
+        let (tid, rid) = (lake.telemetry.clone(), lake.d5_raw.clone());
+        let gate = Gate::new(&cfg, Arc::new(Idle::new(&cfg.gate)));
+        assert!(gate.first_pending());
+        let rotation = Rotation::new(lake, d.clone(), gate);
+        assert!(rotation.pass());
+        assert!(HotStore::sealed(&d).is_empty());
+        assert!(Legacy::sealed(&d).is_empty());
+        assert!(!rotation.gate.first_pending());
+        assert_eq!(total_records(&rotation.lake, &tid), 80);
+        assert_eq!(total_records(&rotation.lake, &rid), 20);
+    }
+
+    #[test]
+    fn same_source_is_never_appended_twice() {
+        let (_d, lake, _) = lake_in("double");
+        let b = Legacy::batch(Table::Telemetry, &[tick(1), tick(2)]).unwrap();
+        assert_eq!(lake.commit(Table::Telemetry, &[b.clone()], "x").unwrap(), Some(2));
+        assert_eq!(lake.commit(Table::Telemetry, &[b], "x").unwrap(), None);
+        assert_eq!(total_records(&lake, &lake.telemetry.clone()), 2);
+    }
+
+    #[test]
+    fn legacy_wal_is_migrated_through_the_same_path() {
+        let (d, lake, cfg) = lake_in("migrate");
+        legacy_file(&d, "wal.log", &(0..6).map(tick).collect::<Vec<_>>());
+        assert!(Legacy::seal_leftover(&d).unwrap());
+        let tid = lake.telemetry.clone();
+        let rotation = Rotation::new(lake, d.clone(), Gate::new(&cfg, Arc::new(Idle::new(&cfg.gate))));
+        assert!(rotation.pass());
+        assert!(Legacy::sealed(&d).is_empty());
+        assert_eq!(total_records(&rotation.lake, &tid), 6);
+    }
+
+    #[test]
+    fn gate_waits_for_idle_and_falls_back_on_age_or_size() {
+        let (d, _lake, mut cfg) = lake_in("gate");
+        cfg.gate.sustain_secs = 0;
+        let idle = Arc::new(Idle::new(&cfg.gate));
+        let gate = Gate::new(&cfg, idle.clone());
+        File::create(&gate.marker).unwrap();
+        let day = Duration::from_secs(86400);
+        assert_eq!(gate.decide(Duration::ZERO, 0), Verdict::Wait);
+        assert!(matches!(gate.decide(day, 0), Verdict::Fallback(_)));
+        assert!(matches!(gate.decide(Duration::ZERO, cfg.wal_max_bytes / 2 + 1), Verdict::Fallback(_)));
+        let row = |c: &str, v: f64| Row::new("lhm", c, c, "load", "%", v);
+        idle.observe(&[row("/intelcpu/0/load/0", 5.0)]);
+        assert_eq!(gate.decide(Duration::ZERO, 0), Verdict::Wait);
+        idle.observe(&[row("/intelcpu/0/load/0", 50.0), row("nvml/0/util_gpu", 0.0)]);
+        assert_eq!(gate.decide(Duration::ZERO, 0), Verdict::Wait);
+        idle.observe(&[row("/intelcpu/0/load/0", 5.0), row("nvml/0/util_gpu", 3.0)]);
+        assert_eq!(gate.decide(Duration::ZERO, 0), Verdict::Run);
+        drop(d);
+    }
+
+    #[test]
+    #[ignore]
+    fn migrates_a_scratch_copy_of_the_real_wal() {
+        let (d, lake, cfg) = lake_in("real-wal");
+        std::fs::copy(std::env::var("DAISYLOOP_TEST_WAL").unwrap(), d.join("wal.log")).unwrap();
+        assert!(Legacy::seal_leftover(&d).unwrap());
+        let ticks = Legacy::read(&Legacy::sealed(&d)[0]).unwrap();
+        let expect: usize = ticks.iter().map(|t| t.rows.len()).sum();
+        let (tid, rid) = (lake.telemetry.clone(), lake.d5_raw.clone());
+        let started = Instant::now();
+        let rotation = Rotation::new(lake, d.clone(), Gate::new(&cfg, Arc::new(Idle::new(&cfg.gate))));
+        assert!(rotation.pass());
+        println!("{} ticks, {expect} rows, {} ms", ticks.len(), started.elapsed().as_millis());
+        assert_eq!(total_records(&rotation.lake, &tid) as usize, expect);
+        assert!(total_records(&rotation.lake, &rid) > 0);
     }
 }
