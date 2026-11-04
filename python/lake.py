@@ -34,6 +34,8 @@ CONFIG = {
 
 MARK = struct.Struct("<QII")
 BODY = 12
+TAIL_FLOOR = 128 << 10
+TAIL_SPANS = 8
 LOG = logging.getLogger("lake")
 
 
@@ -88,20 +90,29 @@ class Lake:
         return t0 is None or not sealed or os.path.getmtime(sealed[0]) >= t0
 
     @staticmethod
-    def verified(data, marks):
+    def walk(data, marks):
         recs = [marks[i:i + MARK.size] for i in range(0, len(marks) - MARK.size + 1, MARK.size)]
         broken = [zlib.crc32(r[:BODY]) != MARK.unpack(r)[2] for r in recs]
-        at = 0
+        at = widest = 0
         for i, r in enumerate(recs):
             if broken[i]:
-                return at, (None if all(broken[i:]) else f"mark {i} is corrupt")
+                return at, (None if all(broken[i:]) else f"mark {i} is corrupt"), widest
             end, crc, _ = MARK.unpack(r)
             if end < at or end > len(data):
-                return at, f"mark {i} ends at {end}, file has {len(data)} bytes, verified {at}"
+                return at, f"mark {i} ends at {end}, file has {len(data)} bytes, verified {at}", widest
             if zlib.crc32(data[at:end]) != crc:
-                return at, f"checksum mismatch in bytes {at}..{end}"
+                return at, f"checksum mismatch in bytes {at}..{end}", widest
+            widest = max(widest, end - at)
             at = end
-        return at, None
+        return at, None, widest
+
+    @classmethod
+    def verified(cls, data, marks):
+        at, flaw, widest = cls.walk(data, marks)
+        tail, limit = len(data) - at, max(TAIL_FLOOR, TAIL_SPANS * widest)
+        if flaw is None and tail > limit:
+            flaw = f"unsynced tail of {tail} bytes exceeds the {limit} bytes one sync interval can write"
+        return at, flaw
 
     @classmethod
     def read_stream(cls, paths):

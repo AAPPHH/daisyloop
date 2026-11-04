@@ -29,6 +29,7 @@ pub struct Config {
     pub commit_secs: u64,
     pub wal_sync_secs: u64,
     pub wal_max_bytes: u64,
+    pub parked_max_bytes: u64,
     pub gate: lake::GateConfig,
     pub stall_secs: u64,
     pub poll_timeout_ms: u64,
@@ -53,6 +54,7 @@ impl Default for Config {
             commit_secs: 3600,
             wal_sync_secs: 1,
             wal_max_bytes: 2 << 30,
+            parked_max_bytes: 10 << 30,
             gate: lake::GateConfig::default(),
             stall_secs: 60,
             poll_timeout_ms: 1300,
@@ -234,6 +236,7 @@ impl Collector {
     fn new(cfg: &Config) -> Result<Collector, Box<dyn std::error::Error>> {
         Legacy::seal_leftover(&cfg.data_dir)?;
         let hot = HotStore::open(&cfg.data_dir, Duration::from_secs(cfg.wal_sync_secs))?;
+        HotStore::trim_parked(&cfg.data_dir, cfg.parked_max_bytes);
         let lake = Lake::open(cfg)?;
         let idle = Arc::new(Idle::new(&cfg.gate));
         let gate = Gate::new(cfg, idle.clone());
@@ -346,6 +349,7 @@ impl Collector {
         }
         self.control_step(&mut tick);
         if self.seq % 60 == 1 {
+            HotStore::trim_parked(&self.cfg.data_dir, self.cfg.parked_max_bytes);
             let used = Legacy::backlog_bytes(&self.cfg.data_dir) + self.hot.live_bytes();
             let full = used >= self.cfg.wal_max_bytes;
             if full {

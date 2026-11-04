@@ -21,6 +21,9 @@ const PARKED: [&str; 2] = ["bad", "partial"];
 const MARK: usize = 16;
 const MAX_FILE: u64 = 4 << 30;
 const SLACK_MICROS: i64 = 86_400_000_000;
+const TAIL_FLOOR: usize = 128 << 10;
+const TAIL_SPANS: usize = 8;
+const CREATE_RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct Loaded<T> {
@@ -28,7 +31,7 @@ pub struct Loaded<T> {
     pub flaw: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Table {
     Telemetry,
     Raw,
@@ -115,13 +118,25 @@ struct Stream {
 impl Stream {
     fn create(dir: &Path, table: Table, start: i64) -> Res<Stream> {
         let path = dir.join(format!("{}-{start:020}.{OPEN}", table.prefix()));
+        let sync = HotStore::sync_path(&path);
+        let fresh = [path.exists(), sync.exists()].map(|e| !e);
+        Self::build(&path, table).inspect_err(|_| {
+            for (p, fresh) in [&path, &sync].into_iter().zip(fresh) {
+                if fresh {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        })
+    }
+
+    fn build(path: &Path, table: Table) -> Res<Stream> {
         let create = |p: &Path| std::fs::OpenOptions::new().create_new(true).write(true).open(p);
-        let tracked = Tracked { file: create(&path)?, hasher: crc32fast::Hasher::new(), pos: 0, marked: 0 };
-        let marks = create(&HotStore::sync_path(&path))?;
+        let tracked = Tracked { file: create(path)?, hasher: crc32fast::Hasher::new(), pos: 0, marked: 0 };
+        let marks = create(&HotStore::sync_path(path))?;
         let opts = IpcWriteOptions::default().with_dictionary_handling(DictionaryHandling::Delta);
         let writer = StreamWriter::try_new_with_options(BufWriter::with_capacity(1 << 16, tracked), &table.schema(), opts)?;
         let dicts = (0..Table::STRINGS.len()).map(|_| Dict::new()).collect();
-        let mut s = Stream { table, path, writer, marks, dicts };
+        let mut s = Stream { table, path: path.to_path_buf(), writer, marks, dicts };
         s.checkpoint()?;
         Ok(s)
     }
@@ -199,6 +214,7 @@ pub struct HotStore {
     sync_every: Duration,
     last_sync: Instant,
     streams: Vec<Stream>,
+    blocked: HashMap<Table, Instant>,
 }
 
 impl HotStore {
@@ -225,9 +241,9 @@ impl HotStore {
         let parked = Self::parked(data_dir);
         if !parked.is_empty() {
             let names: Vec<String> = parked.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
-            log::warn!("{} parked files ({} bytes) are never retried and count against the disk cap: {}", parked.len(), Self::bytes(&parked), names.join(", "));
+            log::warn!("{} parked files ({} bytes) are never retried, have their own budget and are deleted oldest first when it is exceeded: {}", parked.len(), Self::bytes(&parked), names.join(", "));
         }
-        Ok(HotStore { dir, sync_every, last_sync: Instant::now(), streams: Vec::new() })
+        Ok(HotStore { dir, sync_every, last_sync: Instant::now(), streams: Vec::new(), blocked: HashMap::new() })
     }
 
     fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -251,14 +267,36 @@ impl HotStore {
         p.with_file_name(format!("{}.{SYNC}", name.trim_end_matches(&format!(".{SEALED}"))))
     }
 
+    fn create(&mut self, table: Table) -> Res<Option<Stream>> {
+        if self.blocked.get(&table).is_some_and(|t| t.elapsed() < CREATE_RETRY) {
+            return Ok(None);
+        }
+        match Stream::create(&self.dir, table, crate::now_micros()) {
+            Ok(s) => {
+                self.blocked.remove(&table);
+                Ok(Some(s))
+            }
+            Err(e) => {
+                self.blocked.insert(table, Instant::now());
+                Err(e)
+            }
+        }
+    }
+
     pub fn append(&mut self, tick: &Tick) -> Res<()> {
+        let mut first: Option<Box<dyn std::error::Error>> = None;
         for table in Table::ALL {
             let wanted = match table {
                 Table::Raw => tick.raw.is_some(),
                 Table::Telemetry => !tick.rows.is_empty(),
             };
             if wanted && !self.streams.iter().any(|s| s.table == table) {
-                self.streams.push(Stream::create(&self.dir, table, crate::now_micros())?);
+                match self.create(table) {
+                    Ok(s) => self.streams.extend(s),
+                    Err(e) => {
+                        first.get_or_insert(e);
+                    }
+                }
             }
         }
         let due = self.last_sync.elapsed() >= self.sync_every;
@@ -273,14 +311,23 @@ impl HotStore {
                 let table = s.table;
                 let old = self.streams.remove(i);
                 Self::seal(old);
-                self.streams.insert(i, Stream::create(&self.dir, table, crate::now_micros())?);
-                if let Err(e) = self.streams[i].append(tick) {
-                    log::error!("the fresh stream cannot take this tick either, it is lost: {e}");
+                match self.create(table) {
+                    Ok(Some(fresh)) => {
+                        self.streams.insert(i, fresh);
+                        if let Err(e) = self.streams[i].append(tick) {
+                            log::error!("the fresh stream cannot take this tick either, it is lost: {e}");
+                        }
+                    }
+                    Ok(None) => continue,
+                    Err(e) => {
+                        first.get_or_insert(e);
+                        continue;
+                    }
                 }
             }
             i += 1;
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
 
     fn seal(s: Stream) {
@@ -339,30 +386,65 @@ impl HotStore {
         v
     }
 
+    pub fn parked_summary(data_dir: &Path) -> (usize, u64) {
+        let parked = Self::parked(data_dir);
+        (parked.len(), Self::bytes(&parked))
+    }
+
+    pub fn trim_parked(data_dir: &Path, max_bytes: u64) {
+        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Self::parked(data_dir).into_iter().filter_map(|p| std::fs::metadata(&p).ok().map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), p))).collect();
+        files.sort();
+        let mut total: u64 = files.iter().map(|f| f.1).sum();
+        for (_, size, path) in files {
+            if total <= max_bytes {
+                break;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(path.with_extension(SYNC));
+                    total -= size;
+                    log::error!("parked files exceed the budget of {max_bytes} bytes, deleted the oldest: {} ({size} bytes)", path.display());
+                }
+                Err(e) => log::error!("parked files exceed the budget of {max_bytes} bytes, could not delete {}: {e}", path.display()),
+            }
+        }
+    }
+
     pub fn table_of(path: &Path) -> Option<Table> {
         let name = path.file_name()?.to_string_lossy().to_string();
         Table::ALL.into_iter().find(|t| name.starts_with(&format!("{}-", t.prefix())))
     }
 
     pub fn verify(data: &[u8], marks: &[u8]) -> (usize, Option<String>) {
+        let (at, flaw, widest) = Self::walk(data, marks);
+        let tail = data.len() - at;
+        let limit = TAIL_FLOOR.max(TAIL_SPANS * widest);
+        match flaw {
+            None if tail > limit => (at, Some(format!("unsynced tail of {tail} bytes exceeds the {limit} bytes one sync interval can write"))),
+            f => (at, f),
+        }
+    }
+
+    fn walk(data: &[u8], marks: &[u8]) -> (usize, Option<String>, usize) {
         let recs: Vec<&[u8]> = marks.chunks_exact(MARK).collect();
         let broken = |r: &&[u8]| crc32fast::hash(&r[..12]) != u32::from_le_bytes(r[12..].try_into().unwrap());
-        let mut at = 0;
+        let (mut at, mut widest) = (0, 0);
         for (i, rec) in recs.iter().enumerate() {
             if broken(rec) {
-                return (at, (!recs[i + 1..].iter().all(|r| broken(&r))).then(|| format!("mark {i} is corrupt")));
+                return (at, (!recs[i + 1..].iter().all(|r| broken(&r))).then(|| format!("mark {i} is corrupt")), widest);
             }
             let end = u64::from_le_bytes(rec[..8].try_into().unwrap());
             let crc = u32::from_le_bytes(rec[8..12].try_into().unwrap());
             if end < at as u64 || end > data.len() as u64 {
-                return (at, Some(format!("mark {i} ends at {end}, file has {} bytes, verified {at}", data.len())));
+                return (at, Some(format!("mark {i} ends at {end}, file has {} bytes, verified {at}", data.len())), widest);
             }
             if crc32fast::hash(&data[at..end as usize]) != crc {
-                return (at, Some(format!("checksum mismatch in bytes {at}..{end}")));
+                return (at, Some(format!("checksum mismatch in bytes {at}..{end}")), widest);
             }
+            widest = widest.max(end as usize - at);
             at = end as usize;
         }
-        (at, None)
+        (at, None, widest)
     }
 
     fn start_of(path: &Path, table: Table) -> Option<i64> {
@@ -594,6 +676,33 @@ mod tests {
         rec[12..].copy_from_slice(&check.to_le_bytes());
         std::fs::write(HotStore::sync_path(&p), rec).unwrap();
         assert!(HotStore::read(&p).unwrap_err().contains("unreadable header"));
+    }
+
+    #[test]
+    fn failed_create_leaves_no_orphans_and_does_not_block_the_other_stream() {
+        let d = dir("hot-create");
+        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        let hot_dir = HotStore::dir(&d);
+        let t = tick(0, 3);
+        let blocker = hot_dir.join(format!("telemetry-{:020}.{OPEN}", 5));
+        assert!(Stream::create(&hot_dir, Table::Telemetry, 5).is_ok());
+        assert!(blocker.exists() && HotStore::sync_path(&blocker).exists());
+        assert!(Stream::create(&hot_dir, Table::Telemetry, 5).is_err());
+        assert!(blocker.exists() && HotStore::sync_path(&blocker).exists());
+        std::fs::remove_file(&blocker).unwrap();
+        std::fs::remove_file(HotStore::sync_path(&blocker)).unwrap();
+        std::fs::create_dir(HotStore::sync_path(&blocker)).unwrap();
+        assert!(Stream::create(&hot_dir, Table::Telemetry, 5).is_err());
+        assert!(!blocker.exists());
+        std::fs::remove_dir(HotStore::sync_path(&blocker)).unwrap();
+        std::fs::write(&blocker, b"keep").unwrap();
+        assert!(Stream::create(&hot_dir, Table::Telemetry, 5).is_err());
+        assert!(blocker.exists() && !HotStore::sync_path(&blocker).exists());
+        std::fs::remove_file(&blocker).unwrap();
+        hot.blocked.insert(Table::Telemetry, Instant::now());
+        assert!(hot.append(&t).is_ok());
+        assert_eq!(HotStore::open_files(&d).len(), 1);
+        assert_eq!(HotStore::open_files(&d).iter().filter(|p| HotStore::table_of(p) == Some(Table::Raw)).count(), 1);
     }
 
     #[test]

@@ -116,6 +116,13 @@ class LakeResilience(unittest.TestCase):
         after = self.total(lake.refresh())
         self.assertLess(after, before)
 
+    def test_damaged_sidecar_is_a_flaw_but_a_crash_tail_is_not(self):
+        data = bytes(range(256)) * 2048
+        self.assertIsNotNone(Lake.verified(data, b"")[1])
+        self.assertIsNotNone(Lake.verified(data, bytes(64))[1])
+        self.assertIsNotNone(Lake.verified(data, bytes(range(64)))[1])
+        self.assertIsNone(Lake.verified(data[:1920], b"")[1])
+
     def test_refresh_after_fetchone_and_time_range(self):
         lake = self.lake()
         n = self.total(lake)
