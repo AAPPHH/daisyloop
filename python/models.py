@@ -24,8 +24,8 @@ CONFIG = {
         "p_total.ewm600", "cpu_pkg_w.ewm5", "gpu_w.ewm5", "fan_duty", "fan_rpm", "pump_duty", "cpu_core_t.ewm5", "gpu_temp.ewm5",
         "amb_est", "water_minus_amb", "p_excess.ewm120", "tsc_ptotal",
     ],
-    "xgb": {"n_estimators": 600, "learning_rate": 0.04, "max_depth": 5, "min_child_weight": 40, "subsample": 0.7, "colsample_bytree": 0.5,
-            "reg_lambda": 10.0, "tree_method": "hist", "nthread": 2, "early_stopping_rounds": 40, "n_jobs": 2},
+    "xgb": {"rounds": 600, "early": 40, "eta": 0.04, "max_depth": 5, "min_child_weight": 40, "subsample": 0.7, "colsample_bytree": 0.5,
+            "lambda": 10.0, "tree_method": "hist", "nthread": 2, "objective": "reg:squarederror"},
     "boot_block_s": 600,
     "boot_n": 1000,
     "runs_log": os.path.join(HERE, "..", "models", "runs.jsonl"),
@@ -78,6 +78,12 @@ class Dataset:
         y = self.Y[:, self.tnames.index(target)]
         return np.where((self.block == self.bnames.index(block)) & np.isfinite(y))[0]
 
+    def lhm_cols(self):
+        b = self.bnames.index("lhm_missing")
+        miss = np.isfinite(self.F[self.block == b]).mean(0) < 0.05
+        have = np.isfinite(self.F[self.block == self.bnames.index("train")]).mean(0) > 0.9
+        return [n for n, m, h in zip(self.names, miss, have) if m and h]
+
     def X(self, idx, feats=None):
         if feats is None:
             return self.F[idx]
@@ -108,7 +114,7 @@ class Physics:
 
     def x0(self):
         if self.target.startswith("water"):
-            return np.array([12000.0, 25.0, 0.0 if not self.fan_term else 3.0, 26.0, 0.9, 0.9, 0.0]), ([2000, 5, 0, 15, 0.3, 0.3, -60], [60000, 80, 0 if not self.fan_term else 60, 35, 1.3, 1.3, 60])
+            return np.array([12000.0, 25.0, 0.0 if not self.fan_term else 3.0, 26.0, 0.9, 0.9, 0.0]), ([2000, 5, 0, 15, 0.3, 0.3, -100], [80000, 120, 1e-6 if not self.fan_term else 60, 35, 2.0, 2.0, 100])
         return np.array([30.0, 0.15, 5.0]), ([2, 0.0, -20], [600, 1.0, 40])
 
     def fit(self, D, tr):
@@ -187,6 +193,19 @@ class RunLog:
             f.write(json.dumps(kw) + "\n")
 
 
+def augment(D, X, y, feats, frac, seed):
+    rng = np.random.default_rng(seed)
+    cols = set(D.lhm_cols())
+    pick = rng.random(len(X)) < frac
+    Xa = X[pick].copy()
+    ci = [i for i, n in enumerate(feats) if n in cols]
+    Xa[:, ci] = np.nan
+    for i, n in enumerate(feats):
+        if n.startswith("mask_lhm"):
+            Xa[:, i] = 0.0
+    return np.vstack([X, Xa]), np.concatenate([y, y[pick]])
+
+
 def xgb_task(job):
     import xgboost as xgb
     cfg = CONFIG
@@ -197,13 +216,20 @@ def xgb_task(job):
         tr, va = D.sel("train", tg), D.sel("val", tg)
         p = dict(cfg["xgb"])
         p.update(job.get("params", {}))
-        m = xgb.XGBRegressor(**p, random_state=job.get("seed", 0))
-        m.fit(D.X(tr, feats), D.Y[tr, D.tnames.index(tg)], eval_set=[(D.X(va, feats), D.Y[va, D.tnames.index(tg)])], verbose=False)
+        rounds, early = p.pop("rounds"), p.pop("early")
+        p["seed"] = job.get("seed", 0)
+        ti = D.tnames.index(tg)
+        Xtr, ytr = D.X(tr, feats), D.Y[tr, ti]
+        if job.get("lhm_aug"):
+            Xtr, ytr = augment(D, Xtr, ytr, feats, job["lhm_aug"], job.get("seed", 0))
+        dtr, dva = xgb.DMatrix(Xtr, ytr), xgb.DMatrix(D.X(va, feats), D.Y[va, ti])
+        m = xgb.train(p, dtr, rounds, evals=[(dva, "val")], early_stopping_rounds=early, verbose_eval=False)
         r = {"best_iter": int(m.best_iteration), "preds": {}}
         for b in D.bnames:
             ix = D.sel(b, tg)
-            r["preds"][b] = m.predict(D.X(ix, feats)) if len(ix) else np.zeros(0)
-        r["gain"] = dict(zip(feats, m.feature_importances_.astype(float)))
+            r["preds"][b] = m.predict(xgb.DMatrix(D.X(ix, feats)), iteration_range=(0, m.best_iteration + 1)) if len(ix) else np.zeros(0)
+        g = m.get_score(importance_type="gain")
+        r["gain"] = {n: float(g.get(f"f{i}", 0.0)) for i, n in enumerate(feats)}
         if job.get("save"):
             m.save_model(os.path.join(cfg["out_dir"], f"{job['tag']}_{tg}.json"))
         out[tg] = r
