@@ -109,6 +109,7 @@ class Stage2(Stage1):
              {"tag": "x40s", "feats": p40, "targets": allt, "params": shallow},
              {"tag": "xsmall_s", "feats": self.cfg["small"], "targets": allt, "params": shallow},
              {"tag": "x40aug", "feats": p40, "targets": allt, "lhm_aug": 0.3, "params": shallow, "save": True},
+             {"tag": "x44aug", "feats": p40 + [n for n in self.cfg["forced"] if n not in p40], "targets": allt, "lhm_aug": 0.3, "params": shallow, "save": True},
              {"tag": "x80aug", "feats": p80, "targets": allt, "lhm_aug": 0.3, "params": shallow},
              {"tag": "xsmall_aug", "feats": self.cfg["small"], "targets": allt, "lhm_aug": 0.3, "params": shallow, "save": True}]
         n = [{"tag": "nn_phys", "feats": p80, "phys_init": pi, "phys": True, "kind": "nn", "save": True},

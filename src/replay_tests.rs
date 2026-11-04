@@ -64,8 +64,11 @@ fn replay(hysteresis: f64) -> (Stats, (f64, f64), (f64, f64)) {
     for t in 0..g.rows.len() {
         let now = (t as i64 + 1) * 1000;
         let mut rows: Vec<Row> = g.channels.iter().zip(&g.rows[t]).filter_map(|(ch, v)| v.map(|v| Row::new("replay", ch.clone(), ch.clone(), if ch.ends_with("/rpm") { "rpm" } else if ch.ends_with("/duty") { "duty" } else { "other" }, "", v))).collect();
-        rows.push(Row::new("replay", "d5next/pump/duty", "pump duty, assumed", "duty", "%", 19.8));
-        rows.push(Row::new("replay", "d5next/pump/rpm", "pump rpm, assumed", "rpm", "rpm", 2570.0));
+        for (ch, kind, v) in [("d5next/pump/duty", "duty", 19.8), ("d5next/pump/rpm", "rpm", 2570.0)] {
+            if !g.channels.iter().any(|x| x == ch) {
+                rows.push(Row::new("replay", ch, ch, kind, "", v));
+            }
+        }
         c.step(&mut rows, now, g.k0 + t as i64);
         let status = c.status(now);
         let Some(p) = status.predicted.filter(|p| p.age_ms == 0) else { continue };

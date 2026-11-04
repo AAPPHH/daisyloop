@@ -19,6 +19,7 @@ CONFIG = {
         "lhm_missing": [("2026-11-03 08:42", "2026-11-03 13:12")],
         "oor_pump20": [("2026-11-04 07:40", "2026-11-04 09:24"), ("2026-11-04 14:31", "2026-11-04 14:57")],
     },
+    "forced": ["fan_duty", "fan_rpm", "pump_duty", "pump_rpm"],
     "small": [
         "water", "water.ewm30", "water.ewm600", "water.ewm5.d30", "water.ewm5.d120", "p_total.ewm5", "p_total.ewm30", "p_total.ewm120",
         "p_total.ewm600", "cpu_pkg_w.ewm5", "gpu_w.ewm5", "fan_duty", "fan_rpm", "pump_duty", "cpu_core_t.ewm5", "gpu_temp.ewm5",
