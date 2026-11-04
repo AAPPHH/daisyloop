@@ -16,18 +16,25 @@ class RawStore:
         self.meta_path = os.path.join(self.dir, "meta.json")
         self.data_path = os.path.join(self.dir, "raw.npy")
 
-    def build(self):
+    def build(self, force=False):
         os.makedirs(self.dir, exist_ok=True)
         loader = Loader()
         table = loader.cfg["table"]
         con = loader.con
+        rows = con.execute(f"select count(*) from {table}").fetchone()[0]
+        if os.path.exists(self.meta_path) and not force:
+            with open(self.meta_path) as f:
+                known = json.load(f).get("rows", 0)
+            if rows <= known:
+                raise RuntimeError(f"{table} has {rows} rows, the store was built from {known}: no growth, pass force=True to rebuild")
         t0, t1 = con.execute(f"select min(epoch(ts)), max(epoch(ts)) from {table}").fetchone()
         k0, k1 = int(t0), int(t1) - 120
         chans = con.execute(
             f"select channel, any_value(source), any_value(label), any_value(kind), any_value(unit), any_value(role) from {table} group by channel order by channel"
         ).fetchall()
         col = {c[0]: i for i, c in enumerate(chans)}
-        out = np.lib.format.open_memmap(self.data_path, mode="w+", dtype=np.float32, shape=(k1 - k0 + 1, len(chans)))
+        tmp = self.data_path + ".tmp"
+        out = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float32, shape=(k1 - k0 + 1, len(chans)))
         out[:] = np.nan
         step = self.cfg["chunk_s"]
         for a in range(k0, k1 + 1, step):
@@ -39,7 +46,9 @@ class RawStore:
             if len(d["k"]):
                 out[d["k"] - k0, [col[c] for c in d["channel"]]] = d["v"]
         out.flush()
-        meta = {"k0": k0, "k1": k1, "channels": [dict(zip(("channel", "source", "label", "kind", "unit", "role"), c)) for c in chans]}
+        del out
+        os.replace(tmp, self.data_path)
+        meta = {"rows": rows, "k0": k0, "k1": k1, "channels": [dict(zip(("channel", "source", "label", "kind", "unit", "role"), c)) for c in chans]}
         with open(self.meta_path, "w") as f:
             json.dump(meta, f)
 

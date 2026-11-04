@@ -1,4 +1,4 @@
-use crate::hot::{HotStore, Table};
+use crate::hot::{HotStore, Loaded, Table};
 use crate::{Config, Row};
 use arrow_array::{Array, ArrayRef, Float64Array, LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray};
 use arrow_ord::sort::{lexsort_to_indices, SortColumn};
@@ -57,28 +57,44 @@ impl Legacy {
         Ok(true)
     }
 
-    pub fn read(path: &Path) -> Result<Vec<Tick>, String> {
+    pub fn read(path: &Path) -> Result<Loaded<Tick>, String> {
         let mut buf = Vec::new();
         File::open(path).and_then(|mut f| f.read_to_end(&mut buf)).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut ticks = Vec::new();
         let mut at = 0;
-        while at + Self::HEADER <= buf.len() {
-            let len = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()) as usize;
-            let crc = u32::from_le_bytes(buf[at + 4..at + 8].try_into().unwrap());
-            let end = at + Self::HEADER + len;
-            if len > Self::MAX_RECORD || end > buf.len() || crc32fast::hash(&buf[at + Self::HEADER..end]) != crc {
+        let mut flaw = None;
+        while at < buf.len() {
+            let rest = &buf[at..];
+            if rest.iter().all(|b| *b == 0) || rest.len() < Self::HEADER {
+                log::warn!("{}: dropped {} torn tail bytes", path.display(), rest.len());
                 break;
             }
-            match serde_json::from_slice(&buf[at + Self::HEADER..end]) {
-                Ok(t) => ticks.push(t),
-                Err(_) => break,
+            let len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+            let crc = u32::from_le_bytes(rest[4..8].try_into().unwrap());
+            if len > Self::MAX_RECORD {
+                flaw = Some(format!("record at {at} claims {len} bytes"));
+            } else if Self::HEADER + len > rest.len() {
+                log::warn!("{}: dropped {} torn tail bytes", path.display(), rest.len());
+                break;
+            } else if crc32fast::hash(&rest[Self::HEADER..Self::HEADER + len]) != crc {
+                flaw = Some(format!("checksum mismatch in the record at {at}"));
+            } else {
+                match serde_json::from_slice(&rest[Self::HEADER..Self::HEADER + len]) {
+                    Ok(t) => {
+                        ticks.push(t);
+                        at += Self::HEADER + len;
+                        continue;
+                    }
+                    Err(e) => flaw = Some(format!("record at {at} does not parse: {e}")),
+                }
             }
-            at = end;
+            break;
         }
-        if ticks.is_empty() && !buf.is_empty() {
-            return Err(format!("{}: no readable record in {} bytes", path.display(), buf.len()));
+        if ticks.is_empty() && flaw.is_some() {
+            return Err(format!("{}: no readable record in {} bytes: {}", path.display(), buf.len(), flaw.unwrap_or_default()));
         }
-        Ok(ticks)
+        let n = ticks.len();
+        Ok(Loaded { items: ticks, flaw: flaw.map(|f| format!("{}: stopped after {n} ticks, {at} of {} bytes read: {f}", path.display(), buf.len())) })
     }
 
     pub fn sealed(dir: &Path) -> Vec<PathBuf> {
@@ -94,7 +110,7 @@ impl Legacy {
     }
 
     pub fn backlog_bytes(dir: &Path) -> u64 {
-        Self::all_sealed(dir).iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+        HotStore::bytes(&Self::all_sealed(dir))
     }
 
     pub fn batch(table: Table, ticks: &[Tick]) -> Option<RecordBatch> {
@@ -188,16 +204,43 @@ pub enum Verdict {
     Wait,
 }
 
+struct Closed {
+    waiting: bool,
+    last: Instant,
+    since: Instant,
+    total: Duration,
+}
+
 pub struct Gate {
     cfg: GateConfig,
     max_bytes: u64,
+    data_dir: PathBuf,
     marker: PathBuf,
     idle: Arc<Idle>,
+    closed: Mutex<Closed>,
 }
 
 impl Gate {
     pub fn new(cfg: &Config, idle: Arc<Idle>) -> Gate {
-        Gate { cfg: cfg.gate.clone(), max_bytes: cfg.wal_max_bytes, marker: Self::build_marker(&cfg.data_dir), idle }
+        let now = Instant::now();
+        Gate { cfg: cfg.gate.clone(), max_bytes: cfg.wal_max_bytes, data_dir: cfg.data_dir.clone(), marker: Self::build_marker(&cfg.data_dir), idle, closed: Mutex::new(Closed { waiting: false, last: now, since: now, total: Duration::ZERO }) }
+    }
+
+    pub fn note(&self, waiting: bool, sealed_bytes: u64) {
+        let mut guard = self.closed.lock().unwrap();
+        let c = &mut *guard;
+        let now = Instant::now();
+        if c.waiting {
+            c.total += now - c.last;
+        }
+        c.last = now;
+        c.waiting = waiting;
+        if now - c.since >= Duration::from_secs(86400) {
+            let (parked, parked_bytes) = HotStore::parked_summary(&self.data_dir);
+            log::info!("commit gate stayed closed {} s of the last day, {sealed_bytes} sealed bytes waiting, {parked} parked files ({parked_bytes} bytes)", c.total.as_secs());
+            c.since = now;
+            c.total = Duration::ZERO;
+        }
     }
 
     pub fn build_marker(dir: &Path) -> PathBuf {
@@ -502,13 +545,19 @@ impl Rotation {
     pub fn pass(&self) -> bool {
         let mut all_ok = true;
         let mut lowest = false;
-        for path in Legacy::all_sealed(&self.dir) {
+        let listed = Legacy::all_sealed(&self.dir);
+        if listed.is_empty() {
+            self.gate.note(false, 0);
+        }
+        for path in listed {
             if self.stop.load(Ordering::Relaxed) {
                 break;
             }
             let files = Legacy::all_sealed(&self.dir);
             let bytes = files.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum::<u64>();
-            match self.gate.decide(Self::oldest_age(&files), bytes) {
+            let verdict = self.gate.decide(Self::oldest_age(&files), bytes);
+            self.gate.note(verdict == Verdict::Wait, bytes);
+            match verdict {
                 Verdict::Wait => break,
                 Verdict::Fallback(why) if !lowest => {
                     log::warn!("committing outside an idle window ({why}): {bytes} bytes sealed, lowest priority");
@@ -536,9 +585,13 @@ impl Rotation {
                     log::info!("committed {msg} in {} ms", started.elapsed().as_millis());
                 }
                 let _ = File::create(&done);
-                if std::fs::remove_file(path).is_err() && path.exists() {
+                let removed = std::fs::remove_file(path).is_ok();
+                if !removed && path.exists() {
                     log::error!("could not remove committed {}, retrying at the next pass", path.display());
                     return false;
+                }
+                if removed {
+                    let _ = std::fs::remove_file(HotStore::sync_path(path));
                 }
                 let _ = std::fs::remove_file(&done);
                 true
@@ -552,37 +605,55 @@ impl Rotation {
 
     fn commit(&self, path: &Path, name: &str) -> Res<Option<String>> {
         let stem = name.trim_end_matches(".sealed");
-        let (msg, telemetry) = match HotStore::table_of(path) {
+        let (msg, telemetry, flaw) = match HotStore::table_of(path) {
             None => {
-                let ticks = match Legacy::read(path) {
+                let loaded = match Legacy::read(path) {
                     Ok(t) => t,
-                    Err(e) => return self.quarantine(path, &e),
+                    Err(e) => return self.park(path, &e, "bad"),
                 };
-                let (a, b) = self.lake.commit_ticks(&ticks, stem)?;
-                (format!("{a} telemetry rows, {b} raw reports from {name}"), a > 0)
+                let (a, b) = self.lake.commit_ticks(&loaded.items, stem)?;
+                (format!("{a} telemetry rows, {b} raw reports from {name}"), a > 0, (a + b > 0, loaded.flaw))
             }
             Some(table) => {
-                let batches = match HotStore::read(path) {
+                let guard = PathBuf::from(format!("{}.reading", path.display()));
+                if guard.exists() {
+                    let _ = std::fs::remove_file(&guard);
+                    return self.park(path, "the previous read of this file crashed the process", "bad");
+                }
+                let _ = File::create(&guard);
+                let read = HotStore::read(path);
+                let _ = std::fs::remove_file(&guard);
+                let loaded = match read {
                     Ok(b) => b,
-                    Err(e) => return self.quarantine(path, &e),
+                    Err(e) if e.retry => return Err(e.msg.into()),
+                    Err(e) => return self.park(path, &e.msg, "bad"),
                 };
-                match self.lake.commit(table, &batches, stem)? {
-                    Some(n) if table == Table::Telemetry => (format!("{n} telemetry rows from {name}"), true),
-                    Some(n) => (format!("{n} raw reports from {name}"), false),
-                    None => return Ok(None),
+                let n = self.lake.commit(table, &loaded.items, stem)?;
+                match (n, table) {
+                    (Some(n), Table::Telemetry) => (format!("{n} telemetry rows from {name}"), n > 0, (n > 0, loaded.flaw)),
+                    (Some(n), Table::Raw) => (format!("{n} raw reports from {name}"), false, (n > 0, loaded.flaw)),
+                    (None, _) => (String::new(), false, (false, loaded.flaw)),
                 }
             }
         };
-        if telemetry {
-            let _ = File::create(&self.gate.marker);
+        if flaw.0 {
+            if telemetry {
+                let _ = File::create(&self.gate.marker);
+            }
+            if flaw.1.is_some() {
+                log::info!("committed {msg}");
+            }
         }
-        Ok(Some(msg))
+        if let Some(flaw) = flaw.1 {
+            return self.park(path, &format!("committed the verified prefix, the rest is kept: {flaw}"), "partial");
+        }
+        Ok(flaw.0.then_some(msg))
     }
 
-    fn quarantine(&self, path: &Path, why: &str) -> Res<Option<String>> {
-        let bad = path.with_extension("bad");
-        log::error!("sealed file unreadable, moved to {}: {why}", bad.display());
-        std::fs::rename(path, bad)?;
+    fn park(&self, path: &Path, why: &str, ext: &str) -> Res<Option<String>> {
+        let to = path.with_extension(ext);
+        log::error!("{} moved to {} and never retried: {why}", path.display(), to.display());
+        std::fs::rename(path, to)?;
         Ok(None)
     }
 }
@@ -627,15 +698,17 @@ mod tests {
         let d = dir("legacy");
         let ticks: Vec<Tick> = (0..10).map(tick).collect();
         let p = legacy_file(&d, "wal.log", &ticks);
-        assert_eq!(Legacy::read(&p).unwrap(), ticks);
+        assert_eq!(Legacy::read(&p).unwrap().items, ticks);
         let len = std::fs::metadata(&p).unwrap().len();
         OpenOptions::new().write(true).open(&p).unwrap().set_len(len - 7).unwrap();
-        assert_eq!(Legacy::read(&p).unwrap(), (0..9).map(tick).collect::<Vec<_>>());
+        let torn = Legacy::read(&p).unwrap();
+        assert_eq!((torn.items, torn.flaw), ((0..9).map(tick).collect::<Vec<_>>(), None));
         let mut bytes = std::fs::read(&p).unwrap();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xff;
         std::fs::write(&p, bytes).unwrap();
-        assert!(Legacy::read(&p).map_or(true, |t| t.len() < 9));
+        let flipped = Legacy::read(&p).unwrap();
+        assert!(flipped.items.len() < 9 && flipped.flaw.is_some());
     }
 
     #[test]
@@ -655,7 +728,7 @@ mod tests {
         std::fs::write(d.join("junk.sealed"), vec![0xffu8; 64]).unwrap();
         assert!(Legacy::read(&d.join("junk.sealed")).is_err());
         std::fs::write(d.join("empty.sealed"), b"").unwrap();
-        assert!(Legacy::read(&d.join("empty.sealed")).unwrap().is_empty());
+        assert!(Legacy::read(&d.join("empty.sealed")).unwrap().items.is_empty());
     }
 
     fn lake_in(name: &str) -> (PathBuf, Lake, Config) {
@@ -692,9 +765,9 @@ mod tests {
     }
 
     fn hot_dir_with(d: &Path, ticks: i64) {
-        let mut hot = HotStore::open(d, Duration::from_secs(1)).unwrap();
+        let mut hot = HotStore::open(d, Duration::ZERO).unwrap();
         for ts in 0..ticks {
-            hot.append(&Tick { ts, rows: vec![Row::new("lhm", "z/last", "Z", "load", "%", 1.0), Row::new("lhm", "a/first", "A", "load", "%", 2.0)], raw: (ts % 2 == 0).then(|| vec![1, 2, 3]) }).unwrap();
+            hot.append(&Tick { ts: crate::now_micros() + ts, rows: vec![Row::new("lhm", "z/last", "Z", "load", "%", 1.0), Row::new("lhm", "a/first", "A", "load", "%", 2.0)], raw: (ts % 2 == 0).then(|| vec![1, 2, 3]) }).unwrap();
         }
         assert!(hot.rotate().unwrap());
     }
@@ -713,6 +786,170 @@ mod tests {
         assert!(!rotation.gate.first_pending());
         assert_eq!(total_records(&rotation.lake, &tid), 80);
         assert_eq!(total_records(&rotation.lake, &rid), 20);
+    }
+
+    fn rotation_in(name: &str) -> (PathBuf, Rotation, TableIdent) {
+        let (d, lake, cfg) = lake_in(name);
+        let tid = lake.telemetry.clone();
+        (d.clone(), Rotation::new(lake, d, Gate::new(&cfg, Arc::new(Idle::new(&cfg.gate)))), tid)
+    }
+
+    fn sealed_telemetry(d: &Path, ticks: i64) -> PathBuf {
+        hot_dir_with(d, ticks);
+        HotStore::sealed(d).into_iter().find(|p| HotStore::table_of(p) == Some(Table::Telemetry)).unwrap()
+    }
+
+    #[test]
+    fn a_file_whose_read_crashed_the_process_is_parked_instead_of_crashing_again() {
+        let (d, rotation, tid) = rotation_in("reading-guard");
+        let sealed = sealed_telemetry(&d, 4);
+        let guard = PathBuf::from(format!("{}.reading", sealed.display()));
+        std::fs::write(&guard, b"").unwrap();
+        assert!(rotation.pass());
+        assert!(sealed.with_extension("bad").exists() && !sealed.exists() && !guard.exists());
+        assert_eq!(total_records(&rotation.lake, &tid), 0);
+    }
+
+    #[test]
+    fn schema_only_file_commits_nothing_and_leaves_no_marker() {
+        let (d, rotation, tid) = rotation_in("schema-only");
+        let sealed = sealed_telemetry(&d, 4);
+        let sync = HotStore::sync_path(&sealed);
+        let first = std::fs::read(&sync).unwrap()[..16].to_vec();
+        let schema_len = u64::from_le_bytes(first[..8].try_into().unwrap());
+        std::fs::write(&sync, first).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&sealed).unwrap().set_len(schema_len).unwrap();
+        for p in HotStore::sealed(&d).into_iter().filter(|p| HotStore::table_of(p) == Some(Table::Raw)) {
+            std::fs::remove_file(p).unwrap();
+        }
+        assert!(rotation.pass());
+        assert!(rotation.gate.first_pending());
+        assert!(HotStore::sealed(&d).is_empty());
+        assert!(HotStore::parked(&d).is_empty());
+        assert_eq!(total_records(&rotation.lake, &tid), 0);
+    }
+
+    fn wide_sealed_telemetry(d: &Path) -> PathBuf {
+        let mut hot = HotStore::open(d, Duration::ZERO).unwrap();
+        let channels: Vec<String> = (0..444).map(|i| format!("/lhm/sensor{i}")).collect();
+        for ts in 0..30 {
+            hot.append(&Tick { ts: crate::now_micros() + ts, rows: channels.iter().map(|c| Row::new("lhm", c.clone(), "L", "load", "%", ts as f64)).collect(), raw: None }).unwrap();
+        }
+        assert!(hot.rotate().unwrap());
+        HotStore::sealed(d).into_iter().find(|p| HotStore::table_of(p) == Some(Table::Telemetry)).unwrap()
+    }
+
+    #[test]
+    fn damaged_sidecar_parks_the_file_instead_of_deleting_it() {
+        let cases: [(&str, fn(&[u8]) -> Vec<u8>, bool); 8] = [
+            ("empty", |_| Vec::new(), true),
+            ("schema-mark-only", |m| m[..16].to_vec(), true),
+            ("half-the-marks", |m| m[..m.len() / 32 * 16].to_vec(), true),
+            ("all-nul", |m| vec![0; m.len()], true),
+            ("garbage", |m| (0..m.len()).map(|i| (i * 31 + 7) as u8).collect(), true),
+            ("short", |m| m[..9].to_vec(), true),
+            ("complete", |m| m.to_vec(), false),
+            ("complete-with-crash-tail", |m| m.to_vec(), false),
+        ];
+        for (name, damage, parked) in cases {
+            let (d, rotation, tid) = rotation_in(&format!("sidecar-{name}"));
+            let sealed = wide_sealed_telemetry(&d);
+            let sync = HotStore::sync_path(&sealed);
+            let full = std::fs::read(&sync).unwrap();
+            assert_eq!(full.len(), 30 * 16 + 16, "{name}");
+            std::fs::write(&sync, damage(&full)).unwrap();
+            if name == "complete-with-crash-tail" {
+                let mut f = OpenOptions::new().append(true).open(&sealed).unwrap();
+                f.write_all(&[7u8; 1920]).unwrap();
+            }
+            assert!(rotation.pass(), "{name}");
+            assert_eq!(sealed.with_extension("partial").exists(), parked, "{name}");
+            assert_eq!(HotStore::parked(&d).len(), parked as usize, "{name}");
+            assert!(!sealed.exists(), "{name}");
+            let rows = total_records(&rotation.lake, &tid);
+            match name {
+                "half-the-marks" => assert!(rows > 0 && rows < 13320, "{name} {rows}"),
+                "complete" | "complete-with-crash-tail" => assert_eq!(rows, 13320, "{name}"),
+                _ => assert_eq!(rows, 0, "{name}"),
+            }
+            assert_eq!(rotation.gate.first_pending(), rows == 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn parked_files_do_not_count_toward_the_recording_backlog_and_have_their_own_budget() {
+        let d = dir("parked-budget");
+        let hot = d.join("hot");
+        std::fs::create_dir_all(&hot).unwrap();
+        for (i, ext) in ["bad", "partial", "bad"].into_iter().enumerate() {
+            std::fs::write(hot.join(format!("telemetry-{i}.arrows.{ext}")), vec![1u8; 1000]).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::write(hot.join("telemetry-9.arrows.sealed"), vec![1u8; 50]).unwrap();
+        assert_eq!(Legacy::backlog_bytes(&d), 50);
+        assert_eq!(HotStore::parked_summary(&d), (3, 3000));
+        HotStore::trim_parked(&d, 3000);
+        assert_eq!(HotStore::parked(&d).len(), 3);
+        HotStore::trim_parked(&d, 1500);
+        let left = HotStore::parked(&d);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].to_string_lossy().ends_with("telemetry-2.arrows.bad"));
+    }
+
+    #[test]
+    fn a_partial_that_committed_rows_sets_the_marker() {
+        let (d, rotation, _) = rotation_in("partial-marker");
+        let sealed = sealed_telemetry(&d, 40);
+        let mut data = std::fs::read(&sealed).unwrap();
+        let mid = data.len() / 2;
+        data[mid] ^= 0x40;
+        std::fs::write(&sealed, data).unwrap();
+        assert!(rotation.gate.first_pending());
+        assert!(rotation.pass());
+        assert!(!rotation.gate.first_pending());
+    }
+
+    #[test]
+    fn mid_file_damage_commits_the_prefix_and_parks_the_file() {
+        let (d, rotation, tid) = rotation_in("partial");
+        let sealed = sealed_telemetry(&d, 40);
+        let mut data = std::fs::read(&sealed).unwrap();
+        let mid = data.len() / 2;
+        data[mid] ^= 0x40;
+        std::fs::write(&sealed, data).unwrap();
+        assert!(rotation.pass());
+        assert!(!sealed.exists());
+        assert!(sealed.with_extension("partial").exists());
+        let n = total_records(&rotation.lake, &tid);
+        assert!(n > 0 && n < 80, "{n}");
+        assert_eq!(HotStore::parked(&d).len(), 1);
+        assert_eq!(Legacy::backlog_bytes(&d), 0);
+        assert!(HotStore::parked_summary(&d).1 > 0);
+    }
+
+    #[test]
+    fn mid_file_damage_in_a_legacy_file_parks_it_after_committing_the_prefix() {
+        let (d, rotation, tid) = rotation_in("legacy-partial");
+        let p = legacy_file(&d, "wal-1.sealed", &(0..10).map(tick).collect::<Vec<_>>());
+        let mut bytes = std::fs::read(&p).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xff;
+        std::fs::write(&p, bytes).unwrap();
+        assert!(rotation.pass());
+        assert!(d.join("wal-1.partial").exists() && !p.exists());
+        let n = total_records(&rotation.lake, &tid);
+        assert!(n > 0 && n < 10, "{n}");
+    }
+
+    #[test]
+    fn legacy_nan_value_serialized_as_null_does_not_stop_the_read() {
+        let d = dir("legacy-nan");
+        let mut ticks: Vec<Tick> = (0..6).map(tick).collect();
+        ticks[2].rows[0].value = f64::NAN;
+        let p = legacy_file(&d, "wal.log", &ticks);
+        let read = Legacy::read(&p).unwrap();
+        assert_eq!((read.items.len(), read.flaw), (6, None));
+        assert!(read.items[2].rows[0].value.is_nan());
     }
 
     #[test]
@@ -763,19 +1000,27 @@ mod tests {
         let (d, lake, cfg) = lake_in("real-wal");
         std::fs::copy(std::env::var("DAISYLOOP_TEST_WAL").unwrap(), d.join("wal.log")).unwrap();
         assert!(Legacy::seal_leftover(&d).unwrap());
-        let ticks = Legacy::read(&Legacy::sealed(&d)[0]).unwrap();
-        let expect: usize = ticks.iter().map(|t| t.rows.len()).sum();
+        let bytes = std::fs::read(&Legacy::sealed(&d)[0]).unwrap();
+        let (mut at, mut expect, mut ticks) = (0, 0usize, 0usize);
+        while at + 8 <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            let record: serde_json::Value = serde_json::from_slice(&bytes[at + 8..at + 8 + len]).unwrap();
+            expect += record["rows"].as_array().unwrap().len();
+            ticks += 1;
+            at += 8 + len;
+        }
+        assert_eq!(at, bytes.len());
         let (tid, rid) = (lake.telemetry.clone(), lake.d5_raw.clone());
         let started = Instant::now();
         let rotation = Rotation::new(lake, d.clone(), Gate::new(&cfg, Arc::new(Idle::new(&cfg.gate))));
         assert!(rotation.pass());
-        println!("{} ticks, {expect} rows, {} ms", ticks.len(), started.elapsed().as_millis());
+        println!("{ticks} ticks, {expect} rows, {} ms", started.elapsed().as_millis());
         assert_eq!(total_records(&rotation.lake, &tid) as usize, expect);
         assert!(total_records(&rotation.lake, &rid) > 0);
     }
 
     fn fixture_tick(ts: i64, channels: &[String], value: f64) -> Tick {
-        Tick { ts, rows: channels.iter().map(|c| Row::new("lhm", c.clone(), "L", "load", "%", value)).collect(), raw: (ts % 2 == 0).then(|| vec![9, 9]) }
+        Tick { ts: crate::now_micros() + ts, rows: channels.iter().map(|c| Row::new("lhm", c.clone(), "L", "load", "%", value)).collect(), raw: (ts % 2 == 0).then(|| vec![9, 9]) }
     }
 
     #[test]
@@ -788,7 +1033,7 @@ mod tests {
             committed += chans.len();
             lake.commit_ticks(&[fixture_tick(k as i64 * 10, &chans, 1.0)], &format!("seed{k}")).unwrap();
         }
-        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        let mut hot = HotStore::open(&d, Duration::ZERO).unwrap();
         let chans = vec![long(0), "hot/only".to_string()];
         for ts in 1000..1005 {
             hot.append(&fixture_tick(ts, &chans, 2.0)).unwrap();
@@ -801,7 +1046,7 @@ mod tests {
         assert!(hot.rotate().unwrap());
         for p in HotStore::sealed(&d).into_iter().filter(|p| !before.contains(p)) {
             let table = HotStore::table_of(&p).unwrap();
-            let rows = lake.commit(table, &HotStore::read(&p).unwrap(), p.file_name().unwrap().to_string_lossy().trim_end_matches(".sealed")).unwrap().unwrap();
+            let rows = lake.commit(table, &HotStore::read(&p).unwrap().items, p.file_name().unwrap().to_string_lossy().trim_end_matches(".sealed")).unwrap().unwrap();
             if table == Table::Telemetry {
                 committed += rows;
             }
