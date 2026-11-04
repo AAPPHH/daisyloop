@@ -1,0 +1,33 @@
+[package]
+name = "daisyloop-ui"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "daisyloop_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "daisyloop-ui"
+path = "src/main.rs"
+
+[[bin]]
+name = "daisyloop-mock"
+path = "src/bin/mock.rs"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+egui_plot = "0.38.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tray-icon = "0.26.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO"] }
