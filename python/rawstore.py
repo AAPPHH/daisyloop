@@ -19,13 +19,12 @@ class RawStore:
     def build(self):
         os.makedirs(self.dir, exist_ok=True)
         loader = Loader()
-        loc = loader.location(loader.cfg["table"])
+        table = loader.cfg["table"]
         con = loader.con
-        t0, t1 = con.execute("select min(epoch(ts)), max(epoch(ts)) from iceberg_scan(?)", [loc]).fetchone()
+        t0, t1 = con.execute(f"select min(epoch(ts)), max(epoch(ts)) from {table}").fetchone()
         k0, k1 = int(t0), int(t1) - 120
         chans = con.execute(
-            "select channel, any_value(source), any_value(label), any_value(kind), any_value(unit), any_value(role) from iceberg_scan(?) group by channel order by channel",
-            [loc],
+            f"select channel, any_value(source), any_value(label), any_value(kind), any_value(unit), any_value(role) from {table} group by channel order by channel"
         ).fetchall()
         col = {c[0]: i for i, c in enumerate(chans)}
         out = np.lib.format.open_memmap(self.data_path, mode="w+", dtype=np.float32, shape=(k1 - k0 + 1, len(chans)))
@@ -34,8 +33,8 @@ class RawStore:
         for a in range(k0, k1 + 1, step):
             b = min(a + step, k1 + 1)
             d = con.execute(
-                "select cast(floor(epoch(ts)) as bigint) k, channel, avg(value) v from iceberg_scan(?) where epoch(ts) >= ? and epoch(ts) < ? group by all",
-                [loc, float(a), float(b)],
+                f"select cast(floor(epoch(ts)) as bigint) k, channel, avg(value) v from {table} where epoch(ts) >= ? and epoch(ts) < ? group by all",
+                [float(a), float(b)],
             ).fetchnumpy()
             if len(d["k"]):
                 out[d["k"] - k0, [col[c] for c in d["channel"]]] = d["v"]

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod control;
 mod d5;
+mod hot;
 mod ipc;
 mod lake;
 mod model;
@@ -9,7 +10,8 @@ mod sources;
 use control::Control;
 use d5::{D5Actuator, D5Control, HidControl};
 use ipc::{Hub, Ipc, Job};
-use lake::{Committer, Lake, Tick, Wal};
+use hot::HotStore;
+use lake::{Committer, Gate, Idle, Lake, Legacy, Tick};
 use model::{Model, XgbModel};
 use serde::{Deserialize, Serialize};
 use sources::{D5Next, Lhm, Nvidia, Source};
@@ -27,6 +29,7 @@ pub struct Config {
     pub commit_secs: u64,
     pub wal_sync_secs: u64,
     pub wal_max_bytes: u64,
+    pub gate: lake::GateConfig,
     pub stall_secs: u64,
     pub poll_timeout_ms: u64,
     pub keep_versions: usize,
@@ -47,9 +50,10 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             interval_secs: 1.0,
-            commit_secs: 900,
+            commit_secs: 3600,
             wal_sync_secs: 1,
             wal_max_bytes: 2 << 30,
+            gate: lake::GateConfig::default(),
             stall_secs: 60,
             poll_timeout_ms: 1300,
             keep_versions: 10,
@@ -208,7 +212,9 @@ struct Collector {
     workers: Vec<Worker>,
     results: Receiver<Reply>,
     seq: u64,
-    wal: Wal,
+    hot: HotStore,
+    idle: Arc<Idle>,
+    gate_first: bool,
     committer: Committer,
     alive: Arc<AtomicU64>,
     cfg: Config,
@@ -221,9 +227,13 @@ struct Collector {
 
 impl Collector {
     fn new(cfg: &Config) -> Result<Collector, Box<dyn std::error::Error>> {
-        let wal = Wal::open(&cfg.data_dir, Duration::from_secs(cfg.wal_sync_secs))?;
+        Legacy::seal_leftover(&cfg.data_dir)?;
+        let hot = HotStore::open(&cfg.data_dir, Duration::from_secs(cfg.wal_sync_secs))?;
         let lake = Lake::open(cfg)?;
-        let committer = Committer::spawn(lake, cfg.data_dir.clone(), Duration::from_secs(60));
+        let idle = Arc::new(Idle::new(&cfg.gate));
+        let gate = Gate::new(cfg, idle.clone());
+        let gate_first = gate.first_pending();
+        let committer = Committer::spawn(lake, cfg.data_dir.clone(), Duration::from_secs(60), gate);
         let (rtx, results) = channel();
         let factories: [(&'static str, Factory); 3] = [
             ("d5next", |c| Box::new(D5Next::new(c))),
@@ -263,7 +273,7 @@ impl Collector {
         if cfg.ipc_enabled {
             Ipc::spawn(hub.clone(), jobs_tx);
         }
-        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), wal_full: false })
+        Ok(Collector { workers, results, seq: 0, hot, idle, gate_first, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), wal_full: false })
     }
 
     fn accept(&mut self, i: usize, r: Result<Sample, String>, tick: &mut Tick) {
@@ -331,18 +341,19 @@ impl Collector {
         }
         self.control_step(&mut tick);
         if self.seq % 60 == 1 {
-            let used = Wal::sealed_bytes(&self.cfg.data_dir) + self.wal.live_bytes();
+            let used = Legacy::backlog_bytes(&self.cfg.data_dir) + self.hot.live_bytes();
             let full = used >= self.cfg.wal_max_bytes;
             if full {
-                log::error!("WAL backlog {used} bytes reached wal_max_bytes {}, new ticks are DROPPED until the commit backlog drains", self.cfg.wal_max_bytes);
+                log::error!("hot store backlog {used} bytes reached wal_max_bytes {}, new ticks are DROPPED until the commit backlog drains", self.cfg.wal_max_bytes);
             } else if self.wal_full {
-                log::warn!("WAL backlog drained to {used} bytes, recording again");
+                log::warn!("hot store backlog drained to {used} bytes, recording again");
             }
             self.wal_full = full;
         }
+        self.idle.observe(&tick.rows);
         if !self.wal_full && (!tick.rows.is_empty() || tick.raw.is_some()) {
-            if let Err(e) = self.wal.append(&tick) {
-                log::error!("wal append failed: {e}");
+            if let Err(e) = self.hot.append(&tick) {
+                log::error!("hot append failed: {e}");
             }
         }
     }
@@ -361,10 +372,10 @@ impl Collector {
     }
 
     fn rotate(&mut self) {
-        match self.wal.rotate() {
+        match self.hot.rotate() {
             Ok(true) => self.committer.notify(),
             Ok(false) => {}
-            Err(e) => log::error!("wal rotate failed: {e}"),
+            Err(e) => log::error!("hot rotate failed: {e}"),
         }
     }
 
@@ -393,7 +404,7 @@ impl Collector {
         let stop_file = self.cfg.data_dir.join("stop");
         let heartbeat = self.cfg.data_dir.join("heartbeat");
         let mut next = Instant::now();
-        let mut next_commit = Instant::now() + commit_every.min(Duration::from_secs(60));
+        let mut next_commit = Instant::now() + if self.gate_first { commit_every.min(Duration::from_secs(60)) } else { commit_every };
         self.committer.notify();
         loop {
             self.tick();
@@ -409,7 +420,9 @@ impl Collector {
                 let _ = std::fs::remove_file(&stop_file);
                 let now = self.mono();
                 self.control.shutdown(now);
-                self.rotate();
+                if let Err(e) = self.hot.rotate() {
+                    log::error!("hot rotate failed: {e}");
+                }
                 self.committer.finish();
                 log::info!("stopped");
                 return;

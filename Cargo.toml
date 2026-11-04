@@ -8,6 +8,10 @@ iceberg = "0.10.1"
 iceberg-catalog-sql = "0.10.1"
 arrow-array = "58"
 arrow-schema = "58"
+arrow-ipc = "58"
+arrow-ord = "58"
+arrow-select = "58"
+arrow-cast = "58"
 parquet = "58"
 sqlx = { version = "0.8", default-features = false, features = ["any", "sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
