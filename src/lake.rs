@@ -147,6 +147,9 @@ fn field(id: i32, name: &str, t: PrimitiveType) -> Arc<NestedField> {
 
 impl Lake {
     pub fn open(cfg: &Config) -> Res<Lake> {
+        if cfg.keep_versions == 0 {
+            return Err("keep_versions must be at least 1".into());
+        }
         let rt = Runtime::new()?;
         let url = |p: std::path::PathBuf| p.to_string_lossy().replace('\\', "/");
         let props = HashMap::from([
@@ -269,8 +272,14 @@ impl Lake {
         let mut table = tx.commit(catalog).await?;
         if table.metadata().snapshots().len() > 2 * keep {
             let tx = Transaction::new(&table);
-            let tx = tx.expire_snapshots().retain_last(keep).expire_older_than_ms(crate::now_micros() / 1000).apply(tx)?;
-            table = tx.commit(catalog).await?;
+            let expired = match tx.expire_snapshots().retain_last(keep).expire_older_than_ms(crate::now_micros() / 1000).apply(tx) {
+                Ok(tx) => tx.commit(catalog).await,
+                Err(e) => Err(e),
+            };
+            match expired {
+                Ok(t) => table = t,
+                Err(e) => log::error!("snapshot expiry of {} failed after a successful append: {e}", ident.name()),
+            }
         }
         Self::prune(&table, keep);
         Ok(())
