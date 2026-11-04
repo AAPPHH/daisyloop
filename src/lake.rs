@@ -266,8 +266,12 @@ impl Lake {
         let files = writer.close().await?;
         let tx = Transaction::new(&table);
         let tx = tx.fast_append().add_data_files(files).apply(tx)?;
-        let tx = tx.expire_snapshots().retain_last(keep).expire_older_than_ms(crate::now_micros() / 1000).apply(tx)?;
-        let table = tx.commit(catalog).await?;
+        let mut table = tx.commit(catalog).await?;
+        if table.metadata().snapshots().len() > 2 * keep {
+            let tx = Transaction::new(&table);
+            let tx = tx.expire_snapshots().retain_last(keep).expire_older_than_ms(crate::now_micros() / 1000).apply(tx)?;
+            table = tx.commit(catalog).await?;
+        }
         Self::prune(&table, keep);
         Ok(())
     }
@@ -289,11 +293,10 @@ impl Lake {
         }
         versions.sort();
         let cut = versions.len().saturating_sub(keep + 2);
-        let fresh = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|a| a < Duration::from_secs(600));
         for p in versions.into_iter().take(cut).chain(lists) {
             let norm = p.to_string_lossy().replace('\\', "/");
             let name = norm.rsplit('/').next().unwrap_or("");
-            if norm == current || live.iter().any(|l| l.ends_with(name)) || fresh(&p) {
+            if norm == current || live.iter().any(|l| l.ends_with(name)) {
                 continue;
             }
             let _ = std::fs::remove_file(&p);
