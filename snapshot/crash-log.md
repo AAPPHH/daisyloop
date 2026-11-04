@@ -27,7 +27,7 @@ Fixed before the result: supported if there is no event 41 during 72 h of normal
 
 ## Other suspects, unchanged so far
 
-- RAM runs at 8200 MT/s, 1.40 V, 2 x 24 GB (Win32_PhysicalMemory).
+- RAM: CUDIMM per user, 8200 MT/s, 1.40 V, 2 x 24 GB (Win32_PhysicalMemory). Normal for CUDIMM XMP, but above the CPU's official DDR5-6400 as far as known, unverified here. Next test if C6 fails: XMP off or 6400.
 - BIOS 2.A70 dated 2025-07-14.
 - CPU 270 W peaks at 104 C.
 - Power supply.
