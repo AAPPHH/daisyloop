@@ -265,7 +265,7 @@ impl Lake {
         let table = catalog.load_table(ident).await?;
         let meta = table.metadata();
         let batch = RecordBatch::try_new(Arc::new(schema_to_arrow_schema(meta.current_schema())?), cols)?;
-        let props = WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default())).build();
+        let props = WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::default())).set_statistics_truncate_length(None).build();
         let parquet = ParquetWriterBuilder::new(props, meta.current_schema().clone());
         let rolling = RollingFileWriterBuilder::new_with_default_file_size(
             parquet,
@@ -478,5 +478,27 @@ mod tests {
         assert!(Wal::read(&d.join("junk.sealed")).is_err());
         std::fs::write(d.join("empty.sealed"), b"").unwrap();
         assert!(Wal::read(&d.join("empty.sealed")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn long_channel_bounds_reach_the_manifest() {
+        let d = dir("bounds");
+        let cfg = Config { data_dir: d.clone(), ..Config::default() };
+        let lake = Lake::open(&cfg).unwrap();
+        let long = format!("/lpc/%2F{}", "ab%20cd".repeat(20));
+        assert!(long.len() > 100);
+        let ticks: Vec<Tick> = (0..3).map(|i| Tick { ts: i, rows: vec![Row::new("lhm", long.clone(), "L", "load", "%", 1.0), Row::new("lhm", "short", "S", "load", "%", 2.0)], raw: None }).collect();
+        lake.commit(&ticks, &mut |_| false).unwrap();
+        let (lo, hi) = lake.rt.block_on(async {
+            let table = lake.catalog.load_table(&lake.telemetry).await.unwrap();
+            let snap = table.metadata().current_snapshot().unwrap();
+            let bytes = table.file_io().new_input(snap.manifest_list()).unwrap().read().await.unwrap();
+            let list = iceberg::spec::ManifestList::parse_with_version(&bytes, table.metadata().format_version()).unwrap();
+            let manifest = list.entries()[0].load_manifest(table.file_io()).await.unwrap();
+            let file = manifest.entries()[0].data_file();
+            (file.lower_bounds().get(&3).cloned(), file.upper_bounds().get(&3).cloned())
+        });
+        assert_eq!(lo.unwrap().to_bytes().unwrap().as_ref(), long.as_bytes());
+        assert_eq!(hi.unwrap().to_bytes().unwrap().as_ref(), b"short");
     }
 }

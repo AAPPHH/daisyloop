@@ -14,3 +14,5 @@ __pycache__/
 /models/nn_*.json
 /tools/model_infer/target
 /target-ui
+/target-lake
+/python/.venv
