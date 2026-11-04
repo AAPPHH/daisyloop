@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod control;
+mod d5;
 mod ipc;
 mod lake;
 mod model;
 mod protocol;
 mod sources;
-use control::{Control, D5Actuator, D5Control, HidControl};
+use control::Control;
+use d5::{D5Actuator, D5Control, HidControl};
 use ipc::{Hub, Ipc, Job};
 use lake::{Committer, Lake, Tick, Wal};
 use model::{Model, XgbModel};
