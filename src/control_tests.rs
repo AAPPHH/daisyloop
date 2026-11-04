@@ -641,3 +641,6 @@ fn alarms_cover_pump_fan_and_stale_sources() {
 
 #[path = "safety_tests.rs"]
 mod safety;
+
+#[path = "replay_tests.rs"]
+mod replay;
