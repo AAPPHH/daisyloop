@@ -17,7 +17,7 @@ Response bodies (`type`): `snapshot`, `history`, `ack`, `error {message}`. A ref
 
 `controls[]` (one per channel, `d5.fan` and `d5.pump`): `mode` (`off`|`shadow`|`active`), `allowed` (`writes_enabled` is on), `identified` (the model's response for this channel is identified), `drive` (`firmware` | `duty` | `test`), `target_rpm`, `actual_rpm`, `duty`, `commanded_duty`, `floor_duty`, `min_rpm`, `max_rpm`, `fallback` (reason while the channel sits on the firmware PID after a fault), `note`.
 
-`alarms[]`: `kind` (`water_high`, `cpu_high`, `pump_low`, `fan_stopped`, `stale`, `fallback`), `channel`, `message`, `value`, `limit`, `since_ms`.
+`alarms[]`: `kind` (`water_high`, `cpu_high`, `pump_low`, `fan_stopped`, `stale`, `fallback`, `foreign`, `budget`), `channel`, `message`, `value`, `limit`, `since_ms`.
 
 The first snapshot is available before the first control tick: `controls` may be empty and the UI must tolerate that. The UI polls `snapshot` at 1 Hz. History is requested only on range or selection change and every 10 s / 60 s / 5 min for 1 h / 1 d / 1 w; the daemon keeps 6 h in RAM.
 
