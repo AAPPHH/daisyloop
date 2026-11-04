@@ -7,7 +7,7 @@ Arrow in memory, Arrow IPC on disk while hot, Parquet in Iceberg when cold, Duck
 - `hot/telemetry-<start>.arrows`, `hot/d5_raw-<start>.arrows`: Arrow IPC stream, one RecordBatch per tick, schema as the Iceberg tables, strings dictionary-encoded (Int16 keys, delta dictionaries), flushed per tick, fsync every `wal_sync_secs`. About 13 KB/s (1.1 GB/day) at 444 rows per tick versus 75 KB/s for the former JSON WAL.
 - `hot/<file>.arrows.sync`: the integrity sidecar, see below. It keeps the open name (no `.sealed`) and is deleted with the data file.
 - `hot/*.arrows.sealed`: a file closed by an hourly rename (`commit_secs`, default 3600). The rename is unconditional and costs nothing. Clean stop and startup only seal (startup retries a rename that another reader blocks, and never fails the start); a legacy `wal.log` is renamed to `wal-<micros>.sealed` at startup and migrated through the same path.
-- `*.partial`, `*.bad`: parked files, never retried. They count against `wal_max_bytes` and are listed in one log line at start.
+- `*.partial`, `*.bad`: parked files, never retried. They do not count against `wal_max_bytes` (a systematic cause would otherwise stop recording). They have their own budget `parked_max_bytes` (default 10 GiB); beyond it the oldest parked files are deleted, each with an error log line naming file and size. Their count and bytes are logged at start and in the daily gate line.
 - `catalog.db` and `warehouse/`: Iceberg SQL catalog and tables `telemetry`, `d5_raw`. Each rotated file becomes one commit of one sorted (channel, ts) zstd Parquet file with untruncated channel statistics.
 - `committed-<exe size>-<exe mtime>`: marker that this build has committed at least one telemetry row. The installer removes it on every install, so a reinstall of the same build verifies a fresh commit.
 
@@ -17,13 +17,20 @@ After every fsync of a data file the writer appends one 16 byte record to `<file
 
 Readers (Rust committer, Python view) verify before any Arrow parse and trust only the verified prefix:
 
-- Bytes after the last valid mark are the unsynced tail of a crashed file. They are dropped with a warning; the file is then committed as usual.
+- Bytes after the last valid mark are the unsynced tail of a crashed file. A tail of at most `max(128 KiB, 8 x the widest synced span)` (one tick is about 13 KB, a crash tail 0 to about 2 KB) is dropped with a warning and the file is committed as usual. A larger tail means a damaged sidecar (empty, short, all NUL, garbage, half the marks): it is a flaw, the verified prefix is committed and the file is parked as `.partial`. The view applies the same bound. A file whose data ends at the last mark and holds only the schema is removed without a line.
 - A last mark that is itself torn is part of that tail. A bad mark or checksum mismatch in the middle, a mark beyond the end of the data, or a data file without a `.sync` file keep the verified prefix and mark the file damaged: the Rust committer commits the prefix, logs an error and moves the file to `.partial`. The Python view logs the same and shows the prefix.
 - The parse of the verified prefix runs under `catch_unwind` and must consume exactly the verified length, else the file is damaged as above. A panic or unreadable header moves the file to `.bad`.
 - Before a commit every batch is checked: schema equals the table schema, `ts` inside `[start - 1 day, max(start, mtime) + 1 day]` of the file, no empty channel. Otherwise the file goes to `.bad`.
 - The file being written is readable in the view up to its last mark, at most `wal_sync_secs` old.
-- Writer side: any append, flush, fsync or dictionary overflow error abandons that stream, seals it (its tail past the last mark is dropped by the readers), logs an error and opens a fresh stream. A failed final sync in a rotation seals what is verified.
+- Writer side: a failed stream create removes its half-made `.arrows` and `.sync`, does not skip the other stream and is retried at most every 30 s per table; the first error is returned after both streams were tried. Any append, flush, fsync or dictionary overflow error abandons that stream, seals it (its tail past the last mark is dropped by the readers), logs an error and opens a fresh stream. A failed final sync in a rotation seals what is verified.
 - The legacy JSON WAL has a crc per record. A torn tail is dropped; a bad or unparsable record in the middle keeps the prefix and moves the file to `.partial`. A NaN stored as `null` reads back as NaN.
+
+A `.partial` that committed rows logs `committed N ...` and sets the first-commit marker like a clean commit.
+
+## Known gaps
+
+- A tick that was partly written before an append error is written again to the fresh stream, so it can appear twice.
+- A legacy WAL whose torn tail leaves a garbage record length above 64 MiB is parked as `.partial` instead of dropped as a torn tail.
 
 ## Rotation gate
 
@@ -35,7 +42,7 @@ The commit thread runs at low priority and handles sealed files in name order (l
 
 All thresholds are configuration. Once a day the committer logs how long the gate stayed closed and how many sealed bytes were waiting, to judge whether the idle window opens often enough.
 
-A commit appends to Iceberg with the file name as the snapshot source, then creates `<file>.done`, removes the file and its `.sync`, then removes `.done`. The first-commit marker is written right after the append, only when at least one telemetry row was committed; a file with no rows is deleted without a log line. A crash in between is safe: a sealed file whose source is already in a snapshot is skipped and deleted. If hot plus sealed plus parked data reaches `wal_max_bytes`, new ticks are dropped with a loud error until the backlog drains.
+A commit appends to Iceberg with the file name as the snapshot source, then creates `<file>.done`, removes the file and its `.sync`, then removes `.done`. The first-commit marker is written right after the append, only when at least one telemetry row was committed; a file with no rows is deleted without a log line. A crash in between is safe: a sealed file whose source is already in a snapshot is skipped and deleted. If hot plus sealed data reaches `wal_max_bytes`, new ticks are dropped with a loud error until the backlog drains.
 
 ## Reading
 
