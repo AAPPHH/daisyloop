@@ -625,7 +625,7 @@ impl Control {
     pub fn new(cfg: &Config, factory: Factory) -> Control {
         let flags = [cfg.fan_control_enabled, cfg.pump_control_enabled];
         let loops = Spec::ALL.iter().zip(flags).map(|(s, a)| Loop::new(*s, if s.name == "fan" { &cfg.control.fan } else { &cfg.control.pump }, a)).collect();
-        let mut c = Control { cfg: cfg.control.clone(), dir: cfg.data_dir.clone(), factory, guard: None, recovery: None, inputs: Inputs::default(), loops, last_verify: 0, misses: 0 };
+        let mut c = Control { cfg: cfg.control.clone(), dir: cfg.state_dir(), factory, guard: None, recovery: None, inputs: Inputs::default(), loops, last_verify: 0, misses: 0 };
         if let Some(rec) = Recovery::load(&c.dir) {
             if flags.iter().any(|f| *f) {
                 c.recover(rec);

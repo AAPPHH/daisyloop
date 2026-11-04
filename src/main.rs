@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use simplelog::{ConfigBuilder, LevelFilter, WriteLogger};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize, Clone)]
@@ -22,6 +22,7 @@ pub struct Config {
     pub interval_secs: f64,
     pub commit_secs: u64,
     pub wal_sync_secs: u64,
+    pub wal_max_bytes: u64,
     pub stall_secs: u64,
     pub poll_timeout_ms: u64,
     pub keep_versions: usize,
@@ -43,6 +44,7 @@ impl Default for Config {
             interval_secs: 1.0,
             commit_secs: 900,
             wal_sync_secs: 10,
+            wal_max_bytes: 2 << 30,
             stall_secs: 60,
             poll_timeout_ms: 1300,
             keep_versions: 10,
@@ -73,15 +75,34 @@ impl Config {
         }
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("daisyloop")
     }
+    const ADMIN_KEYS: [&'static str; 8] = ["sidecar", "fan_control_enabled", "pump_control_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
+    pub fn installed_dir() -> Option<PathBuf> {
+        std::env::current_exe().ok()?.parent().filter(|d| d.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin"))).map(|d| d.to_path_buf())
+    }
+    fn table(path: &Path) -> toml::Table {
+        std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default()
+    }
+    pub fn from_tables(mut user: toml::Table, admin: Option<toml::Table>) -> Config {
+        if let Some(admin) = admin {
+            for k in Config::ADMIN_KEYS {
+                user.remove(k);
+            }
+            user.extend(admin);
+        }
+        toml::Value::Table(user).try_into().unwrap_or_default()
+    }
     pub fn load() -> Config {
         let dir = Config::default_data_dir();
-        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
-        let mut cfg: Config = toml::from_str(&text).unwrap_or_default();
+        let admin = Config::installed_dir().map(|bin| Config::table(&bin.join("config.toml")));
+        let mut cfg = Config::from_tables(Config::table(&dir.join("config.toml")), admin);
         cfg.data_dir = dir;
         cfg
     }
+    pub fn state_dir(&self) -> PathBuf {
+        Config::installed_dir().unwrap_or_else(|| self.data_dir.clone())
+    }
     pub fn sidecar_exe(&self) -> PathBuf {
-        if let Some(p) = &self.sidecar {
+        if let Some(p) = self.sidecar.as_ref().filter(|_| Config::installed_dir().is_none()) {
             return p.clone();
         }
         let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
@@ -92,10 +113,8 @@ impl Config {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar").join("publish").join("daisyloop-lhm.exe")
     }
     pub fn mutex_name(&self) -> String {
-        if std::env::var_os("DAISYLOOP_DATA_DIR").is_none() {
-            return r"Global\daisyloop-collector".into();
-        }
-        let h = self.data_dir.to_string_lossy().to_lowercase().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        let dir = std::fs::canonicalize(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
+        let h = dir.to_string_lossy().to_lowercase().replace('/', "\\").trim_end_matches('\\').bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
         format!(r"Global\daisyloop-{h:016x}")
     }
     pub fn catalog_db(&self) -> PathBuf {
@@ -165,6 +184,7 @@ struct Collector {
     jobs: Receiver<Job>,
     start: Instant,
     autostart: Vec<&'static str>,
+    wal_full: bool,
 }
 
 impl Collector {
@@ -206,7 +226,7 @@ impl Collector {
             Ipc::spawn(hub.clone(), jobs_tx);
         }
         let autostart = control.autostart();
-        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), autostart })
+        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), autostart, wal_full: false })
     }
 
     fn accept(&mut self, i: usize, r: Result<Sample, String>, tick: &mut Tick) {
@@ -267,7 +287,17 @@ impl Collector {
             }
         }
         self.control_step(&mut tick);
-        if !tick.rows.is_empty() || tick.raw.is_some() {
+        if self.seq % 60 == 1 {
+            let used = Wal::sealed_bytes(&self.cfg.data_dir) + self.wal.live_bytes();
+            let full = used >= self.cfg.wal_max_bytes;
+            if full {
+                log::error!("WAL backlog {used} bytes reached wal_max_bytes {}, new ticks are DROPPED until the commit backlog drains", self.cfg.wal_max_bytes);
+            } else if self.wal_full {
+                log::warn!("WAL backlog drained to {used} bytes, recording again");
+            }
+            self.wal_full = full;
+        }
+        if !self.wal_full && (!tick.rows.is_empty() || tick.raw.is_some()) {
             if let Err(e) = self.wal.append(&tick) {
                 log::error!("wal append failed: {e}");
             }
@@ -409,4 +439,38 @@ fn main() {
     };
     log::info!("collector started, data {}, interval {}s, commit {}s", cfg.data_dir.display(), cfg.interval_secs, cfg.commit_secs);
     c.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(s: &str) -> toml::Table {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn installed_ignores_security_keys_from_the_user_config() {
+        let user = t("keep_versions = 3
+fan_control_enabled = true
+sidecar = 'C:/evil.exe'
+[control.fan]
+autostart = true
+");
+        let cfg = Config::from_tables(user.clone(), Some(t("pump_control_enabled = true")));
+        assert_eq!(cfg.keep_versions, 3);
+        assert!(!cfg.fan_control_enabled && cfg.pump_control_enabled);
+        assert!(cfg.sidecar.is_none() && !cfg.control.fan.autostart);
+        let dev = Config::from_tables(user, None);
+        assert!(dev.fan_control_enabled && dev.sidecar.is_some() && dev.control.fan.autostart);
+    }
+
+    #[test]
+    fn mutex_name_is_derived_from_the_data_dir() {
+        let a = Config { data_dir: PathBuf::from(r"C:\Temp\X"), ..Config::default() };
+        let b = Config { data_dir: PathBuf::from(r"c:/temp/x/"), ..Config::default() };
+        let c = Config { data_dir: PathBuf::from(r"C:\Temp\Y"), ..Config::default() };
+        assert_eq!(a.mutex_name(), b.mutex_name());
+        assert_ne!(a.mutex_name(), c.mutex_name());
+    }
 }
