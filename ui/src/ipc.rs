@@ -1,9 +1,7 @@
 use crate::protocol::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const POLL: Duration = Duration::from_millis(1000);
@@ -39,46 +37,27 @@ pub enum Job {
     History(u64, HistoryQuery),
 }
 
-#[derive(Default)]
-pub struct LinkState {
-    pub snapshot: Option<Snapshot>,
-    pub last_ok: Option<Instant>,
-    pub connected: bool,
-    pub history: Option<(u64, HistoryResponse)>,
-    pub error: Option<String>,
+pub enum LinkEvent {
+    Snapshot(Snapshot),
+    History(u64, HistoryResponse),
+    Down(String),
+    Error(String),
 }
 
 pub struct Link {
     jobs: Sender<Job>,
-    pub state: Arc<Mutex<LinkState>>,
-}
-
-struct Wake {
-    ctx: eframe::egui::Context,
-    visible: Arc<AtomicBool>,
-}
-
-impl Wake {
-    fn ping(&self) {
-        if self.visible.load(Ordering::Relaxed) {
-            self.ctx.request_repaint();
-        }
-    }
 }
 
 impl Link {
-    pub fn start(ctx: eframe::egui::Context, visible: Arc<AtomicBool>) -> Self {
+    pub fn start(on_event: impl Fn(LinkEvent) + Send + 'static) -> Self {
         let (jobs, rx) = channel::<Job>();
-        let state = Arc::new(Mutex::new(LinkState::default()));
-        let shared = state.clone();
-        let wake = Wake { ctx, visible };
         std::thread::spawn(move || {
             let mut next_id = 0u64;
             loop {
                 let file = match OpenOptions::new().read(true).write(true).open(PIPE_NAME) {
                     Ok(f) => f,
                     Err(e) => {
-                        Self::mark_down(&shared, e.to_string(), &wake);
+                        on_event(LinkEvent::Down(e.to_string()));
                         match rx.recv_timeout(POLL) {
                             Err(RecvTimeoutError::Disconnected) => return,
                             _ => continue,
@@ -104,41 +83,27 @@ impl Link {
                     if resp.v != VERSION {
                         return Err(std::io::Error::other(format!("Protokoll v{} statt v{}", resp.v, VERSION)));
                     }
-                    let mut st = shared.lock().unwrap();
                     match (resp.body, job) {
                         (ResponseBody::Snapshot(s), _) => {
-                            st.snapshot = Some(s);
-                            st.last_ok = Some(Instant::now());
-                            st.connected = true;
-                            st.error = None;
                             due = Instant::now() + POLL;
+                            on_event(LinkEvent::Snapshot(s));
                         }
-                        (ResponseBody::History(h), Some(Job::History(tag, _))) => st.history = Some((tag, h)),
-                        (ResponseBody::Error { message }, _) => st.error = Some(message),
+                        (ResponseBody::History(h), Some(Job::History(tag, _))) => on_event(LinkEvent::History(tag, h)),
+                        (ResponseBody::Error { message }, _) => on_event(LinkEvent::Error(message)),
                         (ResponseBody::Ack, Some(Job::Command(_))) => due = Instant::now(),
                         _ => {}
                     }
-                    drop(st);
-                    wake.ping();
                 })();
                 if let Err(e) = outcome {
                     if e.kind() == std::io::ErrorKind::Interrupted {
                         return;
                     }
-                    Self::mark_down(&shared, e.to_string(), &wake);
+                    on_event(LinkEvent::Down(e.to_string()));
                     std::thread::sleep(POLL);
                 }
             }
         });
-        Self { jobs, state }
-    }
-
-    fn mark_down(state: &Arc<Mutex<LinkState>>, err: String, wake: &Wake) {
-        let mut st = state.lock().unwrap();
-        st.connected = false;
-        st.error = Some(err);
-        drop(st);
-        wake.ping();
+        Self { jobs }
     }
 
     pub fn command(&self, c: Command) {

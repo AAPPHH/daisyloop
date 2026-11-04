@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
-pub const PIPE_NAME: &str = r"\.\pipe\daisyloop";
+pub const PIPE_NAME: &str = r"\\.\pipe\daisyloop";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]

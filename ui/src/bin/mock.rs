@@ -178,7 +178,7 @@ impl Sim {
         let (ri, di) = (self.index[rpm], self.index[duty]);
         self.sensors[ri].role = Role::Rpm(ci, max_rpm);
         self.sensors[di].role = Role::Duty(ci);
-        let start = base_duty.clamp(floor, 100.0);
+        let start = 40.0f64.max(floor);
         self.controls.push(Control {
             id: id.into(),
             label: label.into(),
@@ -195,8 +195,8 @@ impl Sim {
 
     fn build_controls(&mut self) {
         let d5 = |s: &str| format!("{D5}/{s}");
-        self.add_control("d5.pump", "Pumpe", ControlKind::Pump, &d5("fan/0"), &d5("control/1"), 30.0, WATER, 33.0, (8.0, 0.15, 0.0));
-        self.add_control("d5.fan", "Radiatorlüfter (D5 NEXT)", ControlKind::Fan, &d5("fan/1"), &d5("control/0"), 15.0, WATER, 33.0, (12.0, 0.25, 20.0));
+        self.add_control("d5.pump", "Pumpe", ControlKind::Pump, &d5("fan/0"), &d5("control/1"), 30.0, WATER, 35.0, (8.0, 0.15, 0.0));
+        self.add_control("d5.fan", "Radiatorlüfter (D5 NEXT)", ControlKind::Fan, &d5("fan/1"), &d5("control/0"), 15.0, WATER, 35.0, (12.0, 0.25, 20.0));
         for (i, label) in [(0, "CPU Fan"), (1, "Pump Fan"), (2, "Chipset Fan"), (3, "EZ-Connect Fan"), (10, "System Fan #1"), (11, "System Fan #2"), (12, "System Fan #3"), (13, "System Fan #4"), (14, "System Fan #5"), (15, "System Fan #6")] {
             let b = |s: &str| format!("/lpc/nct6687dr/0/{s}/{i}");
             self.add_control(&format!("board.{i}"), label, ControlKind::Fan, &b("fan"), &b("control"), 20.0, CPU_TEMP, 70.0, (3.0, 0.05, 0.0));
