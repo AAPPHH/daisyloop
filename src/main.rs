@@ -2,11 +2,13 @@
 mod control;
 mod ipc;
 mod lake;
+mod model;
 mod protocol;
 mod sources;
-use control::{Control, D5Control, HidControl};
+use control::{Control, D5Actuator, D5Control, HidControl};
 use ipc::{Hub, Ipc, Job};
 use lake::{Committer, Lake, Tick, Wal};
+use model::{Model, XgbModel};
 use serde::{Deserialize, Serialize};
 use sources::{D5Next, Lhm, Nvidia, Source};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,8 +34,7 @@ pub struct Config {
     pub d5_vid: u16,
     pub d5_pid: u16,
     pub d5_usage_page: u16,
-    pub fan_control_enabled: bool,
-    pub pump_control_enabled: bool,
+    pub writes_enabled: bool,
     pub control: control::ControlConfig,
     pub ipc_enabled: bool,
     #[serde(skip)]
@@ -56,8 +57,7 @@ impl Default for Config {
             d5_vid: 0x0C70,
             d5_pid: 0xF00E,
             d5_usage_page: 0xFF00,
-            fan_control_enabled: false,
-            pump_control_enabled: false,
+            writes_enabled: false,
             control: control::ControlConfig::default(),
             ipc_enabled: true,
             install_dir: None,
@@ -72,7 +72,7 @@ impl Config {
     fn dev_data_dir(env_dir: Option<PathBuf>, local: Option<PathBuf>) -> PathBuf {
         env_dir.unwrap_or_else(|| local.unwrap_or_else(std::env::temp_dir).join("daisyloop"))
     }
-    const ADMIN_KEYS: [&'static str; 9] = ["data_dir", "sidecar", "fan_control_enabled", "pump_control_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
+    const ADMIN_KEYS: [&'static str; 8] = ["data_dir", "sidecar", "writes_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
     pub fn program_dir() -> PathBuf {
         std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")).join("daisyloop")
     }
@@ -202,7 +202,6 @@ struct Collector {
     hub: Arc<Mutex<Hub>>,
     jobs: Receiver<Job>,
     start: Instant,
-    autostart: Vec<&'static str>,
     wal_full: bool,
 }
 
@@ -238,14 +237,19 @@ impl Collector {
             })
             .collect();
         let hid_cfg = cfg.clone();
-        let control = Control::new(cfg, Box::new(move || HidControl::open(&hid_cfg).map(|h| Box::new(h) as Box<dyn D5Control>)));
-        let hub = Arc::new(Mutex::new(Hub::new(&cfg.control)));
+        let dirs = XgbModel::search_dirs(&cfg.data_dir, cfg.install_dir.as_deref());
+        let model = XgbModel::load(&dirs, &cfg.control.model_spec, &cfg.control.model_file).map(|m| Box::new(m) as Box<dyn Model>);
+        if let Err(e) = &model {
+            log::error!("model not loaded: {e}");
+        }
+        let actuator = D5Actuator::new(Box::new(move || HidControl::open(&hid_cfg).map(|h| Box::new(h) as Box<dyn D5Control>)), &cfg.control);
+        let control = Control::new(cfg, Box::new(actuator), model);
+        let hub = Arc::new(Mutex::new(Hub::new(&cfg.control, control.status(0))));
         let (jobs_tx, jobs) = channel();
         if cfg.ipc_enabled {
             Ipc::spawn(hub.clone(), jobs_tx);
         }
-        let autostart = control.autostart();
-        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), autostart, wal_full: false })
+        Ok(Collector { workers, results, seq: 0, wal, committer, alive: Arc::new(AtomicU64::new(0)), cfg: cfg.clone(), control, hub, jobs, start: Instant::now(), wal_full: false })
     }
 
     fn accept(&mut self, i: usize, r: Result<Sample, String>, tick: &mut Tick) {
@@ -329,22 +333,11 @@ impl Collector {
 
     fn control_step(&mut self, tick: &mut Tick) {
         let now = self.mono();
-        while let Ok((cmd, reply)) = self.jobs.try_recv() {
+        for (cmd, reply) in self.jobs.try_iter().take(16).collect::<Vec<_>>() {
             let _ = reply.send(ipc::apply(&mut self.control, cmd, now));
         }
-        self.control.step(&mut tick.rows, now);
-        let mut pending = std::mem::take(&mut self.autostart);
-        pending.retain(|name| match self.control.enable(name, now) {
-            Ok(()) => false,
-            Err(e) => {
-                if now > 300_000 {
-                    log::error!("{name} control autostart gave up: {e}");
-                }
-                now <= 300_000
-            }
-        });
-        self.autostart = pending;
-        self.hub.lock().unwrap().update(tick, self.control.statuses());
+        self.control.step(&mut tick.rows, now, tick.ts / 1_000_000);
+        self.hub.lock().unwrap().update(tick, self.control.status(now));
     }
 
     fn rotate(&mut self) {
@@ -480,13 +473,13 @@ mod tests {
 
     #[test]
     fn installed_ignores_security_keys_from_the_user_config() {
-        let admin = "data_dir = 'C:\\Users\\user\\AppData\\Local\\daisyloop'\npump_control_enabled = true\n[control.fan]\ntarget_water = 33.0\n";
-        let user = "keep_versions = 3\nfan_control_enabled = true\ndata_dir = 'C:\\evil'\nsidecar = 'C:/evil.exe'\n[control.fan]\nautostart = true\n";
+        let admin = "data_dir = 'C:\\Users\\user\\AppData\\Local\\daisyloop'\nwrites_enabled = true\n[control.fan]\nfloor_duty = 35.0\n";
+        let user = "keep_versions = 3\nwrites_enabled = false\ndata_dir = 'C:\\evil'\nsidecar = 'C:/evil.exe'\n[control.fan]\nautostart_active = true\n";
         let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\SYSTEM")), &reader(vec![(ADMIN_FILE, admin), (USER_FILE, user)]));
         assert_eq!(cfg.keep_versions, 3);
-        assert!(!cfg.fan_control_enabled && cfg.pump_control_enabled);
-        assert!(cfg.sidecar.is_none() && !cfg.control.fan.autostart);
-        assert_eq!(cfg.control.fan.target_water, Some(33.0));
+        assert!(cfg.writes_enabled);
+        assert!(cfg.sidecar.is_none() && cfg.control.fan.autostart_active.is_none());
+        assert_eq!(cfg.control.fan.floor_duty, Some(35.0));
         assert_eq!(cfg.data_dir, PathBuf::from(DATA));
         assert_eq!(cfg.state_dir(), Path::new(INSTALL).join("state"));
         assert!(cfg.install_dir.is_some());
@@ -501,10 +494,10 @@ mod tests {
 
     #[test]
     fn dev_run_uses_env_or_localappdata_and_keeps_everything_from_the_user_config() {
-        let files = vec![(r"C:\env\config.toml", "fan_control_enabled = true\nsidecar = 'C:/x.exe'"), (USER_FILE, "keep_versions = 7")];
+        let files = vec![(r"C:\env\config.toml", "writes_enabled = true\nsidecar = 'C:/x.exe'"), (USER_FILE, "keep_versions = 7")];
         let env = Config::resolve(None, Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files.clone()));
         assert_eq!(env.data_dir, PathBuf::from(r"C:\env"));
-        assert!(env.fan_control_enabled && env.sidecar.is_some() && env.install_dir.is_none());
+        assert!(env.writes_enabled && env.sidecar.is_some() && env.install_dir.is_none());
         assert_eq!(env.state_dir(), PathBuf::from(r"C:\env"));
         let local = Config::resolve(None, None, Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files));
         assert_eq!(local.data_dir, PathBuf::from(DATA));

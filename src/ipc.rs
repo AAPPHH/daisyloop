@@ -1,4 +1,4 @@
-use crate::control::{Control as Controller, ControlConfig, LoopStatus};
+use crate::control::{Control as Controller, ControlConfig, Status};
 use crate::lake::Tick;
 use crate::protocol::*;
 use crate::Row;
@@ -16,32 +16,33 @@ use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
 
-pub const SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;GRGW;;;IU)";
+pub const SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;0x0012019b;;;IU)";
 const MAX_CLIENTS: usize = 8;
 const MAX_LINE: u64 = 1 << 20;
 const COMMAND_WAIT: Duration = Duration::from_secs(5);
+const COMMAND_GAP: Duration = Duration::from_millis(100);
+const MAX_HISTORY_CHANNELS: usize = 64;
 
 pub type Job = (Command, Sender<Result<(), String>>);
 
 pub struct Hub {
     cfg: ControlConfig,
-    latest: BTreeMap<String, Row>,
+    latest: BTreeMap<String, (i64, Row)>,
     extremes: HashMap<String, (f64, f64)>,
     history: HashMap<String, VecDeque<(i64, f64)>>,
-    statuses: Vec<LoopStatus>,
+    status: Status,
     ts_ms: i64,
     seq: u64,
-    alarm_since: Option<i64>,
 }
 
 impl Hub {
-    pub fn new(cfg: &ControlConfig) -> Hub {
-        Hub { cfg: cfg.clone(), latest: BTreeMap::new(), extremes: HashMap::new(), history: HashMap::new(), statuses: vec![], ts_ms: 0, seq: 0, alarm_since: None }
+    pub fn new(cfg: &ControlConfig, status: Status) -> Hub {
+        Hub { cfg: cfg.clone(), latest: BTreeMap::new(), extremes: HashMap::new(), history: HashMap::new(), status, ts_ms: 0, seq: 0 }
     }
-    pub fn update(&mut self, tick: &Tick, statuses: Vec<LoopStatus>) {
+    pub fn update(&mut self, tick: &Tick, status: Status) {
         self.ts_ms = tick.ts / 1000;
         self.seq += 1;
-        self.statuses = statuses;
+        self.status = status;
         let keep = self.cfg.history_secs as i64 * 1000;
         for r in &tick.rows {
             if !r.value.is_finite() {
@@ -55,10 +56,8 @@ impl Hub {
             while h.front().is_some_and(|p| self.ts_ms - p.0 > keep) {
                 h.pop_front();
             }
-            self.latest.insert(r.channel.clone(), r.clone());
+            self.latest.insert(r.channel.clone(), (self.ts_ms, r.clone()));
         }
-        let hot = self.latest.get(&self.cfg.water_channel).is_some_and(|r| r.value > self.cfg.water_limit);
-        self.alarm_since = if hot { self.alarm_since.or(Some(self.ts_ms)) } else { None };
     }
     fn kind(k: &str) -> Kind {
         match k {
@@ -74,57 +73,71 @@ impl Hub {
             _ => Kind::Other,
         }
     }
-    fn hardware(source: &str) -> &str {
-        match source {
-            "d5next" => "Aquacomputer D5 NEXT",
-            "nvml" => "NVIDIA GPU",
-            "lhm" => "LibreHardwareMonitor",
-            "daisyloop" => "daisyloop",
+    fn unit(u: &str) -> String {
+        match u {
+            "degC" => "°C",
+            "rpm" => "RPM",
             other => other,
         }
+        .to_string()
     }
-    fn control(&self, s: &LoopStatus) -> Control {
-        let pump = s.name == "pump";
-        Control {
-            id: format!("d5.{}", s.name),
-            label: if pump { "Pumpe (D5 NEXT)".into() } else { "Radiatorlüfter (D5 NEXT)".into() },
-            kind: if pump { ControlKind::Pump } else { ControlKind::Fan },
-            rpm_channel: format!("d5next/{}/rpm", s.name),
-            duty_channel: format!("d5next/{}/duty", s.name),
-            mode: if s.state == 1 { Mode::Pid } else { Mode::Manual },
-            floor: s.lo,
-            pid: PidParams { source: self.cfg.water_channel.clone(), setpoint: s.target, kp: s.kp, ki: s.ki, kd: s.kd, min_duty: s.lo, max_duty: s.hi },
-            state: PidState { output: s.setpoint.unwrap_or(s.output), error: s.terms.error, p: s.terms.p, i: s.terms.i, d: s.terms.d, saturated: s.terms.saturated },
-        }
+    fn hardware(source: &str, channel: &str) -> String {
+        let mut parts = channel.trim_start_matches('/').split('/');
+        let (a, b) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        let group = match (source, a) {
+            ("d5next", _) => "Aquacomputer D5 NEXT".to_string(),
+            ("nvml", _) => "NVIDIA GPU (NVML)".into(),
+            ("daisyloop", _) => "daisyloop".into(),
+            (_, "intelcpu") => "Intel CPU".into(),
+            (_, "gpu-nvidia") => "NVIDIA GPU".into(),
+            (_, "gpu-intel-integrated") => "Intel iGPU".into(),
+            (_, "lpc") => "Mainboard".into(),
+            (_, "memory") => "DIMM".into(),
+            (_, "ram") | (_, "vram") => "Arbeitsspeicher".into(),
+            (_, "nvme") => format!("NVMe {b}"),
+            (_, "ssd") => format!("SSD {b}"),
+            (_, "nic") => "Netzwerk".into(),
+            (_, "usbhid") => "D5 NEXT (LibreHardwareMonitor)".into(),
+            ("lhm", _) => "LibreHardwareMonitor".into(),
+            (other, _) => other.to_string(),
+        };
+        group
     }
     pub fn snapshot(&self) -> Snapshot {
+        let wall = crate::now_micros() / 1000;
+        let stale_ms = (self.cfg.stale_secs * 1000.0) as i64;
         let channels = self
             .latest
             .values()
-            .map(|r| {
+            .map(|(seen, r)| {
                 let e = self.extremes.get(&r.channel).copied();
-                Channel { id: r.channel.clone(), label: r.label.clone(), hardware: Self::hardware(&r.source).into(), kind: Self::kind(&r.kind), unit: r.unit.clone(), value: Some(r.value), min: e.map(|x| x.0), max: e.map(|x| x.1) }
+                let age = (wall - seen).max(0);
+                Channel { id: r.channel.clone(), label: r.label.clone(), hardware: Self::hardware(&r.source, &r.channel), kind: Self::kind(&r.kind), unit: Self::unit(&r.unit), value: Some(r.value), min: e.map(|x| x.0), max: e.map(|x| x.1), age_ms: age, stale: age > stale_ms }
             })
             .collect();
-        let water = &self.cfg.water_channel;
-        let alarms = match (self.alarm_since, self.latest.get(water)) {
-            (Some(since), Some(r)) => vec![Alarm { channel: water.clone(), side: Side::High, limit: self.cfg.water_limit, value: r.value, since_ms: since }],
-            _ => vec![],
-        };
         Snapshot {
             ts_ms: self.ts_ms,
             seq: self.seq,
+            weight: self.status.weight,
+            model: self.status.model.clone(),
+            predicted: self.status.predicted.clone(),
+            step_test: self.status.step.clone(),
             channels,
-            controls: self.statuses.iter().map(|s| self.control(s)).collect(),
-            limits: vec![Limit { channel: water.clone(), low: None, high: Some(self.cfg.water_limit) }],
-            alarms,
+            controls: self.status.controls.clone(),
+            limits: self.status.limits.clone(),
+            alarms: self.status.alarms.clone(),
         }
     }
     pub fn history(&self, q: &HistoryQuery) -> HistoryResponse {
         let n = q.max_points.clamp(2, 4000);
-        let series = q
-            .channels
-            .iter()
+        let mut ids: Vec<&String> = Vec::new();
+        for id in &q.channels {
+            if !ids.contains(&id) && ids.len() < MAX_HISTORY_CHANNELS {
+                ids.push(id);
+            }
+        }
+        let series = ids
+            .into_iter()
             .filter_map(|id| {
                 let pts: Vec<&(i64, f64)> = self.history.get(id)?.iter().filter(|p| p.0 >= q.from_ms && p.0 <= q.to_ms).collect();
                 let stride = pts.len().div_ceil(n).max(1);
@@ -236,8 +249,14 @@ impl Ipc {
     }
     fn serve(&self, file: File) {
         let Ok(mut io) = Framed::new(file) else { return };
+        let mut last_command: Option<std::time::Instant> = None;
         while let Ok(req) = io.recv() {
-            if io.send(&self.handle(req)).is_err() {
+            let limited = matches!(req.body, RequestBody::Command(_)) && last_command.is_some_and(|t| t.elapsed() < COMMAND_GAP);
+            if matches!(req.body, RequestBody::Command(_)) {
+                last_command = Some(std::time::Instant::now());
+            }
+            let resp = if limited { Response::new(req.id, ResponseBody::Error { message: "zu viele Befehle in kurzer Zeit".into() }) } else { self.handle(req) };
+            if io.send(&resp).is_err() {
                 break;
             }
         }
@@ -245,84 +264,99 @@ impl Ipc {
 }
 
 pub fn apply(control: &mut Controller, cmd: Command, now: i64) -> Result<(), String> {
-    let name = |id: &str| id.strip_prefix("d5.").filter(|n| control.index(n).is_some()).map(str::to_string).ok_or_else(|| "unknown control".to_string());
     match cmd {
-        Command::SetMode { id, mode: Mode::Pid } => control.enable(&name(&id)?, now),
-        Command::SetMode { id, mode: Mode::Manual } => {
-            control.disable(&name(&id)?, now);
-            Ok(())
-        }
-        Command::SetMode { .. } => Err("curve mode is not supported, the firmware stays in set-point mode".into()),
-        Command::SetPid { id, pid } => control.set_pid(&name(&id)?, pid.setpoint, pid.kp, pid.ki, pid.kd),
-        Command::SetLimit { .. } => Err("limits are not configurable at runtime".into()),
+        Command::SetMode { id, mode, confirmed } => control.set_mode(&id, mode, confirmed, now),
+        Command::SetWeight { weight } => control.set_weight(weight),
+        Command::StartStepTest { id, confirmed } => control.start_test(&id, confirmed, now),
+        Command::StopStepTest => control.stop_test(now),
     }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::{D5Actuator, Factory};
     use crate::Config;
 
-    fn control(fan: bool, pump: bool, name: &str) -> Controller {
-        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp").join(format!("ipc-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let cfg = Config { fan_control_enabled: fan, pump_control_enabled: pump, data_dir: d, ..Config::default() };
-        Controller::new(&cfg, Box::new(|| Err("no device in tests".into())))
+    fn control(writes: bool) -> Controller {
+        let cfg = Config { writes_enabled: writes, ..Config::default() };
+        let factory: Factory = Box::new(|| Err("no device in tests".into()));
+        Controller::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Err("no model in tests".into()))
     }
 
-    fn pid(setpoint: f64) -> PidParams {
-        PidParams { source: "d5next/water/temp".into(), setpoint, kp: 0.3, ki: 0.002, kd: 0.0, min_duty: 28.0, max_duty: 36.0 }
-    }
-
-    #[test]
-    fn commands_are_refused_without_the_flags() {
-        let mut c = control(false, false, "none");
-        for id in ["d5.fan", "d5.pump"] {
-            assert!(apply(&mut c, Command::SetMode { id: id.into(), mode: Mode::Pid }, 0).unwrap_err().contains("disabled"));
-            assert!(apply(&mut c, Command::SetPid { id: id.into(), pid: pid(31.0) }, 0).unwrap_err().contains("disabled"));
-        }
-        assert!(apply(&mut c, Command::SetMode { id: "d5.fan".into(), mode: Mode::Curve }, 0).is_err());
-        assert!(apply(&mut c, Command::SetMode { id: "board.1".into(), mode: Mode::Pid }, 0).is_err());
-        assert!(apply(&mut c, Command::SetLimit { channel: "x".into(), low: None, high: Some(1.0) }, 0).is_err());
+    fn tick(ts_us: i64, rows: Vec<Row>) -> Tick {
+        Tick { ts: ts_us, rows, raw: None }
     }
 
     #[test]
-    fn pump_commands_need_the_pump_flag() {
-        let mut c = control(true, false, "fan-only");
-        assert!(apply(&mut c, Command::SetMode { id: "d5.pump".into(), mode: Mode::Pid }, 0).unwrap_err().contains("pump_control_enabled"));
-        assert!(apply(&mut c, Command::SetPid { id: "d5.pump".into(), pid: pid(31.0) }, 0).unwrap_err().contains("pump_control_enabled"));
-        assert!(apply(&mut c, Command::SetPid { id: "d5.fan".into(), pid: pid(31.0) }, 0).is_ok());
-        assert!(apply(&mut c, Command::SetPid { id: "d5.fan".into(), pid: pid(50.0) }, 0).is_err());
-        assert!(apply(&mut c, Command::SetMode { id: "d5.fan".into(), mode: Mode::Pid }, 0).unwrap_err().contains("water"));
+    fn commands_surface_their_refusals() {
+        let mut c = control(false);
+        let set = |id: &str, mode, confirmed| Command::SetMode { id: id.into(), mode, confirmed };
+        assert!(apply(&mut c, set("d5.fan", Mode::Active, true), 0).unwrap_err().contains("writes_enabled"));
+        assert!(apply(&mut c, set("board.1", Mode::Off, false), 0).is_err());
+        assert!(apply(&mut c, set("d5.pump", Mode::Off, false), 0).is_ok());
+        assert!(apply(&mut c, Command::SetWeight { weight: 2.0 }, 0).is_err());
+        assert!(apply(&mut c, Command::SetWeight { weight: 0.25 }, 0).is_ok());
+        assert!(apply(&mut c, Command::StartStepTest { id: "d5.fan".into(), confirmed: true }, 0).unwrap_err().contains("writes_enabled"));
+        assert!(apply(&mut c, Command::StopStepTest, 0).is_ok());
+        let mut w = control(true);
+        assert!(apply(&mut w, set("d5.pump", Mode::Active, false), 0).unwrap_err().contains("Bestätigung"));
     }
 
     #[test]
-    fn hub_serves_snapshot_and_downsampled_history() {
+    fn snapshot_marks_stale_channels_normalises_units_and_groups_hardware() {
         let cfg = ControlConfig::default();
-        let mut hub = Hub::new(&cfg);
-        let c = control(false, false, "hub");
-        for i in 0..1000i64 {
-            let rows = vec![Row::new("d5next", "d5next/water/temp", "Water", "temperature", "degC", 30.0 + i as f64 / 100.0), Row::new("d5next", "d5next/pump/rpm", "Pump", "rpm", "rpm", 2570.0)];
-            hub.update(&Tick { ts: i * 1_000_000, rows, raw: None }, c.statuses());
-        }
+        let c = control(false);
+        let mut hub = Hub::new(&cfg, c.status(0));
+        let first = hub.snapshot();
+        assert_eq!((first.seq, first.channels.len(), first.controls.len()), (0, 0, 2));
+        let now = crate::now_micros();
+        let old = vec![Row::new("d5next", "d5next/water/temp", "Water", "temperature", "degC", 31.0)];
+        hub.update(&tick(now - 30_000_000, old), c.status(0));
+        let fresh = vec![
+            Row::new("d5next", "d5next/pump/rpm", "Pump", "rpm", "rpm", 2570.0),
+            Row::new("lhm", "/intelcpu/0/temperature/0", "CPU", "temperature", "degC", 50.0),
+            Row::new("lhm", "/lpc/nct6687dr/0/fan/1", "Fan", "rpm", "rpm", 700.0),
+            Row::new("lhm", "/nvme/2/temperature/0", "NVMe", "temperature", "degC", 40.0),
+        ];
+        hub.update(&tick(now, fresh), c.status(0));
         let s = hub.snapshot();
-        assert_eq!(s.seq, 1000);
-        assert_eq!(s.channels.len(), 2);
-        assert_eq!(s.controls.len(), 2);
-        assert!(s.controls.iter().all(|c| c.mode == Mode::Manual));
-        assert_eq!(s.alarms.len(), 0);
-        let water = s.channels.iter().find(|c| c.id == "d5next/water/temp").unwrap();
-        assert_eq!((water.min, water.max), (Some(30.0), Some(39.99)));
-        let h = hub.history(&HistoryQuery { channels: vec!["d5next/water/temp".into(), "nope".into()], from_ms: 0, to_ms: i64::MAX, max_points: 100 });
-        assert_eq!(h.series.len(), 1);
-        assert!(h.series[0].values.len() <= 100 && h.series[0].values.len() >= 50);
+        let ch = |id: &str| s.channels.iter().find(|c| c.id == id).unwrap();
+        assert!(ch("d5next/water/temp").stale && ch("d5next/water/temp").age_ms >= 29_000 && ch("d5next/water/temp").value == Some(31.0));
+        assert!(!ch("d5next/pump/rpm").stale);
+        assert_eq!((ch("d5next/water/temp").unit.as_str(), ch("d5next/pump/rpm").unit.as_str()), ("°C", "RPM"));
+        assert_eq!(ch("/intelcpu/0/temperature/0").hardware, "Intel CPU");
+        assert_eq!(ch("/lpc/nct6687dr/0/fan/1").hardware, "Mainboard");
+        assert_eq!(ch("/nvme/2/temperature/0").hardware, "NVMe 2");
+        assert_eq!(ch("d5next/pump/rpm").hardware, "Aquacomputer D5 NEXT");
+    }
+
+    #[test]
+    fn history_dedupes_and_caps_channels_and_downsamples() {
+        let cfg = ControlConfig::default();
+        let c = control(false);
+        let mut hub = Hub::new(&cfg, c.status(0));
+        for i in 0..1000i64 {
+            let rows = (0..80).map(|k| Row::new("lhm", format!("/x/{k}"), "x", "load", "%", i as f64)).collect();
+            hub.update(&tick(i * 1_000_000, rows), c.status(0));
+        }
+        let mut ids: Vec<String> = (0..80).map(|k| format!("/x/{k}")).collect();
+        ids.extend(std::iter::repeat("/x/0".to_string()).take(4000));
+        let h = hub.history(&HistoryQuery { channels: ids, from_ms: 0, to_ms: i64::MAX, max_points: 100 });
+        assert_eq!(h.series.len(), MAX_HISTORY_CHANNELS);
+        assert!(h.series.iter().all(|s| s.values.len() <= 100 && s.values.len() >= 50));
         let (tx, _rx) = channel();
         let ipc = Ipc { hub: Arc::new(Mutex::new(hub)), jobs: tx };
         let r = ipc.handle(Request::new(7, RequestBody::Snapshot));
         assert_eq!(r.id, 7);
         assert!(matches!(r.body, ResponseBody::Snapshot(_)));
-        let bad = ipc.handle(Request { v: 99, id: 8, body: RequestBody::Snapshot });
+        let bad = ipc.handle(Request { v: 1, id: 8, body: RequestBody::Snapshot });
         assert!(matches!(bad.body, ResponseBody::Error { .. }));
+    }
+
+    #[test]
+    fn pipe_acl_does_not_grant_instance_creation_to_interactive_users() {
+        assert!(SDDL.contains("(A;;0x0012019b;;;IU)") && !SDDL.contains("GRGW"));
     }
 }

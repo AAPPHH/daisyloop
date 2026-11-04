@@ -328,9 +328,13 @@ impl Predictor {
         std::panic::catch_unwind(|| Predictor::new(spec_json, model_json)).map_err(|_| "feature spec or model file is malformed".to_string())
     }
 
-    pub fn step(&mut self, raw: &[f64], k: i64) -> (Vec<f64>, Vec<(String, f64)>) {
+    pub fn features(&mut self, raw: &[f64], k: i64) -> Vec<f64> {
         let out = self.engine.step(raw, k);
-        let x: Vec<f64> = self.order.iter().map(|&i| out[i]).collect();
+        self.order.iter().map(|&i| out[i]).collect()
+    }
+
+    pub fn step(&mut self, raw: &[f64], k: i64) -> (Vec<f64>, Vec<(String, f64)>) {
+        let x = self.features(raw, k);
         let p = self.model.predict(&x);
         (x, p)
     }

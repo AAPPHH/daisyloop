@@ -1,20 +1,18 @@
 use super::*;
-use std::cell::RefCell;
+use crate::protocol::AlarmKind;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 struct World {
     report: Vec<u8>,
-    sets: Vec<Vec<u8>>,
-    get_fail: bool,
-    bad_crc: bool,
+    sets: Vec<(i64, Vec<u8>)>,
+    fail_get: bool,
+    fail_sets: u32,
     corrupt_readback: bool,
-    water: f64,
-    duty: f64,
-    inner_i: f64,
-    heat: f64,
-    cpu: f64,
-    pump_rpm: f64,
-    glitch: f64,
+    freeze_rpm: bool,
+    force: [Option<f64>; 2],
+    opens: u32,
+    now: i64,
 }
 
 #[derive(Clone)]
@@ -26,590 +24,587 @@ impl Sim {
         r[0] = 3;
         for s in Spec::ALL {
             r[s.mode()] = 1;
+            r[s.preset()..s.preset() + 2].copy_from_slice(&10000u16.to_be_bytes());
         }
-        r[Spec::FAN.setpoint()..Spec::FAN.setpoint() + 2].copy_from_slice(&3000u16.to_be_bytes());
-        r[Spec::PUMP.setpoint()..Spec::PUMP.setpoint() + 2].copy_from_slice(&4500u16.to_be_bytes());
         Crc16Usb::seal(&mut r);
-        Sim(Rc::new(RefCell::new(World { report: r, sets: vec![], get_fail: false, bad_crc: false, corrupt_readback: false, water: 31.0, duty: 100.0, inner_i: 0.0, heat: 300.0, cpu: 50.0, pump_rpm: 2570.0, glitch: 0.0 })))
-    }
-    fn sp(&self, s: Spec) -> f64 {
-        be16(&self.0.borrow().report, s.setpoint()) as f64 / 100.0
-    }
-    fn sets(&self) -> usize {
-        self.0.borrow().sets.len()
+        Sim(Rc::new(RefCell::new(World { report: r, sets: vec![], fail_get: false, fail_sets: 0, corrupt_readback: false, freeze_rpm: false, force: [None, None], opens: 0, now: 0 })))
     }
     fn report(&self) -> Vec<u8> {
         self.0.borrow().report.clone()
     }
-    fn foreign(&self, at: usize) {
+    fn mode(&self, s: Spec) -> u8 {
+        self.0.borrow().report[s.mode()]
+    }
+    fn preset(&self, s: Spec) -> u16 {
+        be16(&self.0.borrow().report, s.preset())
+    }
+    fn sets(&self) -> usize {
+        self.0.borrow().sets.len()
+    }
+    fn duty_sets(&self) -> Vec<(i64, Vec<u8>)> {
+        self.0.borrow().sets.iter().filter(|(_, r)| Spec::ALL.iter().any(|s| r[s.mode()] == 0)).cloned().collect()
+    }
+    fn set_raw(&self, f: impl Fn(&mut Vec<u8>)) {
         let mut w = self.0.borrow_mut();
-        w.report[at] ^= 0x55;
+        f(&mut w.report);
         Crc16Usb::seal(&mut w.report);
-    }
-    fn advance(&self, dt: f64) {
-        let mut w = self.0.borrow_mut();
-        let sp = be16(&w.report, Spec::FAN.setpoint()) as f64 / 100.0;
-        let err = w.water - sp;
-        w.inner_i = (w.inner_i + 0.02 * err * dt).clamp(-50.0, 50.0);
-        w.duty = (50.0 + 30.0 * err + w.inner_i).clamp(5.0, 100.0);
-        let g = 10.0 + 40.0 * w.duty / 100.0;
-        w.water += (w.heat - g * (w.water - 25.0)) / 4000.0 * dt;
-    }
-    fn rows(&self) -> Vec<Row> {
-        let w = self.0.borrow();
-        vec![
-            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", w.water),
-            Row::new("d5next", "d5next/pump/rpm", "pump", "rpm", "rpm", w.pump_rpm),
-            Row::new("lhm", "/intelcpu/0/temperature/0", "cpu", "temperature", "degC", w.cpu),
-        ]
     }
 }
 
 impl D5Control for Sim {
     fn get(&mut self) -> Result<Vec<u8>, String> {
         let w = self.0.borrow();
-        if w.get_fail {
+        if w.fail_get {
             return Err("device gone".into());
         }
-        let mut r = w.report.clone();
-        if w.bad_crc {
-            let n = r.len();
-            r[n - 1] ^= 1;
-        }
-        Ok(r)
+        Ok(w.report.clone())
     }
     fn set(&mut self, report: &[u8]) -> Result<(), String> {
         let mut w = self.0.borrow_mut();
-        w.sets.push(report.to_vec());
+        if w.fail_sets > 0 {
+            w.fail_sets -= 1;
+            return Err("set failed".into());
+        }
+        let now = w.now;
+        w.sets.push((now, report.to_vec()));
         w.report = report.to_vec();
         if w.corrupt_readback {
             w.report[0x10] ^= 1;
             Crc16Usb::seal(&mut w.report);
         }
-        w.pump_rpm += w.glitch;
         Ok(())
     }
 }
 
-fn dir(name: &str) -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp").join(format!("ctl-{name}"));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+struct Fake {
+    ident: (bool, bool),
+    warm: i64,
+    heat: f64,
+    fail: Rc<Cell<bool>>,
 }
 
-fn make(sim: &Sim, cfg: &Config) -> Control {
-    let s = sim.clone();
-    Control::new(cfg, Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>)))
+impl Model for Fake {
+    fn observe(&mut self, _: &HashMap<String, f64>, _: i64) {}
+    fn identified(&self) -> (bool, bool) {
+        self.ident
+    }
+    fn warm_secs(&self) -> i64 {
+        self.warm
+    }
+    fn forecast(&self, hold: &HashMap<String, f64>, _: u32, _: u32) -> Result<crate::model::Forecast, String> {
+        if self.fail.get() {
+            return Err("boom".into());
+        }
+        let (f, p) = (hold["d5next/fan/rpm"], hold["d5next/pump/rpm"]);
+        Ok(crate::model::Forecast { water: self.heat - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0, cpu: 0.0, gpu: 0.0 })
+    }
 }
 
-struct Run {
+struct Rig {
     sim: Sim,
-    fc: Control,
+    c: Control,
     now: i64,
+    water: f64,
+    cpu: f64,
+    gpu: Option<f64>,
+    model_fail: Rc<Cell<bool>>,
 }
 
-impl Run {
-    fn new(name: &str, tweak: impl Fn(&mut Config)) -> Run {
-        let mut cfg = Config { fan_control_enabled: true, data_dir: dir(name), ..Config::default() };
-        tweak(&mut cfg);
-        let sim = Sim::new();
-        let fc = make(&sim, &cfg);
-        Run { sim, fc, now: 0 }
+fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
+    let mut cfg = Config { writes_enabled: true, ..Config::default() };
+    cfg.control.decision_secs = 30.0;
+    tweak(&mut cfg);
+    cfg
+}
+
+impl Rig {
+    fn new(ident: (bool, bool), heat: f64, tweak: impl Fn(&mut Config)) -> Rig {
+        Rig::with_sim(Sim::new(), ident, heat, tweak)
     }
-    fn tick(&mut self) {
-        self.sim.advance(1.0);
-        let mut rows = self.sim.rows();
+    fn with_sim(sim: Sim, ident: (bool, bool), heat: f64, tweak: impl Fn(&mut Config)) -> Rig {
+        let cfg = base_cfg(tweak);
+        let s = sim.clone();
+        let factory: Factory = Box::new(move || {
+            s.0.borrow_mut().opens += 1;
+            Ok(Box::new(s.clone()) as Box<dyn D5Control>)
+        });
+        let model_fail = Rc::new(Cell::new(false));
+        let model = Fake { ident, warm: 5000, heat, fail: model_fail.clone() };
+        let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
+        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail }
+    }
+    fn rows(&self) -> Vec<Row> {
+        let r = self.sim.report();
+        let mut rows = vec![
+            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water),
+            Row::new("lhm", "/intelcpu/0/temperature/0", "cpu", "temperature", "degC", self.cpu),
+        ];
+        if let Some(g) = self.gpu {
+            rows.push(Row::new("nvml", "nvml/0/temp", "gpu", "temperature", "degC", g));
+        }
+        let (frozen, force) = (self.sim.0.borrow().freeze_rpm, self.sim.0.borrow().force);
+        for (n, (s, curve)) in [(Spec::FAN, ChannelConfig::defaults(ControlKind::Fan).calibration()), (Spec::PUMP, ChannelConfig::defaults(ControlKind::Pump).calibration())].into_iter().enumerate() {
+            let duty = if r[s.mode()] == 0 { be16(&r, s.preset()) as f64 / 100.0 } else { 90.0 };
+            let rpm = force[n].unwrap_or(if frozen { curve.rpm(100.0) } else { curve.rpm(duty) });
+            rows.push(Row::new("d5next", format!("d5next/{}/duty", s.name), "duty", "duty", "%", duty));
+            rows.push(Row::new("d5next", format!("d5next/{}/rpm", s.name), "rpm", "rpm", "rpm", rpm));
+        }
+        rows
+    }
+    fn tick(&mut self) -> Vec<Row> {
         self.now += 1000;
-        self.fc.step(&mut rows, self.now);
+        self.sim.0.borrow_mut().now = self.now;
+        let mut rows = self.rows();
+        self.c.step(&mut rows, self.now, 1_800_000_000 + self.now / 1000);
+        rows
     }
-    fn run(&mut self, secs: usize) {
+    fn run(&mut self, secs: i64) {
         for _ in 0..secs {
             self.tick();
         }
     }
-    fn started(name: &str, tweak: impl Fn(&mut Config)) -> Run {
-        let mut r = Run::new(name, tweak);
-        r.tick();
-        r.fc.enable("fan", r.now).unwrap();
-        r
+    fn active(&mut self, id: &str) {
+        self.c.set_mode(id, Mode::Active, true, self.now).unwrap();
     }
-    fn state(&self, name: &str) -> u8 {
-        self.fc.statuses().iter().find(|s| s.name == name).unwrap().state
+    fn status(&self) -> Status {
+        self.c.status(self.now)
     }
-    fn until_first_set(&mut self) {
-        let mut guard = 0;
-        while self.sim.sets() == 0 && guard < 600 {
-            self.tick();
-            guard += 1;
-        }
+    fn ctl(&self, id: &str) -> PControl {
+        self.status().controls.into_iter().find(|c| c.id == id).unwrap()
+    }
+    fn alarm(&self, k: AlarmKind) -> bool {
+        self.status().alarms.iter().any(|a| a.kind == k)
     }
 }
 
-fn fan34(c: &mut Config) {
-    c.control.fan.target_water = Some(34.0);
-}
-
-fn patched(fresh: &[u8], spec: &Spec, sp: u16) -> Vec<u8> {
-    let mut t = fresh.to_vec();
-    t[spec.setpoint()..spec.setpoint() + 2].copy_from_slice(&sp.to_be_bytes());
-    Crc16Usb::seal(&mut t);
-    t
+#[test]
+fn calibration_interpolates_both_ways() {
+    let pump = ChannelConfig::defaults(ControlKind::Pump).calibration();
+    assert!((pump.rpm(100.0) - 4800.0).abs() < 1e-9 && (pump.rpm(19.8) - 2570.0).abs() < 1e-9);
+    assert!((pump.duty(2570.0) - 19.8).abs() < 1e-6 && pump.duty(9999.0) == 100.0 && pump.duty(0.0) == 0.0);
+    let fan = ChannelConfig::defaults(ControlKind::Fan).calibration();
+    assert!((fan.duty(735.0) - 50.0).abs() < 1e-9);
+    assert!(Calibration::new(&[[0.0, 5.0], [10.0, 4.0]]).is_err() && Calibration::new(&[[0.0, 5.0]]).is_err());
 }
 
 #[test]
-fn disabled_by_default_opens_nothing() {
-    let c = Config::default();
-    assert!(!c.fan_control_enabled && !c.pump_control_enabled);
-    assert!(!c.control.fan.autostart && !c.control.pump.autostart);
-    let cfg = Config { data_dir: dir("disabled"), ..Config::default() };
-    let mut fc = Control::new(&cfg, Box::new(|| panic!("write path opened while disabled")));
-    let mut rows = vec![Row::new("d5next", "d5next/water/temp", "w", "temperature", "degC", 31.0)];
-    fc.step(&mut rows, 1000);
-    assert!(fc.enable("fan", 1000).unwrap_err().contains("disabled"));
-    assert!(fc.enable("pump", 1000).unwrap_err().contains("disabled"));
-    assert!(fc.set_pid("pump", 31.0, 0.1, 0.0, 0.0).is_err());
-    assert!(fc.autostart().is_empty());
-    assert!(!fc.running("fan") && !fc.running("pump"));
-    assert!(rows.iter().all(|r| !r.channel.starts_with("daisyloop/")));
+fn channel_config_defaults_are_per_channel_and_invalid_values_are_rejected() {
+    let cfg: ControlConfig = toml::from_str("[fan]\nfloor_duty = 35.0\n").unwrap();
+    assert_eq!(ChannelConfig::resolve(ControlKind::Fan, &cfg.fan).unwrap().floor_duty, 35.0);
+    let pump = ChannelConfig::resolve(ControlKind::Pump, &cfg.pump).unwrap();
+    assert_eq!((pump.floor_duty, pump.alarm_rpm), (40.0, 1800.0));
+    assert!(cfg.validate().is_ok() && ControlConfig::default().validate().is_ok());
+    for bad in ["[fan]\nfloor_duty = 90.0\nmax_duty = 50.0", "[pump]\nstep_down_rpm = -1.0", "[fan]\ncurve = [[0.0, 5.0]]", "decision_secs = 1.0", "weight = 2.0", "[step_test]\nfan = [[100.0, 5.0]]", "[step_test]\npump = [[10.0, 60.0]]"] {
+        let c: ControlConfig = toml::from_str(bad).unwrap();
+        assert!(c.validate().is_err(), "{bad}");
+    }
 }
 
 #[test]
-fn pump_flag_is_separate_from_fan_flag() {
-    let mut r = Run::new("flags", |_| {});
-    r.tick();
-    assert!(r.fc.enable("pump", r.now).unwrap_err().contains("pump_control_enabled"));
-    assert!(r.fc.enable("fan", r.now).is_ok());
-    assert_eq!(r.sim.sets(), 0);
+fn invalid_config_falls_back_to_defaults_instead_of_panicking() {
+    let rig = Rig::new((true, true), 5.0, |c| {
+        c.control.fan.floor_duty = Some(80.0);
+        c.control.fan.max_duty = Some(40.0);
+    });
+    assert_eq!(rig.ctl("d5.fan").floor_duty, 30.0);
 }
 
 #[test]
-fn pump_bytes_changed_is_refused_on_fan_writes() {
+fn guard_touches_only_the_requested_channel_bytes() {
+    let sim = Sim::new();
+    let before = sim.report();
+    let mut g = Guard::new(Box::new(sim.clone()));
+    assert!(g.write(&[(Spec::FAN, Setting::Duty(55.0))]).unwrap());
+    let after = sim.report();
+    let changed: Vec<usize> = (0..after.len()).filter(|i| after[*i] != before[*i]).collect();
+    assert_eq!(changed, vec![0x41, 0x42, 0x43, Guard::CRC, Guard::CRC + 1]);
+    assert_eq!((sim.mode(Spec::FAN), sim.preset(Spec::FAN)), (0, 5500));
+    assert_eq!(&after[Spec::PUMP.base..Spec::PUMP.base + 0x55], &before[Spec::PUMP.base..Spec::PUMP.base + 0x55]);
+    assert!(g.write(&[(Spec::FAN, Setting::Firmware)]).unwrap());
+    assert_eq!(sim.mode(Spec::FAN), 1);
+    assert_eq!(sim.preset(Spec::FAN), 5500);
+    assert!(!g.write(&[(Spec::FAN, Setting::Firmware)]).unwrap());
+    let w = sim.0.borrow();
+    assert!(w.sets.iter().all(|(_, r)| r.len() == Guard::LEN && r[0] == 3));
+}
+
+#[test]
+fn guard_refuses_foreign_bytes_bad_crc_curve_mode_and_failed_readback() {
     let sim = Sim::new();
     let fresh = sim.report();
-    for at in [0x9B, 0x96, 0xEA, 0x97, 0x41, 0x10, 0x100] {
-        let mut t = patched(&fresh, &Spec::FAN, 3100);
-        t[at] ^= 1;
-        Crc16Usb::seal(&mut t);
-        assert!(Guard::check_diff(&fresh, &t, &Spec::FAN).is_err(), "byte {at:#x}");
-    }
-    assert!(Guard::check_diff(&fresh, &patched(&fresh, &Spec::FAN, 3100), &Spec::FAN).is_ok());
-    assert!(Guard::check_diff(&fresh, &patched(&fresh, &Spec::FAN, 4000), &Spec::FAN).is_err());
-    let mut unsealed = patched(&fresh, &Spec::FAN, 3100);
-    unsealed[Guard::CRC] ^= 1;
-    assert!(Guard::check_diff(&fresh, &unsealed, &Spec::FAN).is_err());
-    assert_eq!(sim.sets(), 0);
-}
-
-#[test]
-fn fan_bytes_changed_is_refused_on_pump_writes() {
-    let fresh = Sim::new().report();
-    for at in [0x46, 0x41, 0x42, 0x95, 0x96, 0x97, 0x10, 0x100] {
-        let mut t = patched(&fresh, &Spec::PUMP, 4400);
-        t[at] ^= 1;
-        Crc16Usb::seal(&mut t);
-        assert!(Guard::check_diff(&fresh, &t, &Spec::PUMP).is_err(), "byte {at:#x}");
-    }
-    assert!(Guard::check_diff(&fresh, &patched(&fresh, &Spec::PUMP, 4400), &Spec::PUMP).is_ok());
-    assert!(Guard::check_diff(&fresh, &patched(&fresh, &Spec::PUMP, 2900), &Spec::PUMP).is_err());
-    assert!(Guard::check_diff(&fresh, &patched(&fresh, &Spec::PUMP, 4600), &Spec::PUMP).is_err());
-    assert!(Guard::check_diff(&fresh, &patched(&fresh, &Spec::FAN, 3100), &Spec::PUMP).is_err());
-}
-
-#[test]
-fn secondary_report_cannot_pass() {
-    let secondary = [0x02u8, 0, 0, 0, 2, 0, 0, 0, 0, 0x34, 0xC6];
-    assert!(Guard::validate(&secondary).is_err());
-    assert!(Guard::validate(&Sim::new().report()).is_ok());
-}
-
-#[test]
-fn guard_write_limits() {
-    let sim = Sim::new();
-    let base = sim.report();
+    let mut target = fresh.clone();
+    target[0x200] ^= 1;
+    Crc16Usb::seal(&mut target);
+    assert!(Guard::check_diff(&fresh, &target, &[(Spec::FAN, Setting::Duty(50.0))]).is_err());
+    let mut high = fresh.clone();
+    high[Spec::FAN.preset()..Spec::FAN.preset() + 2].copy_from_slice(&10001u16.to_be_bytes());
+    Crc16Usb::seal(&mut high);
+    assert!(Guard::check_diff(&fresh, &high, &[(Spec::FAN, Setting::Duty(100.0))]).is_err());
     let mut g = Guard::new(Box::new(sim.clone()));
-    g.adopt().unwrap();
-    let mut nop = |_: &[u8]| {};
-    let f = Spec::FAN;
-    assert!(matches!(g.write(1_000, &f, 3005, Kind::Normal, &mut nop).unwrap(), Outcome::Skipped("deadband")));
-    assert!(matches!(g.write(1_000, &f, 3300, Kind::Normal, &mut nop).unwrap(), Outcome::Sent { .. }));
-    assert_eq!(sim.sp(f), 30.5);
-    assert!(matches!(g.write(30_000, &f, 3300, Kind::Normal, &mut nop).unwrap(), Outcome::Skipped("interval")));
-    assert!(matches!(g.write(61_000, &f, 9000, Kind::Normal, &mut nop).unwrap(), Outcome::Sent { .. }));
-    assert_eq!(sim.sp(f), 31.0);
-    for k in 0..10 {
-        let _ = g.write(122_000 + k * 61_000, &f, 9000, Kind::Normal, &mut nop);
+    sim.set_raw(|r| r[Spec::PUMP.mode()] = 2);
+    assert!(g.write(&[(Spec::PUMP, Setting::Duty(50.0))]).unwrap_err().contains("mode 2"));
+    sim.set_raw(|r| r[Spec::PUMP.mode()] = 1);
+    sim.0.borrow_mut().report[5] ^= 1;
+    assert!(g.write(&[(Spec::FAN, Setting::Duty(50.0))]).unwrap_err().contains("crc"));
+    sim.set_raw(|_| {});
+    sim.0.borrow_mut().corrupt_readback = true;
+    assert!(g.write(&[(Spec::FAN, Setting::Duty(50.0))]).unwrap_err().contains("readback"));
+    sim.0.borrow_mut().fail_get = true;
+    assert!(g.write(&[(Spec::FAN, Setting::Duty(60.0))]).is_err());
+}
+
+#[test]
+fn actuator_floors_are_independent_of_the_caller() {
+    let sim = Sim::new();
+    let cfg = ControlConfig::default();
+    let s = sim.clone();
+    let mut a = D5Actuator::new(Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>)), &cfg);
+    a.apply(&[(ControlKind::Fan, Setting::Duty(1.0)), (ControlKind::Pump, Setting::Duty(5.0))]).unwrap();
+    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (3000, 4000));
+    assert_eq!(sim.sets(), 1);
+    a.apply(&[(ControlKind::Fan, Setting::Duty(500.0))]).unwrap();
+    assert_eq!(sim.preset(Spec::FAN), 10000);
+}
+
+#[test]
+fn shadow_is_the_default_and_writes_nothing() {
+    let mut rig = Rig::new((false, false), 6.0, |_| {});
+    rig.run(100);
+    assert_eq!(rig.sim.sets(), 0);
+    let st = rig.status();
+    assert!(st.controls.iter().all(|c| c.mode == Mode::Shadow && c.drive == Drive::Firmware && c.target_rpm.is_some()));
+    let p = st.predicted.unwrap();
+    assert!(p.water.is_some() && p.horizon_s == 120);
+    assert!(st.controls[0].note.as_deref().unwrap().contains("nur berechnet"));
+    let rows = rig.tick();
+    assert!(rows.iter().any(|r| r.channel == "daisyloop/fan/target_rpm") && rows.iter().any(|r| r.channel == "daisyloop/plan/water"));
+}
+
+#[test]
+fn off_channel_has_no_target_and_is_held() {
+    let mut rig = Rig::new((true, true), 6.0, |_| {});
+    rig.c.set_mode("d5.pump", Mode::Off, false, 0).unwrap();
+    rig.run(40);
+    assert!(rig.ctl("d5.pump").target_rpm.is_none() && rig.ctl("d5.fan").target_rpm.is_some());
+}
+
+#[test]
+fn active_is_refused_with_a_reason() {
+    let mut rig = Rig::new((false, false), 6.0, |_| {});
+    rig.run(5);
+    assert!(rig.c.set_mode("d5.fan", Mode::Active, true, rig.now).unwrap_err().contains("nicht identifiziert"));
+    let mut off = Rig::new((true, true), 6.0, |c| c.writes_enabled = false);
+    off.run(5);
+    assert!(off.c.set_mode("d5.fan", Mode::Active, true, off.now).unwrap_err().contains("writes_enabled"));
+    let mut ok = Rig::new((true, true), 6.0, |_| {});
+    ok.run(5);
+    assert!(ok.c.set_mode("d5.pump", Mode::Active, false, ok.now).unwrap_err().contains("Bestätigung"));
+    assert!(ok.c.set_mode("d5.nope", Mode::Active, true, ok.now).is_err());
+    ok.gpu = None;
+    ok.run(12);
+    assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).unwrap_err().contains("GPU"));
+    assert_eq!(ok.sim.sets(), 0);
+    let mut cold = Rig::new((true, true), 6.0, |_| {});
+    cold.c.model = Some(Box::new(Fake { ident: (true, true), warm: 60, heat: 6.0, fail: Rc::new(Cell::new(false)) }));
+    cold.run(5);
+    assert!(cold.c.set_mode("d5.fan", Mode::Active, true, cold.now).unwrap_err().contains("wärmt"));
+    let mut none = Rig::new((true, true), 6.0, |_| {});
+    none.c.model = None;
+    none.c.model_error = Some("missing".into());
+    none.run(5);
+    assert!(none.c.set_mode("d5.fan", Mode::Active, true, none.now).unwrap_err().contains("missing"));
+}
+
+#[test]
+fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
+    let initial = Sim::new().report();
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(400);
+    let sets = rig.sim.duty_sets();
+    assert!(!sets.is_empty());
+    assert!(rig.ctl("d5.fan").drive == Drive::Duty && rig.ctl("d5.pump").drive == Drive::Firmware);
+    for (_, r) in &sets {
+        assert!(be16(r, Spec::FAN.preset()) >= 3000 && r[Spec::FAN.mode()] == 0 && r[Spec::PUMP.mode()] == 1);
+        assert_eq!(&r[Spec::PUMP.base..Spec::PUMP.base + 0x55], &initial[Spec::PUMP.base..Spec::PUMP.base + 0x55]);
     }
-    assert_eq!(sim.sp(f), 36.0);
-    assert!(matches!(g.write(900_000, &f, 9000, Kind::Normal, &mut nop).unwrap(), Outcome::Skipped(_)));
-    assert!(matches!(g.write(900_001, &f, 100, Kind::Safety, &mut nop).unwrap(), Outcome::Sent { .. }));
-    assert_eq!(sim.sp(f), 28.0);
-    let p = Spec::PUMP;
-    assert!(matches!(g.write(1_000_000, &p, 4000, Kind::Normal, &mut nop).unwrap(), Outcome::Sent { .. }));
-    assert_eq!(sim.sp(p), 44.5);
-    assert!(matches!(g.write(1_100_000, &p, 100, Kind::Safety, &mut nop).unwrap(), Outcome::Sent { .. }));
-    assert_eq!(sim.sp(p), 30.0);
-    for s in &sim.0.borrow().sets {
-        assert_eq!(s[Spec::PUMP.own()][..5], base[Spec::PUMP.own()][..5]);
-        assert_eq!(s[0x00..0x41], base[0x00..0x41]);
-        assert_eq!(s[0xEB..Guard::CRC], base[0xEB..Guard::CRC]);
-    }
+    assert!(sets.windows(2).all(|w| w[1].0 - w[0].0 >= 30_000));
+    let n = rig.sim.sets();
+    rig.run(600);
+    assert_eq!(rig.sim.sets(), n, "a steady plan must not rewrite the report");
+    assert!(rig.ctl("d5.fan").commanded_duty.unwrap() >= 30.0);
 }
 
 #[test]
-fn anti_windup_and_unwind() {
-    let mut pid = Pid::new(&LoopConfig::default(), &Spec::FAN);
-    pid.init(30.0, 33.0, 30.0);
-    for _ in 0..20_000 {
-        pid.step(30.0, 38.0, 0.0, 1.0);
-    }
-    assert!((pid.output() - pid.lo).abs() < 0.01);
-    assert!(pid.terms.i.abs() <= pid.hi - pid.lo + 1e-9);
-    assert!(pid.terms.desired < pid.lo + 1.0);
-    let mut t = 0;
-    while pid.output() <= pid.lo + 1e-9 && t < 1000 {
-        pid.step(30.0, 28.5, 0.0, 1.0);
-        t += 1;
-    }
-    assert!(t < 400, "unwound too slowly: {t}");
+fn target_moves_down_slowly_and_up_fast() {
+    let mut rig = Rig::new((true, true), 12.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(35);
+    let high = rig.ctl("d5.fan").target_rpm.unwrap();
+    rig.c.model = Some(Box::new(Fake { ident: (true, true), warm: 5000, heat: 0.0, fail: rig.model_fail.clone() }));
+    rig.run(31);
+    let low = rig.ctl("d5.fan").target_rpm.unwrap();
+    assert!(high - low <= 150.0 + 1e-6 && low < high);
 }
 
 #[test]
-fn rate_limit_and_cpu_guard() {
-    let mut pid = Pid::new(&LoopConfig::default(), &Spec::FAN);
-    pid.init(34.0, 34.0, 34.0);
-    let mut last = pid.output();
-    for _ in 0..600 {
-        let o = pid.step(34.0, 30.0, 0.0, 1.0);
-        assert!((o - last).abs() <= pid.slew + 1e-9);
-        last = o;
-    }
-    assert!(last > 34.0);
-    let mut pid = Pid::new(&LoopConfig::default(), &Spec::FAN);
-    pid.init(32.0, 32.0, 32.0);
-    let o = (0..300).map(|_| pid.step(32.0, 32.0, 2.0, 1.0)).last().unwrap();
-    assert!(o < 32.0 - 1.9 && o >= 28.0 - 1e-9);
+fn infeasible_plan_takes_maximum() {
+    let mut rig = Rig::new((true, true), 50.0, |_| {});
+    rig.run(35);
+    let st = rig.status();
+    assert!(!st.predicted.as_ref().unwrap().feasible);
+    assert_eq!((st.controls[0].target_rpm.unwrap(), st.controls[1].target_rpm.unwrap()), (1470.0, 4800.0));
 }
 
 #[test]
-fn converges_to_target_with_firmware_inner_loop() {
-    let mut r = Run::started("converge", |c| c.control.fan.target_water = Some(32.0));
-    r.sim.0.borrow_mut().water = 30.2;
-    r.run(4000);
-    let w = r.sim.0.borrow().water;
-    assert!((w - 32.0).abs() < 0.3, "water {w}");
-    assert!((28.0..=36.0).contains(&r.sim.sp(Spec::FAN)));
-    assert!(r.fc.running("fan"));
-    let sets = r.sim.0.borrow().sets.clone();
-    assert!(sets.len() >= 3);
-    for w in sets.windows(2) {
-        assert!(be16(&w[1], Spec::FAN.setpoint()).abs_diff(be16(&w[0], Spec::FAN.setpoint())) <= Guard::STEP);
-    }
-    for s in &sets {
-        assert_eq!(s[Spec::PUMP.own()], Sim::new().report()[Spec::PUMP.own()]);
-    }
+fn weight_shifts_the_limits_toward_cooling() {
+    let mut cool = Rig::new((true, true), 7.5, |c| c.control.weight = 1.0);
+    let mut quiet = Rig::new((true, true), 7.5, |c| c.control.weight = 0.0);
+    cool.water = 30.0;
+    quiet.water = 30.0;
+    cool.run(35);
+    quiet.run(35);
+    let (a, b) = (cool.ctl("d5.fan").target_rpm.unwrap() + cool.ctl("d5.pump").target_rpm.unwrap(), quiet.ctl("d5.fan").target_rpm.unwrap() + quiet.ctl("d5.pump").target_rpm.unwrap());
+    assert!(a > b, "{a} {b}");
+    assert!(cool.c.set_weight(1.5).is_err() && cool.c.set_weight(0.2).is_ok());
 }
 
 #[test]
-fn writes_are_at_least_a_minute_apart() {
-    let mut r = Run::started("interval", fan34);
-    r.run(400);
-    let n = r.sim.sets();
-    assert!((2..=7).contains(&n), "{n}");
+fn stale_sensor_falls_back_to_the_firmware_pid_and_latches() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(60);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.gpu = None;
+    rig.run(9);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.run(4);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    let c = rig.ctl("d5.fan");
+    assert!(c.mode == Mode::Shadow && c.drive == Drive::Firmware && c.fallback.as_deref().unwrap().contains("veraltet"));
+    assert!(rig.alarm(AlarmKind::Stale) && rig.alarm(AlarmKind::Fallback));
+    rig.gpu = Some(40.0);
+    rig.run(120);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
 }
 
 #[test]
-fn foreign_change_pauses_without_overwrite() {
-    let mut r = Run::started("foreign", fan34);
-    r.run(100);
-    let before = r.sim.sets();
-    assert!(before >= 1);
-    r.sim.foreign(0x200);
-    let snapshot = r.sim.report();
-    r.run(200);
-    assert_eq!(r.state("fan"), 2);
-    assert_eq!(r.sim.sets(), before);
-    assert_eq!(r.sim.report(), snapshot);
-    r.run(500);
-    assert_eq!(r.sim.sets(), before);
+fn water_at_the_limit_releases_every_active_channel() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.active("d5.pump");
+    rig.run(40);
+    assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.mode(Spec::PUMP)), (0, 0));
+    rig.water = 40.0;
+    rig.run(2);
+    assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.mode(Spec::PUMP)), (1, 1));
+    assert!(rig.alarm(AlarmKind::WaterHigh));
 }
 
 #[test]
-fn foreign_pump_change_is_also_foreign() {
-    let mut r = Run::started("foreign-pump", fan34);
-    r.run(100);
-    let before = r.sim.sets();
-    r.sim.foreign(0x9B);
-    r.run(100);
-    assert_eq!(r.state("fan"), 2);
-    assert_eq!(r.sim.sets(), before);
+fn cpu_must_stay_hot_for_sixty_seconds() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    rig.cpu = 105.0;
+    rig.run(30);
+    rig.cpu = 60.0;
+    rig.run(2);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    assert!(!rig.alarm(AlarmKind::CpuHigh));
+    rig.cpu = 105.0;
+    rig.run(58);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.run(4);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    assert!(rig.alarm(AlarmKind::CpuHigh));
 }
 
 #[test]
-fn crc_failure_stops_control_without_write() {
-    let mut r = Run::started("crc", fan34);
-    r.sim.0.borrow_mut().bad_crc = true;
-    r.run(200);
-    assert_eq!(r.state("fan"), 3);
-    assert_eq!(r.sim.sets(), 0);
+fn rpm_that_does_not_follow_the_command_is_a_fault() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(35);
+    rig.sim.0.borrow_mut().freeze_rpm = true;
+    rig.run(20);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.run(120);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    assert!(rig.ctl("d5.fan").fallback.unwrap().contains("folgt"));
 }
 
 #[test]
-fn device_loss_disables_control() {
-    let mut r = Run::started("loss", fan34);
-    r.sim.0.borrow_mut().get_fail = true;
-    r.run(200);
-    assert_eq!(r.state("fan"), 3);
-    assert_eq!(r.sim.sets(), 0);
+fn model_error_in_active_mode_is_a_fault() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    rig.model_fail.set(true);
+    rig.run(35);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    assert!(rig.ctl("d5.fan").fallback.unwrap().contains("Modellfehler"));
 }
 
 #[test]
-fn pump_deviation_after_fan_write_restores_pre_write_report_once() {
-    let mut r = Run::started("pump-dev", fan34);
-    let base = r.sim.report();
-    r.run(5);
-    r.sim.0.borrow_mut().glitch = 400.0;
-    r.until_first_set();
-    assert_eq!(r.sim.sets(), 1);
-    r.run(10);
-    assert_eq!(r.state("fan"), 3);
-    assert_eq!(r.sim.sets(), 2);
-    assert_eq!(r.sim.report(), base);
-    r.run(300);
-    assert_eq!(r.sim.sets(), 2);
+fn failed_release_is_retried_with_a_reopened_handle() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    let opens = rig.sim.0.borrow().opens;
+    rig.sim.0.borrow_mut().fail_sets = 2;
+    rig.gpu = None;
+    rig.run(12);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    assert!(rig.ctl("d5.fan").note.unwrap().contains("Rückfall fehlgeschlagen"));
+    rig.run(8);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    assert!(rig.sim.0.borrow().opens >= opens + 2);
+    assert!(!rig.ctl("d5.fan").note.unwrap_or_default().contains("Rückfall"));
 }
 
 #[test]
-fn readback_mismatch_restores_and_faults() {
-    let mut r = Run::started("readback", fan34);
-    let base = r.sim.sp(Spec::FAN);
-    r.sim.0.borrow_mut().corrupt_readback = true;
-    r.until_first_set();
-    r.sim.0.borrow_mut().corrupt_readback = false;
-    r.run(5);
-    assert_eq!(r.state("fan"), 3);
-    assert_eq!(r.sim.sp(Spec::FAN), base);
+fn write_failure_falls_back_instead_of_retrying_the_duty() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.sim.0.borrow_mut().corrupt_readback = true;
+    rig.run(35);
+    rig.sim.0.borrow_mut().corrupt_readback = false;
+    rig.run(5);
+    let c = rig.ctl("d5.fan");
+    assert!(c.mode == Mode::Shadow && c.fallback.unwrap().contains("Schreibfehler"));
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
 }
 
 #[test]
-fn stale_telemetry_holds_then_sensor_loss_goes_to_floor() {
-    let mut r = Run::started("stale", fan34);
-    let rows = |r: &mut Run, with_water: bool| {
-        r.sim.advance(1.0);
-        let mut v: Vec<Row> = r.sim.rows().into_iter().filter(|x| with_water || x.channel != "d5next/water/temp").collect();
-        r.now += 1000;
-        r.fc.step(&mut v, r.now);
-    };
+fn start_releases_a_channel_left_in_duty_mode_only_with_writes_enabled() {
+    let sim = Sim::new();
+    sim.set_raw(|r| r[Spec::FAN.mode()] = 0);
+    let mut rig = Rig::with_sim(sim.clone(), (false, false), 3.0, |_| {});
+    rig.run(2);
+    assert_eq!(sim.mode(Spec::FAN), 1);
+    let sim = Sim::new();
+    sim.set_raw(|r| r[Spec::FAN.mode()] = 0);
+    let mut ro = Rig::with_sim(sim.clone(), (false, false), 3.0, |c| c.writes_enabled = false);
+    ro.run(2);
+    assert_eq!((sim.mode(Spec::FAN), sim.sets()), (0, 0));
+}
+
+#[test]
+fn shutdown_and_mode_changes_release_to_the_firmware_pid() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.c.set_mode("d5.fan", Mode::Off, false, rig.now).unwrap();
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    rig.active("d5.fan");
+    rig.run(35);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.c.shutdown(rig.now);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+}
+
+#[test]
+fn autostart_is_off_by_default_and_waits_for_identification() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(100);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
+    let mut auto = Rig::new((true, true), 3.0, |c| c.control.fan.autostart_active = Some(true));
+    auto.run(100);
+    assert_eq!(auto.ctl("d5.fan").mode, Mode::Active);
+    assert_eq!(auto.ctl("d5.pump").mode, Mode::Shadow);
+    let mut unident = Rig::new((false, false), 3.0, |c| c.control.fan.autostart_active = Some(true));
+    unident.run(400);
+    assert_eq!((unident.ctl("d5.fan").mode, unident.sim.sets()), (Mode::Shadow, 0));
+}
+
+#[test]
+fn pacing_survives_mode_toggles() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(35);
     for _ in 0..30 {
-        rows(&mut r, false);
+        rig.c.set_mode("d5.fan", Mode::Active, true, rig.now).ok();
+        rig.tick();
+        rig.c.set_mode("d5.fan", Mode::Shadow, false, rig.now).ok();
+        rig.tick();
     }
-    assert_eq!(r.sim.sets(), 0);
-    assert_eq!(r.state("fan"), 1);
-    for _ in 0..60 {
-        rows(&mut r, false);
-    }
-    assert_eq!(r.sim.sp(Spec::FAN), 28.0);
-    assert!(r.sim.sets() >= 1);
-    for _ in 0..5 {
-        rows(&mut r, true);
-    }
-    assert_eq!(r.state("fan"), 1);
+    assert!(rig.sim.duty_sets().len() <= 2, "{}", rig.sim.duty_sets().len());
+}
+
+fn stepped(secs: f64) -> impl Fn(&mut Config) {
+    move |c| c.control.step_test.fan = vec![[100.0, secs], [60.0, secs], [40.0, secs]]
 }
 
 #[test]
-fn overtemp_goes_to_floor_immediately() {
-    let mut r = Run::started("over", fan34);
-    r.run(3);
-    r.sim.0.borrow_mut().water = 41.0;
-    r.sim.0.borrow_mut().heat = 0.0;
-    r.run(3);
-    assert_eq!(r.sim.sp(Spec::FAN), 28.0);
-    assert_eq!(r.sim.sets(), 1);
+fn step_test_needs_confirmation_runs_the_schedule_and_releases() {
+    let mut rig = Rig::new((false, false), 3.0, stepped(30.0));
+    rig.run(5);
+    assert!(rig.c.start_test("d5.fan", false, rig.now).unwrap_err().contains("Bestätigung"));
+    rig.c.start_test("d5.fan", true, rig.now).unwrap();
+    assert!(rig.c.start_test("d5.fan", true, rig.now).is_err());
+    let rows = rig.tick();
+    assert!(rows.iter().any(|r| r.channel == "daisyloop/step/phase" && r.value == 1.0));
+    assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.preset(Spec::FAN)), (0, 10000));
+    assert_eq!(rig.status().step.unwrap().phases, 3);
+    assert!(rig.c.set_mode("d5.fan", Mode::Active, true, rig.now).is_err());
+    rig.run(30);
+    assert_eq!(rig.sim.preset(Spec::FAN), 6000);
+    rig.run(30);
+    assert_eq!(rig.sim.preset(Spec::FAN), 4000);
+    rig.run(31);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    assert!(rig.status().step.is_none());
+    assert!(rig.sim.duty_sets().windows(2).all(|w| w[1].0 - w[0].0 >= 29_000));
 }
 
 #[test]
-fn cpu_guard_lowers_setpoint() {
-    let mut hot = Run::started("cpu-hot", |c| c.control.fan.target_water = Some(31.0));
-    let mut cool = Run::started("cpu-cool", |c| c.control.fan.target_water = Some(31.0));
-    hot.sim.0.borrow_mut().cpu = 95.0;
-    for r in [&mut hot, &mut cool] {
-        r.sim.0.borrow_mut().heat = 150.0;
-        r.run(900);
-    }
-    assert!(hot.sim.sp(Spec::FAN) < cool.sim.sp(Spec::FAN));
+fn step_test_is_refused_without_writes_and_aborted_by_faults_and_stop() {
+    let mut ro = Rig::new((false, false), 3.0, |c| c.writes_enabled = false);
+    ro.run(5);
+    assert!(ro.c.start_test("d5.fan", true, ro.now).unwrap_err().contains("writes_enabled"));
+    let mut rig = Rig::new((false, false), 3.0, stepped(60.0));
+    rig.run(5);
+    rig.c.start_test("d5.fan", true, rig.now).unwrap();
+    rig.run(20);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.water = 41.0;
+    rig.run(2);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    assert!(rig.status().step.is_none());
+    rig.water = 30.0;
+    rig.run(35);
+    rig.c.start_test("d5.fan", true, rig.now).unwrap();
+    rig.run(3);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    rig.c.stop_test(rig.now).unwrap();
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
 }
 
 #[test]
-fn clean_disable_restores_base_and_removes_file() {
-    let mut r = Run::started("disable", fan34);
-    r.run(200);
-    assert!(r.sim.sp(Spec::FAN) > 30.0);
-    assert!(Recovery::load(&r.fc.dir).is_some());
-    let now = r.now;
-    r.fc.disable("fan", now);
-    assert_eq!(r.sim.sp(Spec::FAN), 30.0);
-    assert!(Recovery::load(&r.fc.dir).is_none());
-    let sets = r.sim.sets();
-    r.run(300);
-    assert_eq!(r.sim.sets(), sets);
-}
-
-#[test]
-fn crash_recovery_restores_base() {
-    let mut r = Run::started("crash", fan34);
-    r.run(200);
-    assert!(r.sim.sp(Spec::FAN) > 30.0);
-    let cfg = Config { fan_control_enabled: true, data_dir: r.fc.dir.clone(), ..Config::default() };
-    let sim = r.sim.clone();
-    drop(r);
-    let fc = make(&sim, &cfg);
-    assert_eq!(sim.sp(Spec::FAN), 30.0);
-    assert!(Recovery::load(&fc.dir).is_none());
-}
-
-#[test]
-fn crash_recovery_leaves_foreign_state_alone() {
-    let mut r = Run::started("crash-foreign", fan34);
-    r.run(200);
-    r.sim.foreign(0x200);
-    let cfg = Config { fan_control_enabled: true, data_dir: r.fc.dir.clone(), ..Config::default() };
-    let sim = r.sim.clone();
-    let sets = sim.sets();
-    drop(r);
-    let fc = make(&sim, &cfg);
-    assert_eq!(sim.sets(), sets);
-    assert!(Recovery::load(&fc.dir).is_none());
-}
-
-#[test]
-fn crash_recovery_needs_the_flag() {
-    let mut r = Run::started("crash-flag", fan34);
-    r.run(200);
-    let cfg = Config { data_dir: r.fc.dir.clone(), ..Config::default() };
-    let sim = r.sim.clone();
-    let (sets, sp) = (sim.sets(), sim.sp(Spec::FAN));
-    drop(r);
-    let fc = make(&sim, &cfg);
-    assert_eq!((sim.sets(), sim.sp(Spec::FAN)), (sets, sp));
-    assert!(Recovery::load(&fc.dir).is_some());
-}
-
-#[test]
-fn out_of_range_base_refuses_enable() {
-    let mut r = Run::new("range", |_| {});
-    {
-        let mut w = r.sim.0.borrow_mut();
-        w.report[Spec::FAN.setpoint()..Spec::FAN.setpoint() + 2].copy_from_slice(&4500u16.to_be_bytes());
-        Crc16Usb::seal(&mut w.report);
-    }
-    r.tick();
-    assert!(r.fc.enable("fan", r.now).is_err());
-    assert_eq!(r.sim.sets(), 0);
-}
-
-fn pump_only(c: &mut Config) {
-    c.fan_control_enabled = false;
-    c.pump_control_enabled = true;
-    c.control.pump.target_water = Some(30.0);
-}
-
-#[test]
-fn pump_write_changes_only_pump_bytes() {
-    let mut r = Run::new("pump-write", pump_only);
-    r.tick();
-    r.fc.enable("pump", r.now).unwrap();
-    let base = r.sim.report();
-    r.run(300);
-    assert!(r.sim.sets() >= 1);
-    assert!(r.sim.sp(Spec::PUMP) < 45.0 && r.sim.sp(Spec::PUMP) >= 30.0);
-    for s in &r.sim.0.borrow().sets {
-        assert_eq!(s[Spec::FAN.own()], base[Spec::FAN.own()]);
-        assert_eq!(s[Spec::PUMP.mode()], 1);
-        assert!(Guard::check_diff(&base, s, &Spec::PUMP).is_ok());
-    }
-    assert_eq!(r.fc.statuses()[1].state, 1);
-}
-
-#[test]
-fn pump_low_rpm_for_three_seconds_is_a_hard_stop() {
-    let mut r = Run::new("pump-low", pump_only);
-    r.tick();
-    r.fc.enable("pump", r.now).unwrap();
-    r.run(200);
-    let sets = r.sim.sets();
-    assert!(sets >= 1);
-    r.sim.0.borrow_mut().pump_rpm = 1700.0;
-    r.run(2);
-    assert_eq!(r.state("pump"), 1);
-    r.run(3);
-    assert_eq!(r.state("pump"), 3);
-    assert_eq!(r.sim.sp(Spec::PUMP), 30.0);
-    assert_eq!(r.sim.sets(), sets + 1);
-    assert_eq!(r.sim.report()[Spec::FAN.own()], Sim::new().report()[Spec::FAN.own()]);
-}
-
-#[test]
-fn pump_telemetry_stale_is_a_hard_stop() {
-    let mut r = Run::new("pump-stale", pump_only);
-    r.tick();
-    r.fc.enable("pump", r.now).unwrap();
-    for _ in 0..8 {
-        r.sim.advance(1.0);
-        let mut v: Vec<Row> = r.sim.rows().into_iter().filter(|x| x.channel != "d5next/pump/rpm").collect();
-        r.now += 1000;
-        r.fc.step(&mut v, r.now);
-    }
-    assert_eq!(r.state("pump"), 3);
-    assert_eq!(r.sim.sp(Spec::PUMP), 30.0);
-}
-
-#[test]
-fn fan_and_pump_writes_are_serialised() {
-    let mut r = Run::new("serial", |c| {
-        c.pump_control_enabled = true;
-        c.control.fan.target_water = Some(34.0);
-        c.control.pump.target_water = Some(30.0);
-    });
-    r.tick();
-    r.fc.enable("fan", r.now).unwrap();
-    r.fc.enable("pump", r.now).unwrap();
-    let mut stamps = Vec::new();
-    let mut seen = 0;
-    for _ in 0..600 {
-        r.tick();
-        if r.sim.sets() > seen {
-            seen = r.sim.sets();
-            stamps.push(r.now);
-        }
-    }
-    assert!(stamps.len() >= 4, "{stamps:?}");
-    for w in stamps.windows(2) {
-        assert!(w[1] - w[0] >= Guard::INTERVAL_MS, "{stamps:?}");
-    }
-    let sets = r.sim.0.borrow().sets.clone();
-    let base = Sim::new().report();
-    assert!(sets.iter().any(|s| be16(s, Spec::PUMP.setpoint()) != 4500));
-    assert!(sets.iter().any(|s| be16(s, Spec::FAN.setpoint()) != 3000));
-    for s in &sets {
-        assert_eq!(s[0x00..0x41], base[0x00..0x41]);
-        assert_eq!(s[0xEB..Guard::CRC], base[0xEB..Guard::CRC]);
-    }
-}
-
-#[test]
-fn both_restored_on_shutdown() {
-    let mut r = Run::new("both", |c| {
-        c.pump_control_enabled = true;
-        c.control.fan.target_water = Some(34.0);
-        c.control.pump.target_water = Some(30.0);
-    });
-    r.tick();
-    r.fc.enable("fan", r.now).unwrap();
-    r.fc.enable("pump", r.now).unwrap();
-    r.run(400);
-    let now = r.now;
-    r.fc.shutdown(now);
-    assert_eq!(r.sim.sp(Spec::FAN), 30.0);
-    assert_eq!(r.sim.sp(Spec::PUMP), 45.0);
-    assert!(Recovery::load(&r.fc.dir).is_none());
+fn alarms_cover_pump_fan_and_stale_sources() {
+    let mut rig = Rig::new((false, false), 3.0, |_| {});
+    rig.run(5);
+    assert!(rig.status().alarms.is_empty());
+    rig.sim.0.borrow_mut().force = [Some(0.0), Some(1000.0)];
+    rig.run(4);
+    assert!(rig.alarm(AlarmKind::PumpLow) && !rig.alarm(AlarmKind::FanStopped));
+    rig.run(8);
+    assert!(rig.alarm(AlarmKind::FanStopped));
+    rig.sim.0.borrow_mut().force = [None, None];
+    rig.run(1);
+    assert!(rig.status().alarms.is_empty());
+    rig.gpu = None;
+    rig.run(12);
+    let a = rig.status().alarms;
+    assert!(a.len() == 1 && a[0].kind == AlarmKind::Stale && a[0].channel == "nvml/0/temp");
 }

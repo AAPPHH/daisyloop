@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const PIPE_NAME: &str = r"\\.\pipe\daisyloop";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,19 +26,33 @@ pub enum ControlKind {
     Fan,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    Pid,
-    Manual,
-    Curve,
+    Off,
+    #[default]
+    Shadow,
+    Active,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Drive {
+    #[default]
+    Firmware,
+    Duty,
+    Test,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "snake_case")]
-pub enum Side {
-    Low,
-    High,
+pub enum AlarmKind {
+    WaterHigh,
+    CpuHigh,
+    PumpLow,
+    FanStopped,
+    Stale,
+    Fallback,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -51,27 +65,8 @@ pub struct Channel {
     pub value: Option<f64>,
     pub min: Option<f64>,
     pub max: Option<f64>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PidParams {
-    pub source: String,
-    pub setpoint: f64,
-    pub kp: f64,
-    pub ki: f64,
-    pub kd: f64,
-    pub min_duty: f64,
-    pub max_duty: f64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct PidState {
-    pub output: f64,
-    pub error: f64,
-    pub p: f64,
-    pub i: f64,
-    pub d: f64,
-    pub saturated: bool,
+    pub age_ms: i64,
+    pub stale: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -82,9 +77,18 @@ pub struct Control {
     pub rpm_channel: String,
     pub duty_channel: String,
     pub mode: Mode,
-    pub floor: f64,
-    pub pid: PidParams,
-    pub state: PidState,
+    pub allowed: bool,
+    pub identified: bool,
+    pub drive: Drive,
+    pub target_rpm: Option<f64>,
+    pub actual_rpm: Option<f64>,
+    pub duty: Option<f64>,
+    pub commanded_duty: Option<f64>,
+    pub floor_duty: f64,
+    pub min_rpm: f64,
+    pub max_rpm: f64,
+    pub fallback: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -96,17 +100,54 @@ pub struct Limit {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Alarm {
+    pub kind: AlarmKind,
     pub channel: String,
-    pub side: Side,
-    pub limit: f64,
-    pub value: f64,
+    pub message: String,
+    pub value: Option<f64>,
+    pub limit: Option<f64>,
     pub since_ms: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ModelInfo {
+    pub loaded: bool,
+    pub warm: bool,
+    pub warmup_left_s: u32,
+    pub fan_identified: bool,
+    pub pump_identified: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Predicted {
+    pub horizon_s: u32,
+    pub water: Option<f64>,
+    pub cpu: Option<f64>,
+    pub gpu: Option<f64>,
+    pub water_limit: f64,
+    pub cpu_limit: f64,
+    pub gpu_limit: f64,
+    pub feasible: bool,
+    pub age_ms: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct StepStatus {
+    pub id: String,
+    pub phase: u32,
+    pub phases: u32,
+    pub duty: f64,
+    pub left_s: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Snapshot {
     pub ts_ms: i64,
     pub seq: u64,
+    pub weight: f64,
+    pub model: ModelInfo,
+    pub predicted: Option<Predicted>,
+    pub step_test: Option<StepStatus>,
     pub channels: Vec<Channel>,
     pub controls: Vec<Control>,
     pub limits: Vec<Limit>,
@@ -136,9 +177,21 @@ pub struct HistoryResponse {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
-    SetMode { id: String, mode: Mode },
-    SetPid { id: String, pid: PidParams },
-    SetLimit { channel: String, low: Option<f64>, high: Option<f64> },
+    SetMode {
+        id: String,
+        mode: Mode,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    SetWeight {
+        weight: f64,
+    },
+    StartStepTest {
+        id: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    StopStepTest,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

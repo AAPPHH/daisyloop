@@ -663,6 +663,7 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-sql",
  "log",
+ "model_infer",
  "nvml-wrapper",
  "parquet",
  "serde",
@@ -1886,6 +1887,14 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "model_infer"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
