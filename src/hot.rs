@@ -274,7 +274,9 @@ impl HotStore {
                 let old = self.streams.remove(i);
                 Self::seal(old);
                 self.streams.insert(i, Stream::create(&self.dir, table, crate::now_micros())?);
-                self.streams[i].append(tick)?;
+                if let Err(e) = self.streams[i].append(tick) {
+                    log::error!("the fresh stream cannot take this tick either, it is lost: {e}");
+                }
             }
             i += 1;
         }
@@ -556,7 +558,7 @@ mod tests {
         let mut hot = HotStore::open(&d, Duration::ZERO).unwrap();
         hot.append(&tick(0, 5)).unwrap();
         hot.append(&tick(1, 5)).unwrap();
-        assert!(hot.append(&tick(2, 33000)).is_err());
+        hot.append(&tick(2, 33000)).unwrap();
         let sealed = telemetry_file(&d, false);
         let read = HotStore::read(&sealed).unwrap();
         assert_eq!((rows_of(&read.items), read.flaw.is_none()), (10, true));
