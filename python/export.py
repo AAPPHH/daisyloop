@@ -56,7 +56,7 @@ class Exporter:
 
     def model(self):
         import xgboost as xgb
-        out = {"features": self.feats, "targets": {}}
+        out = {"features": self.feats, "identified": {"fan": False, "pump": False}, "targets": {}}
         for tg, r in self.stage.items():
             b = xgb.Booster()
             b.load_model(os.path.join(CONFIG["out_dir"], f"{self.cfg['tag']}_{tg}.json"))
