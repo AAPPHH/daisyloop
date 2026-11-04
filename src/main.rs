@@ -169,7 +169,12 @@ pub struct Row {
     pub kind: String,
     pub unit: String,
     pub role: String,
+    #[serde(deserialize_with = "nan_from_null")]
     pub value: f64,
+}
+
+fn nan_from_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
 }
 
 impl Row {
