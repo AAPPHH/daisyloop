@@ -209,7 +209,7 @@ impl Sim {
         add(WATER, None, Some(40.0));
         add(CPU_TEMP, None, Some(90.0));
         add("/gpu-nvidia/0/temperature/0", None, Some(83.0));
-        add(&format!("{D5}/fan/0"), Some(1500.0), None);
+        add(&format!("{D5}/fan/0"), Some(1000.0), None);
         add("/lpc/nct6687dr/0/temperature/2", None, Some(95.0));
         add("/nvme/1/temperature/0", None, Some(80.0));
     }

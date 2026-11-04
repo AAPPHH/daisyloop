@@ -1,1 +1,84 @@
-<!doctype html><title>x</title>
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>daisyloop</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="stale">
+<div class="alarm-edge"></div>
+<header class="top">
+  <div class="brand"><span class="mark"></span><span>daisyloop</span></div>
+  <nav>
+    <a href="#hero">Übersicht</a>
+    <a href="#controls">Regelung</a>
+    <a href="#history">Verlauf</a>
+    <a href="#sensors">Sensoren</a>
+  </nav>
+  <div id="status" class="status"><i></i><span>Verbinde …</span></div>
+</header>
+<main>
+  <section id="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Wassertemperatur</p>
+      <div class="water"><span id="water-v">–</span><span class="deg">°C</span></div>
+      <p id="water-trend" class="trend">&nbsp;</p>
+      <div class="setpoint" id="hero-set">
+        <div class="set-head"><span>Sollwert Radiatorlüfter</span><output id="hero-set-v">–</output></div>
+        <div class="track heat-track" id="hero-track"><b class="now" id="hero-now"></b><b class="knob" id="hero-knob" tabindex="0"></b></div>
+        <div class="scale-labels"><span>24</span><span>30</span><span>35</span><span>40</span><span>46 °C</span></div>
+      </div>
+      <div id="alarm-pill" class="pill ok">Alle Werte im Rahmen</div>
+    </div>
+    <div class="stage" id="stage">
+      <canvas id="loop"></canvas>
+      <div class="node chip-node" id="n-cpu" style="left:36%;top:17%">
+        <span class="lbl">CPU</span>
+        <span class="big"><span id="cpu-t">–</span><small>°C</small></span>
+        <span class="sub"><span id="cpu-p">–</span> W</span>
+      </div>
+      <div class="node chip-node" id="n-gpu" style="left:66%;top:17%">
+        <span class="lbl">GPU</span>
+        <span class="big"><span id="gpu-t">–</span><small>°C</small></span>
+        <span class="sub"><span id="gpu-p">–</span> W</span>
+      </div>
+      <div class="node plain" id="n-pump" style="left:21%;top:45%">
+        <span class="lbl">Pumpe</span>
+        <span class="big"><span id="pump-rpm">–</span><small>U/min</small></span>
+        <span class="sub"><span id="pump-duty">–</span> % Duty</span>
+      </div>
+      <div class="node plain" id="n-fan" style="left:50%;top:56%">
+        <span class="lbl">Radiatorlüfter</span>
+        <span class="big"><span id="fan-rpm">–</span><small>U/min</small></span>
+        <span class="sub"><span id="fan-duty">–</span> % Duty</span>
+      </div>
+    </div>
+    <a class="cue" href="#controls" aria-label="Weiter"><span></span></a>
+  </section>
+  <section id="controls" class="block">
+    <div class="block-head"><h2>Regelung</h2><p>PID-Regler je Kanal. Sollwert direkt auf der Temperaturskala ziehen.</p></div>
+    <div id="ctl-list"></div>
+  </section>
+  <section id="history" class="block">
+    <div class="block-head">
+      <h2>Verlauf</h2>
+      <div class="seg" id="range"><i></i><button data-r="1h">1 h</button><button data-r="1d">1 d</button><button data-r="1w">1 w</button></div>
+    </div>
+    <div id="chips" class="chips"></div>
+    <div id="lanes" class="lanes"></div>
+  </section>
+  <section id="sensors" class="block">
+    <div class="block-head">
+      <h2>Sensoren <small id="sensor-count"></small></h2>
+      <div class="search"><input id="search" type="search" placeholder="Sensor oder Hardware suchen" autocomplete="off" spellcheck="false"></div>
+      <div class="mini-actions"><button id="open-all">Alle öffnen</button><button id="close-all">Alle schließen</button></div>
+    </div>
+    <div id="groups"></div>
+  </section>
+  <footer>daisyloop · Protokoll v1 · Pipe \\.\pipe\daisyloop</footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
