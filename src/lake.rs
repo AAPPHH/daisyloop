@@ -922,7 +922,7 @@ mod tests {
             committed += chans.len();
             lake.commit_ticks(&[fixture_tick(k as i64 * 10, &chans, 1.0)], &format!("seed{k}")).unwrap();
         }
-        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        let mut hot = HotStore::open(&d, Duration::ZERO).unwrap();
         let chans = vec![long(0), "hot/only".to_string()];
         for ts in 1000..1005 {
             hot.append(&fixture_tick(ts, &chans, 2.0)).unwrap();
