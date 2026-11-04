@@ -772,4 +772,49 @@ mod tests {
         assert_eq!(total_records(&rotation.lake, &tid) as usize, expect);
         assert!(total_records(&rotation.lake, &rid) > 0);
     }
+
+    fn fixture_tick(ts: i64, channels: &[String], value: f64) -> Tick {
+        Tick { ts, rows: channels.iter().map(|c| Row::new("lhm", c.clone(), "L", "load", "%", value)).collect(), raw: (ts % 2 == 0).then(|| vec![9, 9]) }
+    }
+
+    #[test]
+    fn writes_the_fixture_lake_for_the_python_regression_test() {
+        let (d, lake, _) = lake_in("lake-fixture");
+        let long = |i: usize| format!("/lpc/%2F{}-{i}", "ab%20cd".repeat(20));
+        let mut committed = 0;
+        for k in 0..30usize {
+            let chans = vec![long(k % 3), long(3 + k), "short".to_string()];
+            committed += chans.len();
+            lake.commit_ticks(&[fixture_tick(k as i64 * 10, &chans, 1.0)], &format!("seed{k}")).unwrap();
+        }
+        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        let chans = vec![long(0), "hot/only".to_string()];
+        for ts in 1000..1005 {
+            hot.append(&fixture_tick(ts, &chans, 2.0)).unwrap();
+        }
+        assert!(hot.rotate().unwrap());
+        let before = HotStore::sealed(&d);
+        for ts in 2000..2004 {
+            hot.append(&fixture_tick(ts, &chans, 3.0)).unwrap();
+        }
+        assert!(hot.rotate().unwrap());
+        for p in HotStore::sealed(&d).into_iter().filter(|p| !before.contains(p)) {
+            let table = HotStore::table_of(&p).unwrap();
+            let rows = lake.commit(table, &HotStore::read(&p).unwrap(), p.file_name().unwrap().to_string_lossy().trim_end_matches(".sealed")).unwrap().unwrap();
+            if table == Table::Telemetry {
+                committed += rows;
+            }
+        }
+        for ts in 3000..3002 {
+            hot.append(&fixture_tick(ts, &chans, 4.0)).unwrap();
+        }
+        let expected = serde_json::json!({
+            "total": committed + 5 * 2 + 2 * 2,
+            "long0": 30 / 3 + 5 + 4 + 2,
+            "raw": 30 + 3 + 2 + 1,
+            "hot_only": 5 + 4 + 2,
+            "long0_id": long(0),
+        });
+        std::fs::write(d.join("expected.json"), expected.to_string()).unwrap();
+    }
 }

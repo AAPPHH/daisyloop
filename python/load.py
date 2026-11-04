@@ -1,13 +1,7 @@
-import os
-import sqlite3
 import numpy as np
-import duckdb
-import torch
+from lake import Lake
 
 CONFIG = {
-    "catalog_db": os.path.join(os.environ.get("LOCALAPPDATA", "."), "daisyloop", "catalog.db"),
-    "catalog": "daisyloop",
-    "namespace": "daisyloop",
     "table": "telemetry",
     "step": 1,
     "roles": {"X": "state", "U": "input", "D": "disturbance"},
@@ -17,19 +11,8 @@ CONFIG = {
 class Loader:
     def __init__(self, config=CONFIG):
         self.cfg = config
-        self.con = duckdb.connect()
-        self.con.execute("INSTALL iceberg")
-        self.con.execute("LOAD iceberg")
-
-    def location(self, table):
-        with sqlite3.connect(self.cfg["catalog_db"]) as db:
-            row = db.execute(
-                "select metadata_location from iceberg_tables where catalog_name=? and table_namespace=? and table_name=?",
-                (self.cfg["catalog"], self.cfg["namespace"], table),
-            ).fetchone()
-        if row is None:
-            raise KeyError(table)
-        return row[0]
+        self.lake = Lake()
+        self.con = self.lake.con
 
     def rows(self, t0=None, t1=None, device=None):
         step = self.cfg["step"]
@@ -45,9 +28,9 @@ class Loader:
             args.append(device)
         sql = (
             f"select cast(floor(epoch(ts) / {step}) as bigint) as k, role, channel as name,"
-            f"arg_max(value, ts) as v from iceberg_scan(?) where {' and '.join(where)} group by all order by k"
+            f"arg_max(value, ts) as v from {self.cfg['table']} where {' and '.join(where)} group by all order by k"
         )
-        return self.con.execute(sql, [self.location(self.cfg["table"])] + args).fetchnumpy()
+        return self.con.execute(sql, args).fetchnumpy()
 
     @staticmethod
     def ffill(m):
@@ -59,6 +42,7 @@ class Loader:
         return out
 
     def pivot(self, data):
+        import torch
         k, role, name, v = data["k"], data["role"], data["name"], data["v"]
         if len(k) == 0:
             empty = torch.zeros((0, 0), dtype=torch.float32)

@@ -1,0 +1,3 @@
+duckdb==2.0.0
+pyarrow>=17
+numpy
