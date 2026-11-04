@@ -36,6 +36,8 @@ pub struct Config {
     pub pump_control_enabled: bool,
     pub control: control::ControlConfig,
     pub ipc_enabled: bool,
+    #[serde(skip)]
+    pub install_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -58,26 +60,31 @@ impl Default for Config {
             pump_control_enabled: false,
             control: control::ControlConfig::default(),
             ipc_enabled: true,
+            install_dir: None,
         }
     }
 }
 
 impl Config {
     pub fn default_data_dir() -> PathBuf {
-        if let Some(dir) = std::env::var_os("DAISYLOOP_DATA_DIR") {
-            return PathBuf::from(dir);
-        }
-        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        if let Some(dir) = exe_dir.filter(|d| d.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin"))) {
-            if let Some(parent) = dir.parent() {
-                return parent.to_path_buf();
-            }
-        }
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("daisyloop")
+        Config::dev_data_dir(std::env::var_os("DAISYLOOP_DATA_DIR").map(PathBuf::from), std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
     }
-    const ADMIN_KEYS: [&'static str; 8] = ["sidecar", "fan_control_enabled", "pump_control_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
+    fn dev_data_dir(env_dir: Option<PathBuf>, local: Option<PathBuf>) -> PathBuf {
+        env_dir.unwrap_or_else(|| local.unwrap_or_else(std::env::temp_dir).join("daisyloop"))
+    }
+    const ADMIN_KEYS: [&'static str; 9] = ["data_dir", "sidecar", "fan_control_enabled", "pump_control_enabled", "control", "ipc_enabled", "d5_vid", "d5_pid", "d5_usage_page"];
+    pub fn program_dir() -> PathBuf {
+        std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")).join("daisyloop")
+    }
+    fn normal(p: &Path) -> String {
+        p.to_string_lossy().to_lowercase().replace('/', "\\").trim_end_matches('\\').to_string()
+    }
+    pub fn is_install_dir(exe_dir: &Path, program_dir: &Path) -> bool {
+        Config::normal(exe_dir) == Config::normal(program_dir)
+    }
     pub fn installed_dir() -> Option<PathBuf> {
-        std::env::current_exe().ok()?.parent().filter(|d| d.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin"))).map(|d| d.to_path_buf())
+        let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        Config::is_install_dir(&dir, &Config::program_dir()).then_some(dir)
     }
     fn table(path: &Path) -> toml::Table {
         std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default()
@@ -91,18 +98,30 @@ impl Config {
         }
         toml::Value::Table(user).try_into().unwrap_or_default()
     }
-    pub fn load() -> Config {
-        let dir = Config::default_data_dir();
-        let admin = Config::installed_dir().map(|bin| Config::table(&bin.join("config.toml")));
-        let mut cfg = Config::from_tables(Config::table(&dir.join("config.toml")), admin);
+    pub fn resolve(install: Option<&Path>, env_dir: Option<PathBuf>, local: Option<PathBuf>, read: &dyn Fn(&Path) -> toml::Table) -> Config {
+        let Some(install) = install else {
+            let dir = Config::dev_data_dir(env_dir, local);
+            let mut cfg = Config::from_tables(read(&dir.join("config.toml")), None);
+            cfg.data_dir = dir;
+            return cfg;
+        };
+        let admin = read(&install.join("config.toml"));
+        let dir = admin.get("data_dir").and_then(|v| v.as_str()).map(PathBuf::from).unwrap_or_else(|| Config::dev_data_dir(None, local));
+        let mut cfg = Config::from_tables(read(&dir.join("config.toml")), Some(admin));
         cfg.data_dir = dir;
+        cfg.install_dir = Some(install.to_path_buf());
         cfg
     }
+    pub fn load() -> Config {
+        let env_dir = std::env::var_os("DAISYLOOP_DATA_DIR").map(PathBuf::from);
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        Config::resolve(Config::installed_dir().as_deref(), env_dir, local, &Config::table)
+    }
     pub fn state_dir(&self) -> PathBuf {
-        Config::installed_dir().unwrap_or_else(|| self.data_dir.clone())
+        self.install_dir.as_ref().map_or_else(|| self.data_dir.clone(), |d| d.join("state"))
     }
     pub fn sidecar_exe(&self) -> PathBuf {
-        if let Some(p) = self.sidecar.as_ref().filter(|_| Config::installed_dir().is_none()) {
+        if let Some(p) = self.sidecar.as_ref().filter(|_| self.install_dir.is_none()) {
             return p.clone();
         }
         let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
@@ -425,6 +444,7 @@ fn init_log(cfg: &Config) {
 fn main() {
     let cfg = Config::load();
     let _ = std::fs::create_dir_all(&cfg.data_dir);
+    let _ = std::fs::create_dir_all(cfg.state_dir());
     if !single_instance(&cfg.mutex_name()) {
         return;
     }
@@ -449,20 +469,56 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn reader(files: Vec<(&'static str, &'static str)>) -> impl Fn(&Path) -> toml::Table {
+        move |p: &Path| files.iter().find(|(k, _)| Config::normal(Path::new(k)) == Config::normal(p)).map(|(_, v)| t(v)).unwrap_or_default()
+    }
+
+    const INSTALL: &str = r"C:\Program Files\daisyloop";
+    const DATA: &str = r"C:\Users\user\AppData\Local\daisyloop";
+    const ADMIN_FILE: &str = r"C:\Program Files\daisyloop\config.toml";
+    const USER_FILE: &str = r"C:\Users\user\AppData\Local\daisyloop\config.toml";
+
     #[test]
     fn installed_ignores_security_keys_from_the_user_config() {
-        let user = t("keep_versions = 3
-fan_control_enabled = true
-sidecar = 'C:/evil.exe'
-[control.fan]
-autostart = true
-");
-        let cfg = Config::from_tables(user.clone(), Some(t("pump_control_enabled = true")));
+        let admin = "data_dir = 'C:\\Users\\user\\AppData\\Local\\daisyloop'\npump_control_enabled = true\n[control.fan]\ntarget_water = 33.0\n";
+        let user = "keep_versions = 3\nfan_control_enabled = true\ndata_dir = 'C:\\evil'\nsidecar = 'C:/evil.exe'\n[control.fan]\nautostart = true\n";
+        let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\SYSTEM")), &reader(vec![(ADMIN_FILE, admin), (USER_FILE, user)]));
         assert_eq!(cfg.keep_versions, 3);
         assert!(!cfg.fan_control_enabled && cfg.pump_control_enabled);
         assert!(cfg.sidecar.is_none() && !cfg.control.fan.autostart);
-        let dev = Config::from_tables(user, None);
-        assert!(dev.fan_control_enabled && dev.sidecar.is_some() && dev.control.fan.autostart);
+        assert_eq!(cfg.control.fan.target_water, Some(33.0));
+        assert_eq!(cfg.data_dir, PathBuf::from(DATA));
+        assert_eq!(cfg.state_dir(), Path::new(INSTALL).join("state"));
+        assert!(cfg.install_dir.is_some());
+    }
+
+    #[test]
+    fn installed_ignores_the_data_dir_env_and_falls_back_without_a_config_value() {
+        let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Local")), &reader(vec![(ADMIN_FILE, "ipc_enabled = false")]));
+        assert_eq!(cfg.data_dir, PathBuf::from(r"C:\Local\daisyloop"));
+        assert!(!cfg.ipc_enabled);
+    }
+
+    #[test]
+    fn dev_run_uses_env_or_localappdata_and_keeps_everything_from_the_user_config() {
+        let files = vec![(r"C:\env\config.toml", "fan_control_enabled = true\nsidecar = 'C:/x.exe'"), (USER_FILE, "keep_versions = 7")];
+        let env = Config::resolve(None, Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files.clone()));
+        assert_eq!(env.data_dir, PathBuf::from(r"C:\env"));
+        assert!(env.fan_control_enabled && env.sidecar.is_some() && env.install_dir.is_none());
+        assert_eq!(env.state_dir(), PathBuf::from(r"C:\env"));
+        let local = Config::resolve(None, None, Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files));
+        assert_eq!(local.data_dir, PathBuf::from(DATA));
+        assert_eq!(local.keep_versions, 7);
+    }
+
+    #[test]
+    fn installed_means_exactly_the_program_files_dir() {
+        let pf = Path::new(INSTALL);
+        assert!(Config::is_install_dir(Path::new(r"c:\program files\DAISYLOOP\"), pf));
+        assert!(Config::is_install_dir(Path::new("C:/Program Files/daisyloop"), pf));
+        for other in [r"C:\Program Files\daisyloop\bin", r"C:\Program Files", r"C:\Users\user\AppData\Local\daisyloop\bin", r"C:\Program Files\daisyloop2", r"D:\Program Files\daisyloop"] {
+            assert!(!Config::is_install_dir(Path::new(other), pf), "{other}");
+        }
     }
 
     #[test]
