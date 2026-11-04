@@ -170,11 +170,14 @@ pub struct Lhm {
     latest: Arc<Mutex<Option<Latest>>>,
     spawned: Option<Instant>,
     stale: Duration,
+    log: PathBuf,
+    failures: u32,
+    backoff_until: Option<Instant>,
 }
 
 impl Lhm {
     pub fn new(cfg: &Config) -> Lhm {
-        Lhm { exe: cfg.sidecar_exe(), child: None, latest: Arc::new(Mutex::new(None)), spawned: None, stale: Duration::from_secs(cfg.sidecar_stale_secs) }
+        Lhm { exe: cfg.sidecar_exe(), child: None, latest: Arc::new(Mutex::new(None)), spawned: None, stale: Duration::from_secs(cfg.sidecar_stale_secs), log: cfg.data_dir.join("sidecar.log"), failures: 0, backoff_until: None }
     }
     fn kind(t: &str, unit: &str) -> &'static str {
         match t {
@@ -208,7 +211,11 @@ impl Lhm {
         Some(rows)
     }
     fn spawn(&mut self) -> Result<(), String> {
-        let mut child = Command::new(&self.exe).stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null()).creation_flags(0x0800_0000).spawn().map_err(|e| format!("{}: {e}", self.exe.display()))?;
+        if std::fs::metadata(&self.log).is_ok_and(|m| m.len() > 4 << 20) {
+            let _ = std::fs::remove_file(&self.log);
+        }
+        let stderr = std::fs::OpenOptions::new().create(true).append(true).open(&self.log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+        let mut child = Command::new(&self.exe).stdout(Stdio::piped()).stderr(stderr).stdin(Stdio::null()).creation_flags(0x0800_0000).spawn().map_err(|e| format!("{}: {e}", self.exe.display()))?;
         KillOnExit::assign(&child);
         let out = child.stdout.take().ok_or("no sidecar stdout")?;
         let latest = self.latest.clone();
@@ -246,8 +253,17 @@ impl Source for Lhm {
     fn poll(&mut self) -> Result<Sample, String> {
         if !self.healthy() {
             self.stop();
-            if self.spawned.is_some_and(|s| s.elapsed() < Duration::from_secs(5)) {
+            if self.backoff_until.is_some_and(|t| Instant::now() < t) {
                 return Err("sidecar restarting".into());
+            }
+            if self.spawned.is_some_and(|s| s.elapsed() > Duration::from_secs(120)) {
+                self.failures = 0;
+            }
+            let wait = Duration::from_secs((5u64 << self.failures.min(6)).min(300));
+            self.failures += 1;
+            self.backoff_until = Some(Instant::now() + wait);
+            if self.failures > 1 {
+                log::warn!("sidecar restart #{} after a failure, next attempt not before {} s", self.failures - 1, wait.as_secs());
             }
             self.spawn()?;
             return Err("sidecar started".into());

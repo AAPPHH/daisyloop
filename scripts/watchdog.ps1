@@ -1,10 +1,12 @@
+param([Parameter(Mandatory)][string]$DataDir)
 $ErrorActionPreference = 'Stop'
 $bin = $PSScriptRoot
-$base = Split-Path $bin -Parent
 $exe = Join-Path $bin 'daisyloop.exe'
 $sidecar = Join-Path $bin 'sidecar\daisyloop-lhm.exe'
-$beat = Join-Path $base 'heartbeat'
-$log = Join-Path $base 'watchdog.log'
+$beat = Join-Path $DataDir 'heartbeat'
+$state = Join-Path $bin 'state'
+New-Item -ItemType Directory -Force $state | Out-Null
+$log = Join-Path $state 'watchdog.log'
 function Note($m) {
     if ((Test-Path $log) -and (Get-Item $log).Length -gt 262144) { Set-Content $log (Get-Content $log -Tail 200) }
     Add-Content $log ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m)
