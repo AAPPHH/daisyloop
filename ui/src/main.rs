@@ -18,9 +18,9 @@ struct Shared {
     alarms: AtomicUsize,
 }
 
-#[tauri::command]
-fn send_command(shared: State<Arc<Shared>>, cmd: Command) {
-    shared.link.command(cmd);
+#[tauri::command(async)]
+fn send_command(shared: State<Arc<Shared>>, cmd: Command) -> Result<(), String> {
+    shared.link.command(cmd)
 }
 
 #[tauri::command]
