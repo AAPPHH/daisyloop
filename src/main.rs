@@ -45,7 +45,7 @@ impl Default for Config {
         Config {
             interval_secs: 1.0,
             commit_secs: 900,
-            wal_sync_secs: 10,
+            wal_sync_secs: 1,
             wal_max_bytes: 2 << 30,
             stall_secs: 60,
             poll_timeout_ms: 1300,
@@ -86,8 +86,12 @@ impl Config {
         let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
         Config::is_install_dir(&dir, &Config::program_dir()).then_some(dir)
     }
-    fn table(path: &Path) -> toml::Table {
-        std::fs::read_to_string(path).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default()
+    fn table(path: &Path) -> Result<toml::Table, String> {
+        match std::fs::read_to_string(path) {
+            Ok(t) => t.parse::<toml::Table>().map_err(|e| format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
     }
     pub fn from_tables(mut user: toml::Table, admin: Option<toml::Table>) -> Config {
         if let Some(admin) = admin {
@@ -98,24 +102,31 @@ impl Config {
         }
         toml::Value::Table(user).try_into().unwrap_or_default()
     }
-    pub fn resolve(install: Option<&Path>, env_dir: Option<PathBuf>, local: Option<PathBuf>, read: &dyn Fn(&Path) -> toml::Table) -> Config {
+    pub fn resolve(install: Option<&Path>, env_dir: Option<PathBuf>, local: Option<PathBuf>, read: &dyn Fn(&Path) -> Result<toml::Table, String>) -> Result<Config, String> {
         let Some(install) = install else {
             let dir = Config::dev_data_dir(env_dir, local);
-            let mut cfg = Config::from_tables(read(&dir.join("config.toml")), None);
+            let mut cfg = Config::from_tables(read(&dir.join("config.toml")).unwrap_or_default(), None);
             cfg.data_dir = dir;
-            return cfg;
+            return Ok(cfg);
         };
-        let admin = read(&install.join("config.toml"));
-        let dir = admin.get("data_dir").and_then(|v| v.as_str()).map(PathBuf::from).unwrap_or_else(|| Config::dev_data_dir(None, local));
-        let mut cfg = Config::from_tables(read(&dir.join("config.toml")), Some(admin));
+        let admin = read(&install.join("config.toml"))?;
+        let dir = admin.get("data_dir").and_then(|v| v.as_str()).map(PathBuf::from).ok_or_else(|| format!("{}: no data_dir", install.join("config.toml").display()))?;
+        let mut cfg = Config::from_tables(read(&dir.join("config.toml")).unwrap_or_default(), Some(admin));
         cfg.data_dir = dir;
         cfg.install_dir = Some(install.to_path_buf());
-        cfg
+        Ok(cfg)
     }
-    pub fn load() -> Config {
+    pub fn load() -> Result<Config, String> {
         let env_dir = std::env::var_os("DAISYLOOP_DATA_DIR").map(PathBuf::from);
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-        Config::resolve(Config::installed_dir().as_deref(), env_dir, local, &Config::table)
+        let installed = Config::installed_dir();
+        let cfg = Config::resolve(installed.as_deref(), env_dir, local, &Config::table);
+        if let (Err(e), Some(dir)) = (&cfg, &installed) {
+            let state = dir.join("state");
+            let _ = std::fs::create_dir_all(&state);
+            let _ = std::fs::write(state.join("config-error.log"), format!("{e}\r\n"));
+        }
+        cfg
     }
     pub fn state_dir(&self) -> PathBuf {
         self.install_dir.as_ref().map_or_else(|| self.data_dir.clone(), |d| d.join("state"))
@@ -126,7 +137,7 @@ impl Config {
         }
         let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
         let deployed = dir.join("sidecar").join("daisyloop-lhm.exe");
-        if deployed.exists() {
+        if self.install_dir.is_some() || deployed.exists() {
             return deployed;
         }
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar").join("publish").join("daisyloop-lhm.exe")
@@ -185,6 +196,7 @@ struct Worker {
     tx: Sender<u64>,
     busy_since: Option<Instant>,
     failing: bool,
+    seen: bool,
 }
 
 type Factory = fn(&Config) -> Box<dyn Source>;
@@ -234,7 +246,7 @@ impl Collector {
                         }
                     })
                     .expect("source thread");
-                Worker { name, tx, busy_since: None, failing: false }
+                Worker { name, tx, busy_since: None, failing: false, seen: false }
             })
             .collect();
         let hid_cfg = cfg.clone();
@@ -252,6 +264,10 @@ impl Collector {
         let w = &mut self.workers[i];
         match r {
             Ok(sample) => {
+                if !w.seen {
+                    log::info!("{} first data", w.name);
+                    w.seen = true;
+                }
                 if w.failing {
                     log::info!("{} recovered", w.name);
                     w.failing = false;
@@ -380,7 +396,7 @@ impl Collector {
         let stop_file = self.cfg.data_dir.join("stop");
         let heartbeat = self.cfg.data_dir.join("heartbeat");
         let mut next = Instant::now();
-        let mut last_commit = Instant::now();
+        let mut next_commit = Instant::now() + commit_every.min(Duration::from_secs(60));
         self.committer.notify();
         loop {
             self.tick();
@@ -399,9 +415,9 @@ impl Collector {
                 log::info!("stopped");
                 return;
             }
-            if last_commit.elapsed() >= commit_every {
+            if Instant::now() >= next_commit {
                 self.rotate();
-                last_commit = Instant::now();
+                next_commit = Instant::now() + commit_every;
             }
             next += interval;
             let now = Instant::now();
@@ -441,14 +457,23 @@ fn init_log(cfg: &Config) {
     }
 }
 
+fn heartbeat_age(path: &Path) -> String {
+    match std::fs::metadata(path).and_then(|m| m.modified()).map(|t| t.elapsed()) {
+        Ok(Ok(age)) => format!("{}s", age.as_secs()),
+        Ok(Err(_)) => "in the future".into(),
+        Err(_) => "none".into(),
+    }
+}
+
 fn main() {
-    let cfg = Config::load();
+    let Ok(cfg) = Config::load() else { return };
     let _ = std::fs::create_dir_all(&cfg.data_dir);
     let _ = std::fs::create_dir_all(cfg.state_dir());
     if !single_instance(&cfg.mutex_name()) {
         return;
     }
     init_log(&cfg);
+    log::info!("previous heartbeat age {}", heartbeat_age(&cfg.data_dir.join("heartbeat")));
     std::panic::set_hook(Box::new(|i| log::error!("panic: {i}")));
     let c = match Collector::new(&cfg) {
         Ok(c) => c,
@@ -465,12 +490,8 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn t(s: &str) -> toml::Table {
-        s.parse().unwrap()
-    }
-
-    fn reader(files: Vec<(&'static str, &'static str)>) -> impl Fn(&Path) -> toml::Table {
-        move |p: &Path| files.iter().find(|(k, _)| Config::normal(Path::new(k)) == Config::normal(p)).map(|(_, v)| t(v)).unwrap_or_default()
+    fn reader(files: Vec<(&'static str, &'static str)>) -> impl Fn(&Path) -> Result<toml::Table, String> {
+        move |p: &Path| files.iter().find(|(k, _)| Config::normal(Path::new(k)) == Config::normal(p)).map_or(Ok(toml::Table::new()), |(_, v)| v.parse::<toml::Table>().map_err(|e| e.to_string()))
     }
 
     const INSTALL: &str = r"C:\Program Files\daisyloop";
@@ -482,7 +503,7 @@ mod tests {
     fn installed_ignores_security_keys_from_the_user_config() {
         let admin = "data_dir = 'C:\\Users\\user\\AppData\\Local\\daisyloop'\npump_control_enabled = true\n[control.fan]\ntarget_water = 33.0\n";
         let user = "keep_versions = 3\nfan_control_enabled = true\ndata_dir = 'C:\\evil'\nsidecar = 'C:/evil.exe'\n[control.fan]\nautostart = true\n";
-        let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\SYSTEM")), &reader(vec![(ADMIN_FILE, admin), (USER_FILE, user)]));
+        let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\SYSTEM")), &reader(vec![(ADMIN_FILE, admin), (USER_FILE, user)])).unwrap();
         assert_eq!(cfg.keep_versions, 3);
         assert!(!cfg.fan_control_enabled && cfg.pump_control_enabled);
         assert!(cfg.sidecar.is_none() && !cfg.control.fan.autostart);
@@ -493,20 +514,48 @@ mod tests {
     }
 
     #[test]
-    fn installed_ignores_the_data_dir_env_and_falls_back_without_a_config_value() {
-        let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Local")), &reader(vec![(ADMIN_FILE, "ipc_enabled = false")]));
-        assert_eq!(cfg.data_dir, PathBuf::from(r"C:\Local\daisyloop"));
-        assert!(!cfg.ipc_enabled);
+    fn installed_never_falls_back_when_the_admin_config_is_broken_or_lacks_data_dir() {
+        let resolve = |files| Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Local")), &reader(files));
+        assert!(resolve(vec![(ADMIN_FILE, "ipc_enabled = false")]).is_err());
+        assert!(resolve(vec![(ADMIN_FILE, "data_dir = 'C:\\x'\nbroken ===")]).is_err());
+        assert!(resolve(vec![]).is_err());
+        let ok = resolve(vec![(ADMIN_FILE, "data_dir = 'C:\\x'"), (USER_FILE, "broken ===")]).unwrap();
+        assert_eq!(ok.data_dir, PathBuf::from(r"C:\x"));
+    }
+
+    #[test]
+    fn wal_sync_defaults_to_one_second_and_is_configurable() {
+        assert_eq!(Config::default().wal_sync_secs, 1);
+        assert!(Config::from_tables("wal_sync_secs = 5".parse().unwrap(), None).wal_sync_secs == 5);
+    }
+
+    #[test]
+    fn installed_sidecar_is_always_the_deployed_one() {
+        let cfg = Config { install_dir: Some(PathBuf::from(INSTALL)), sidecar: Some(PathBuf::from(r"C:\evil.exe")), ..Config::default() };
+        let p = cfg.sidecar_exe();
+        assert!(p.ends_with(r"sidecar\daisyloop-lhm.exe") && !p.to_string_lossy().contains("evil") && !p.to_string_lossy().contains("publish"));
+    }
+
+    #[test]
+    fn table_separates_missing_from_unparsable() {
+        let dir = std::env::temp_dir().join(format!("dl-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(Config::table(&dir.join("none.toml")).unwrap().is_empty());
+        std::fs::write(dir.join("bad.toml"), "x = = 1").unwrap();
+        assert!(Config::table(&dir.join("bad.toml")).is_err());
+        std::fs::write(dir.join("ok.toml"), "x = 1").unwrap();
+        assert_eq!(Config::table(&dir.join("ok.toml")).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn dev_run_uses_env_or_localappdata_and_keeps_everything_from_the_user_config() {
         let files = vec![(r"C:\env\config.toml", "fan_control_enabled = true\nsidecar = 'C:/x.exe'"), (USER_FILE, "keep_versions = 7")];
-        let env = Config::resolve(None, Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files.clone()));
+        let env = Config::resolve(None, Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files.clone())).unwrap();
         assert_eq!(env.data_dir, PathBuf::from(r"C:\env"));
         assert!(env.fan_control_enabled && env.sidecar.is_some() && env.install_dir.is_none());
         assert_eq!(env.state_dir(), PathBuf::from(r"C:\env"));
-        let local = Config::resolve(None, None, Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files));
+        let local = Config::resolve(None, None, Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files)).unwrap();
         assert_eq!(local.data_dir, PathBuf::from(DATA));
         assert_eq!(local.keep_versions, 7);
     }
