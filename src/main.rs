@@ -414,7 +414,9 @@ impl Collector {
                 let _ = std::fs::remove_file(&stop_file);
                 let now = self.mono();
                 self.control.shutdown(now);
-                self.rotate();
+                if let Err(e) = self.hot.rotate() {
+                    log::error!("hot rotate failed: {e}");
+                }
                 self.committer.finish();
                 log::info!("stopped");
                 return;

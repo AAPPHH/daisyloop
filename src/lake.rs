@@ -490,6 +490,7 @@ impl Committer {
 }
 
 impl Rotation {
+    #[cfg(test)]
     pub fn new(lake: Lake, dir: PathBuf, gate: Gate) -> Rotation {
         Rotation { lake, dir, gate, stop: Arc::new(AtomicBool::new(false)) }
     }
