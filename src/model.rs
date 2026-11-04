@@ -130,7 +130,7 @@ impl Axis<'_> {
         (self.cal.rpm(self.cfg.floor_duty), self.cal.rpm(self.cfg.max_duty))
     }
 
-    fn candidates(&self, n: usize) -> Vec<f64> {
+    pub fn candidates(&self, n: usize) -> Vec<f64> {
         if !self.free {
             return vec![self.base.rpm];
         }

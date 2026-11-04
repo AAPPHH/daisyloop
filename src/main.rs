@@ -523,6 +523,11 @@ mod tests {
     }
 
     #[test]
+    fn the_timebase_is_an_admin_key() {
+        assert!(Config::ADMIN_KEYS.contains(&"interval_secs"));
+    }
+
+    #[test]
     fn wal_sync_defaults_to_one_second_and_is_configurable() {
         assert_eq!(Config::default().wal_sync_secs, 1);
         assert!(Config::from_tables("wal_sync_secs = 5".parse().unwrap(), None).wal_sync_secs == 5);
