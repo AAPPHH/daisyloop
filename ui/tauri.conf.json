@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "daisyloop",
+  "version": "0.1.0",
+  "identifier": "de.daisyloop.ui",
+  "build": { "frontendDist": "web" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "daisyloop",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "theme": "Dark",
+        "backgroundColor": "#07090c",
+        "visible": false
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false, "icon": ["icons/32x32.png", "icons/icon.png", "icons/icon.ico"] }
+}
