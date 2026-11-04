@@ -4,3 +4,4 @@ __pycache__/
 /sidecar/bin
 /sidecar/obj
 /sidecar/publish
+.claude/
