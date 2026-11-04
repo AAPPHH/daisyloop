@@ -94,3 +94,9 @@ Pump stages (user present, explicit acknowledgement, pump currently at its 19.8 
 - Software-sensor transport and its failure behaviour (host stops sending).
 - What changed the pump at ~07:36 on 2026-11-04 and the pump mode before that.
 - Pump flow at the 2000 rpm floor in this loop.
+
+## Write test results (2026-11-04, user at the computer, aquasuite running)
+
+- Stage 1, identity SET of the fresh report without 0x02: readback identical at 1, 2 and 10 s, pump 2566..2573 rpm against baseline 2566..2572 for 60 s, fan unchanged.
+- F3, fan set-point 30.00 to 32.00 C (bytes 0x46..0x47 plus CRC, pump subgroup identical): fan duty 99.9 to 71.6 %, 1461 to 1168 rpm over 120 s at water 31.45 to 32.02 C, pump 2566..2573 rpm. Offset 0x46 is confirmed as the fan set-point. Restore verified by readback, fan back at 1466 rpm within about 15 s. aquasuite did not overwrite the value during the test.
+- Not tested: persistence over a power cycle without 0x02, how long aquasuite tolerates foreign values, F2, pump stages.
