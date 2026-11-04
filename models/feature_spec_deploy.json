@@ -531,7 +531,11 @@
 "water.ewm5.d10",
 "gpu_temp.ewm30.d300",
 "cpu_load.ewm600",
-"gpu_m_water.ewm600"
+"gpu_m_water.ewm600",
+"fan_duty",
+"fan_rpm",
+"pump_duty",
+"pump_rpm"
 ]
 },
 "nodes": [
@@ -557,7 +561,7 @@
 "zero_nan": false
 },
 "group": "water_fan_pump",
-"out": false
+"out": true
 },
 {
 "name": "fan_rpm",
@@ -569,7 +573,31 @@
 "zero_nan": false
 },
 "group": "water_fan_pump",
-"out": false
+"out": true
+},
+{
+"name": "pump_duty",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "d5next/pump/duty",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "water_fan_pump",
+"out": true
+},
+{
+"name": "pump_rpm",
+"op": "raw",
+"in": [],
+"p": {
+"channel": "d5next/pump/rpm",
+"ffill": 10,
+"zero_nan": false
+},
+"group": "water_fan_pump",
+"out": true
 },
 {
 "name": "pump_pow",

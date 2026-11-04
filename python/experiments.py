@@ -19,6 +19,7 @@ CRITERIA = {
         "S1": "pruned (top-40/80 train-gain) or shallow variants are kept only if val RMSE of water d2min and d5min is >=2% below rich and small on val AND not worse on test",
         "S2": "physics-informed residual net counts only if it beats the best XGB on val water d2min and d5min by >=3% and is not worse on test",
         "S3": "LHM-dropout augmentation (aug models) must keep test skill within 2% of its non-aug twin and must not lose to persistence on lhm_missing block by more than 5% at d30s/d2min",
+        "S4": "x44aug (x40aug plus fan and pump rpm and duty) is deployed only if its held-out test RMSE of water d30s and d2min is not more than 2% above x40aug from the same run; identified flags stay false regardless",
     },
     "stage1": {
         "C1": "water d15min, test block: rich XGB RMSE <= 0.80 x persistence RMSE and <= 0.90 x best physics RMSE, with the 95% block-bootstrap interval of the skill vs physics above 0",
