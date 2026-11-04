@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$DataDir)
+param([Parameter(Mandatory)][string]$DataDir, [int]$MinAgeSecs = 120)
 $ErrorActionPreference = 'Stop'
 $bin = $PSScriptRoot
 $exe = Join-Path $bin 'daisyloop.exe'
@@ -13,15 +13,15 @@ function Note($m) {
 }
 function Running($path) { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $path }) }
 try {
-    $procs = Running $exe
+    $procs = @(Running $exe)
     $why = $null
     if ($procs.Count -eq 0) { $why = 'collector not running' }
-    elseif (((Get-Date) - $procs[0].StartTime).TotalSeconds -gt 120) {
+    elseif (((Get-Date) - $procs[0].StartTime).TotalSeconds -gt $MinAgeSecs) {
         if (-not (Test-Path $beat)) { $why = 'no heartbeat' }
         elseif (((Get-Date) - (Get-Item $beat).LastWriteTime).TotalSeconds -gt 90) { $why = 'heartbeat stale' }
     }
     if ($why) {
-        $procs + (Running $sidecar) | Stop-Process -Force -ErrorAction SilentlyContinue
+        @($procs) + @(Running $sidecar) | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
         Start-Process $exe -WorkingDirectory $bin -WindowStyle Hidden
         Note "restarted collector: $why"
