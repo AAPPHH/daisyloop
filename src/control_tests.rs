@@ -645,3 +645,6 @@ mod safety;
 
 #[path = "replay_tests.rs"]
 mod replay;
+
+#[path = "fan_stop_tests.rs"]
+mod fan_stop;
