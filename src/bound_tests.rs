@@ -592,3 +592,24 @@ fn r23_frozen_water_falls_back_at_any_duty_and_stays_an_alarm_with_writes_off() 
     assert!(high.ctl("d5.fan").fallback.is_some() && high.sim.mode(Spec::FAN) == 1);
     assert!(high.alarm(AlarmKind::WaterFrozen));
 }
+
+#[test]
+#[ignore]
+fn r24_pump_share_at_or_above_90_percent_by_pump_ramp_start() {
+    let mut table = String::from("plant | profile | pump >=90 % (writes) with ramp 35 / 38 / 40 / 42 C
+");
+    for (name, spec) in PlantSpec::NAMED {
+        for p in profiles().into_iter().filter(|p| p.closed() || name == "measured") {
+            let cells: Vec<String> = [35.0, 38.0, 40.0, 42.0]
+                .iter()
+                .map(|x| {
+                    let o = simulate(p, spec, |c| c.control.pump.min_curve = Some(vec![[*x, 15.0], [*x + 1.0, 100.0]]));
+                    format!("{:.0} % ({})", o.pump_hi * 100.0, o.writes)
+                })
+                .collect();
+            table.push_str(&format!("{name} | {} | {}
+", p.name(), cells.join(" / ")));
+        }
+    }
+    eprintln!("{table}");
+}
