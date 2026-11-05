@@ -34,6 +34,9 @@ impl Calibration {
     pub fn rpm(&self, duty: f64) -> f64 {
         Self::interp(&self.points, duty)
     }
+    pub fn at(&self, x: f64) -> f64 {
+        Self::interp(&self.points, x)
+    }
     pub fn duty(&self, rpm: f64) -> f64 {
         let flipped: Vec<(f64, f64)> = self.points.iter().map(|p| (p.1, p.0)).collect();
         let mut dedup: Vec<(f64, f64)> = Vec::new();
@@ -63,6 +66,8 @@ pub struct ChannelOverride {
     pub alarm_rpm: Option<f64>,
     pub start_duty: Option<f64>,
     pub daily_writes: Option<u32>,
+    pub min_curve: Option<Vec<[f64; 2]>>,
+    pub min_run_secs: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,13 +83,15 @@ pub struct ChannelConfig {
     pub alarm_rpm: f64,
     pub start_duty: f64,
     pub daily_writes: u32,
+    pub min_curve: Vec<[f64; 2]>,
+    pub min_run_secs: f64,
 }
 
 impl ChannelConfig {
     pub fn defaults(kind: ControlKind) -> ChannelConfig {
         match kind {
-            ControlKind::Fan => ChannelConfig { floor_duty: 0.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0, start_duty: 20.0, daily_writes: 500 },
-            ControlKind::Pump => ChannelConfig { floor_duty: 15.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.25, alarm_rpm: 1800.0, start_duty: 0.0, daily_writes: 500 },
+            ControlKind::Fan => ChannelConfig { floor_duty: 0.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0, start_duty: 20.0, daily_writes: 500, min_curve: vec![[35.0, 20.0], [38.0, 54.4], [42.0, 100.0]], min_run_secs: 600.0 },
+            ControlKind::Pump => ChannelConfig { floor_duty: 15.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.3, alarm_rpm: 1800.0, start_duty: 0.0, daily_writes: 500, min_curve: vec![[35.0, 15.0], [36.0, 100.0]], min_run_secs: 0.0 },
         }
     }
     pub fn resolve(kind: ControlKind, o: &ChannelOverride) -> Result<ChannelConfig, String> {
@@ -101,6 +108,8 @@ impl ChannelConfig {
             alarm_rpm: o.alarm_rpm.unwrap_or(d.alarm_rpm),
             start_duty: o.start_duty.unwrap_or(d.start_duty),
             daily_writes: o.daily_writes.unwrap_or(d.daily_writes),
+            min_curve: o.min_curve.clone().unwrap_or(d.min_curve),
+            min_run_secs: o.min_run_secs.unwrap_or(d.min_run_secs),
         };
         let all = [c.floor_duty, c.max_duty, c.step_up_rpm, c.step_down_rpm, c.deadband_duty, c.rpm_tolerance, c.alarm_rpm, c.start_duty];
         if all.iter().any(|v| !v.is_finite()) || c.floor_duty < Spec::of(kind).hard_min || c.max_duty > 100.0 || c.floor_duty > c.max_duty {
@@ -116,10 +125,17 @@ impl ChannelConfig {
             return Err("deadband_duty must not exceed start_duty".into());
         }
         Calibration::new(&c.curve)?;
+        if !c.min_run_secs.is_finite() || c.min_run_secs < 0.0 || c.min_curve.iter().any(|p| !(0.0..=100.0).contains(&p[1])) {
+            return Err("min_curve duty must be within 0..100 and min_run_secs must not be negative".into());
+        }
+        Calibration::new(&c.min_curve).map_err(|_| "min_curve needs at least two points with rising water temperature and non-falling duty".to_string())?;
         Ok(c)
     }
     pub fn calibration(&self) -> Calibration {
         Calibration::new(&self.curve).unwrap()
+    }
+    pub fn min_calibration(&self) -> Calibration {
+        Calibration::new(&self.min_curve).unwrap()
     }
     pub fn commandable(&self, duty: f64, zero_ok: bool) -> f64 {
         let d = duty.clamp(self.floor_duty, self.max_duty);
@@ -173,6 +189,7 @@ pub struct ControlConfig {
     pub fan_stop_secs: f64,
     pub fan_stop_water: f64,
     pub fan_start_water: f64,
+    pub frozen_low_duty: f64,
     pub follow_settle_secs: f64,
     pub follow_secs: f64,
     pub water_channel: String,
@@ -210,6 +227,7 @@ impl Default for ControlConfig {
             fan_stop_secs: 10.0,
             fan_stop_water: 33.0,
             fan_start_water: 35.0,
+            frozen_low_duty: 40.0,
             follow_settle_secs: 15.0,
             follow_secs: 60.0,
             water_channel: "d5next/water/temp".into(),
@@ -223,16 +241,23 @@ impl Default for ControlConfig {
 }
 
 impl ControlConfig {
+    pub const WATER_MIN: f64 = 5.0;
+    pub const WATER_MAX: f64 = 80.0;
     pub fn fan_may_stop(&self, water: Option<f64>, stopped: bool) -> bool {
         water.is_some_and(|w| w < if stopped { self.fan_start_water } else { self.fan_stop_water })
     }
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.follow_settle_secs, self.follow_secs];
+        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.frozen_low_duty, self.follow_settle_secs, self.follow_secs];
         if nums.iter().any(|v| !v.is_finite() || *v < 0.0) || self.decision_secs < 5.0 || self.stale_secs < 2.0 {
             return Err("timing or limit value out of range".into());
         }
         if !(0.0..=1.0).contains(&self.weight) || self.horizon_secs == 0 || self.rollout_secs == 0 || self.fan_candidates < 2 || self.pump_candidates < 2 || self.fan_candidates > 16 || self.pump_candidates > 16 {
             return Err("weight, horizon, rollout or candidate count out of range".into());
+        }
+        for (key, v) in [("water_limit", self.water_limit), ("water_top_limit", self.water_top_limit)] {
+            if v > Self::WATER_MAX {
+                return Err(format!("{key} {v} is above the {} C plausibility cap of the water sensor", Self::WATER_MAX));
+            }
         }
         if !(self.fan_stop_water < self.fan_start_water && self.fan_start_water < self.water_plan_limit && self.water_plan_limit < self.water_limit && self.water_limit <= self.water_top_limit) {
             return Err("water limits must satisfy fan_stop_water < fan_start_water < water_plan_limit < water_limit <= water_top_limit".into());
@@ -268,6 +293,7 @@ struct Chan {
     spec: Spec,
     cfg: ChannelConfig,
     cal: Calibration,
+    min: Calibration,
     mode: Mode,
     drive: Drive,
     target: Option<f64>,
@@ -280,6 +306,7 @@ struct Chan {
     release_due: bool,
     follow_since: Option<i64>,
     shadow_stop: bool,
+    run_since: Option<i64>,
     autostart: bool,
     day: i64,
     used: u32,
@@ -293,7 +320,7 @@ impl Chan {
             log::error!("control: invalid {kind:?} channel config ({e}), defaults used");
             ChannelConfig::defaults(kind)
         });
-        Chan { spec: Spec::of(kind), cal: cfg.calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, shadow_stop: false, day: 0, used: 0, over: false }
+        Chan { spec: Spec::of(kind), cal: cfg.calibration(), min: cfg.min_calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, shadow_stop: false, run_since: None, day: 0, used: 0, over: false }
     }
     fn rpm_channel(&self) -> String {
         format!("d5next/{}/rpm", self.spec.name)
@@ -341,6 +368,19 @@ struct Frozen {
     cpu_hi: f64,
 }
 
+struct Wants {
+    fits: [(f64, f64); 2],
+    zero_ok: bool,
+    bases: [Operating; 2],
+    warm: bool,
+}
+
+enum Outlook {
+    Ready(Wants),
+    Held(String),
+    Failed,
+}
+
 struct StepTest {
     fresh: bool,
     chan: usize,
@@ -381,6 +421,7 @@ pub struct Control {
     fan_stop: Option<i64>,
     alarms: Vec<Alarm>,
     wall_off: i64,
+    restarted: bool,
 }
 
 impl Control {
@@ -388,10 +429,9 @@ impl Control {
     const RELEASE_GAP_MAX_MS: i64 = 60_000;
     const BOOT_RETRY_MS: i64 = 5000;
     const FOREIGN_RECHECK_MS: i64 = 60_000;
-    const WATER_MIN: f64 = 5.0;
-    const WATER_MAX: f64 = 80.0;
     const FROZEN_MS: i64 = 600_000;
     const FROZEN_CPU_SPAN_K: f64 = 5.0;
+    const BOUND_GAP_MS: i64 = 5000;
 
     pub fn new(cfg: &Config, act: Box<dyn Actuator>, model: Result<Box<dyn Model>, String>) -> Control {
         let cc = match cfg.control.validate() {
@@ -408,7 +448,7 @@ impl Control {
         let chans = vec![Chan::new(ControlKind::Fan, &cc.fan), Chan::new(ControlKind::Pump, &cc.pump)];
         let store = Ownership::new(cfg.state_dir());
         let owned = store.read();
-        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0 }
+        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
     }
 
     fn ix(&self, id: &str) -> Result<usize, String> {
@@ -462,15 +502,25 @@ impl Control {
 
     fn sensor_fault(&self, now: i64) -> Option<(String, bool)> {
         let t = self.temps(now);
-        for (v, name) in [(t.water, "Wassertemperatur"), (t.cpu, "CPU-Temperatur"), (t.gpu, "GPU-Temperatur")] {
-            if v.is_none() {
-                return Some((format!("{name} veraltet (> {:.0} s)", self.cfg.stale_secs), false));
-            }
+        self.water_fault(now).or_else(|| [(t.cpu, "CPU-Temperatur"), (t.gpu, "GPU-Temperatur")].iter().find(|x| x.0.is_none()).map(|x| (format!("{} veraltet (> {:.0} s)", x.1, self.cfg.stale_secs), false)))
+    }
+
+    fn water_fault(&self, now: i64) -> Option<(String, bool)> {
+        let t = self.temps(now);
+        let Some(w) = t.water else {
+            return Some((format!("Wassertemperatur veraltet (> {:.0} s)", self.cfg.stale_secs), false));
+        };
+        if w >= self.cfg.water_limit {
+            return Some((format!("Wasser {w:.1} °C am Limit {:.0} °C", self.cfg.water_limit), true));
         }
-        if t.water.is_some_and(|w| w >= self.cfg.water_limit) {
-            return Some((format!("Wasser {:.1} °C am Limit {:.0} °C", t.water.unwrap(), self.cfg.water_limit), true));
+        self.frozen_fault(now)
+    }
+
+    fn run_fault(&self, now: i64) -> Option<(String, bool)> {
+        if self.model.is_none() {
+            return Some((format!("Modell nicht geladen: {}", self.model_error.clone().unwrap_or_default()), false));
         }
-        None
+        self.water_fault(now)
     }
 
     fn disown(&mut self, kind: ControlKind) {
@@ -529,7 +579,7 @@ impl Control {
     }
 
     fn plausible(&self, ch: &str, v: f64) -> bool {
-        v.is_finite() && (ch != self.cfg.water_channel || (Self::WATER_MIN..=Self::WATER_MAX).contains(&v))
+        v.is_finite() && (ch != self.cfg.water_channel || (ControlConfig::WATER_MIN..=ControlConfig::WATER_MAX).contains(&v))
     }
 
     fn track_frozen(&mut self, map: &HashMap<String, f64>, now: i64) {
@@ -597,8 +647,8 @@ impl Control {
                 self.raise(&mut out, kind, ch, format!("{name} im Mittel {v:.0} °C über {limit:.0} °C (nur Anzeige)"), Some(v), Some(limit), now);
             }
         }
-        if let Some((w, since)) = self.frozen.as_ref().filter(|f| now - f.since >= Self::FROZEN_MS && f.cpu_hi - f.cpu_lo >= Self::FROZEN_CPU_SPAN_K).map(|f| (f.water, f.since)) {
-            self.raise(&mut out, AlarmKind::WaterFrozen, &cfg.water_channel, format!("Wasserwert {w:.2} °C seit {} min unverändert trotz wechselnder Last (nur Anzeige)", (now - since) / 60_000), Some(w), None, now);
+        if let Some((w, since)) = self.frozen_hit(now) {
+            self.raise(&mut out, AlarmKind::WaterFrozen, &cfg.water_channel, format!("Wasserwert {w:.2} °C seit {} min unverändert trotz wechselnder Last, Messung unglaubwürdig", (now - since) / 60_000), Some(w), None, now);
         }
         let pump = &self.chans[1];
         let (pch, plimit) = (pump.rpm_channel(), pump.cfg.alarm_rpm);
@@ -679,7 +729,7 @@ impl Control {
             if self.chans[i].mode != Mode::Active && !self.chans[i].driving() {
                 continue;
             }
-            let global = if self.chans[i].mode == Mode::Active { self.global_fault(now) } else { self.sensor_fault(now) };
+            let global = if self.chans[i].mode == Mode::Active { self.run_fault(now) } else { self.water_fault(now) };
             if let Some((g, limit)) = &global {
                 self.fall_back(i, g, *limit);
                 continue;
@@ -699,7 +749,7 @@ impl Control {
         }
     }
 
-    fn write(&mut self, set: &[(ControlKind, Setting)], now: i64, drive: Drive) -> bool {
+    fn write(&mut self, set: &[(ControlKind, Setting)], now: i64, drive: Drive, exempt: &[ControlKind]) -> bool {
         let day = self.day(now);
         let mut allowed = Vec::new();
         for (k, s) in set {
@@ -709,7 +759,7 @@ impl Control {
                     (c.day, c.used, c.over) = (day, 0, false);
                 }
                 let leaving_zero = c.duty_cmd == Some(0.0) && matches!(s, Setting::Duty(d) if c.cfg.commandable(*d, true) > 0.0);
-                if c.used >= c.cfg.daily_writes && !leaving_zero {
+                if c.used >= c.cfg.daily_writes && !leaving_zero && !exempt.contains(k) {
                     if !c.over {
                         c.over = true;
                         log::error!("control: {} reached its daily budget of {} duty writes, holding the last value", c.spec.name, c.cfg.daily_writes);
@@ -744,10 +794,15 @@ impl Control {
         }
         match self.act.apply(&allowed) {
             Ok(()) => {
-                self.last_write = now;
+                if !allowed.iter().all(|(k, _)| exempt.contains(k)) {
+                    self.last_write = now;
+                }
                 for (k, s) in &allowed {
                     let c = self.chans.iter_mut().find(|c| c.spec.kind == *k).unwrap();
                     if let Setting::Duty(d) = s {
+                        if c.duty_cmd == Some(0.0) && *d > 0.0 {
+                            c.run_since = Some(now);
+                        }
                         c.duty_cmd = Some(*d);
                         c.drive = drive;
                         c.wrote_ms = now;
@@ -811,9 +866,9 @@ impl Control {
         }
     }
 
-    fn step_duty(&self, t: &StepTest) -> f64 {
+    fn step_duty(&self, t: &StepTest, now: i64) -> f64 {
         let c = &self.chans[t.chan];
-        c.cfg.commandable(t.steps[t.idx][0], true)
+        c.cfg.commandable(t.steps[t.idx][0], true).max(self.bound_duty(t.chan, now).unwrap_or(0.0))
     }
 
     fn progress_test(&mut self, now: i64) {
@@ -832,47 +887,51 @@ impl Control {
             self.chans[i].release_due = true;
             return;
         }
-        let duty = self.step_duty(self.test.as_ref().unwrap());
+        let duty = self.step_duty(self.test.as_ref().unwrap(), now);
         let kind = self.chans[i].spec.kind;
-        self.write(&[(kind, Setting::Duty(duty))], now, Drive::Test);
+        self.write(&[(kind, Setting::Duty(duty))], now, Drive::Test, &[]);
     }
 
     fn decide(&mut self, now: i64) {
         let interval = (self.cfg.decision_secs * 1000.0) as i64;
         let fan = &self.chans[0];
         let restart = fan.mode == Mode::Active && fan.duty_cmd == Some(0.0) && self.temps(now).water.is_some_and(|w| !self.cfg.fan_may_stop(Some(w), true));
-        let due = restart || self.last_decision.is_none_or(|t| now - t >= interval) && now - self.last_write >= interval;
+        let due = restart || std::mem::take(&mut self.restarted) || self.last_decision.is_none_or(|t| now - t >= interval) && now - self.last_write >= interval;
         if !due || self.chans.iter().all(|c| c.mode == Mode::Off) {
             return;
         }
         self.last_decision = Some(now);
         self.plan = None;
         self.shown = None;
+        let outlook = self.outlook(now);
+        if !matches!(outlook, Outlook::Failed) {
+            self.apply(now, outlook);
+        }
+    }
+
+    fn outlook(&mut self, now: i64) -> Outlook {
         let Some(model) = self.model.as_ref() else {
-            for c in &mut self.chans {
-                c.note = Some("Modell nicht geladen".into());
-            }
-            return;
+            return Outlook::Held("Modell nicht geladen".into());
         };
         let ops = (self.operating(&self.chans[0], now), self.operating(&self.chans[1], now));
         let (Some(fb), Some(pb)) = ops else {
-            for c in &mut self.chans {
-                c.note = Some("Messwerte von Lüfter oder Pumpe veraltet".into());
-            }
-            return;
+            return Outlook::Held("Messwerte von Lüfter oder Pumpe veraltet".into());
         };
+        let t = self.temps(now);
+        if !t.all() {
+            let missing: Vec<&str> = [(t.water, "Wasser"), (t.cpu, "CPU"), (t.gpu, "GPU")].iter().filter(|x| x.0.is_none()).map(|x| x.1).collect();
+            return Outlook::Held(format!("{}-Temperatur fehlt, Plan wird gehalten", missing.join(" und ")));
+        }
         let any_active = self.chans.iter().any(|c| c.mode == Mode::Active);
         let free = |c: &Chan| if any_active { c.mode == Mode::Active } else { c.mode != Mode::Off };
         let (fan_c, pump_c) = (&self.chans[0], &self.chans[1]);
         let plan_t = self.plan_temps(now);
         let stopped = if fan_c.mode == Mode::Active { fan_c.duty_cmd == Some(0.0) } else { fan_c.shadow_stop };
-        let fan = Axis { name: "fan", cfg: &fan_c.cfg, cal: &fan_c.cal, free: free(fan_c), base: fb, zero_ok: self.cfg.fan_may_stop(plan_t.water, stopped) };
+        let zero_ok = self.cfg.fan_may_stop(plan_t.water, stopped) && !self.dwelling(0, now);
+        let fan = Axis { name: "fan", cfg: &fan_c.cfg, cal: &fan_c.cal, free: free(fan_c), base: fb, zero_ok };
         let pump = Axis { name: "pump", cfg: &pump_c.cfg, cal: &pump_c.cal, free: free(pump_c), base: pb, zero_ok: false };
-        let prev = self.plan_prev;
-        let result = Planner { cfg: &self.cfg }.plan(model.as_ref(), &fan, &pump, &plan_t, self.weight, prev);
+        let result = Planner { cfg: &self.cfg }.plan(model.as_ref(), &fan, &pump, &plan_t, self.weight, self.plan_prev);
         let fits = [fan.fit(result.as_ref().map_or(fb.rpm, |p| p.fan_rpm)), pump.fit(result.as_ref().map_or(pb.rpm, |p| p.pump_rpm))];
-        let zero_ok = fan.zero_ok;
-        let now_t = self.temps(now);
         let direct = model.forecast(&HashMap::new(), 0, self.cfg.horizon_secs).ok();
         let warm = self.warm_left() == 0;
         let plan = match result {
@@ -884,57 +943,79 @@ impl Control {
                         self.fall_back(i, &format!("Modellfehler: {e}"), false);
                     }
                 }
-                return;
+                return Outlook::Failed;
             }
         };
         self.model_error = None;
         self.plan = Some((plan, now));
         self.plan_prev = Some((plan.fan_rpm, plan.pump_rpm));
-        self.shown = direct.map(|d| [now_t.water.map(|t| t + d.water), now_t.cpu.map(|t| t + d.cpu), now_t.gpu.map(|t| t + d.gpu)]);
+        self.shown = direct.map(|d| [t.water.map(|x| x + d.water), t.cpu.map(|x| x + d.cpu), t.gpu.map(|x| x + d.gpu)]);
+        Outlook::Ready(Wants { fits, zero_ok, bases: [fb, pb], warm })
+    }
+
+    fn apply(&mut self, now: i64, outlook: Outlook) {
         let mut set = Vec::new();
+        let mut exempt = Vec::new();
         for i in 0..self.chans.len() {
             let ident = self.identified(i);
+            let bound = self.bound_duty(i, now).unwrap_or(0.0);
             let c = &mut self.chans[i];
             if c.mode == Mode::Off {
                 c.target = None;
                 c.wanted = None;
                 continue;
             }
-            let base_op = if i == 0 { fb } else { pb };
+            let bound_rpm = c.cal.rpm(bound);
+            let w = match &outlook {
+                Outlook::Ready(w) => w,
+                Outlook::Held(why) => {
+                    c.wanted = (bound > 0.0).then_some(bound_rpm);
+                    c.note = Some(why.clone());
+                    continue;
+                }
+                Outlook::Failed => continue,
+            };
             let (lo, hi) = c.rpm_range();
-            let (_, want) = fits[i];
+            let want = w.fits[i].1.max(bound_rpm);
             c.wanted = Some(want);
-            c.shadow_stop = c.mode != Mode::Active && i == 0 && fits[i].0 <= 0.0;
+            let stop = i == 0 && c.mode != Mode::Active && w.fits[0].0 <= 0.0 && bound <= 0.0;
+            if c.mode != Mode::Active && c.shadow_stop && !stop {
+                c.run_since = Some(now);
+            }
+            c.shadow_stop = stop;
             if c.mode != Mode::Active {
                 c.target = None;
-                let mut note = String::from(if warm { "nur berechnet" } else { "nur berechnet, Modell noch nicht warm" });
+                let mut note = String::from(if w.warm { "nur berechnet" } else { "nur berechnet, Modell noch nicht warm" });
                 if !ident {
                     note.push_str(", nicht identifiziert");
                 }
                 c.note = Some(note);
                 continue;
             }
-            if !warm {
+            if !w.warm {
                 c.note = Some("Modell wärmt auf".into());
                 continue;
             }
-            let from = c.target.unwrap_or(base_op.rpm);
-            let mut new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - c.cfg.step_down_rpm) }.clamp(lo, hi);
-            if i == 0 && zero_ok && want <= 0.0 && c.cfg.start_duty > 0.0 && c.cal.duty(new) < c.cfg.start_duty {
+            let from = c.target.unwrap_or(w.bases[i].rpm);
+            let mut new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - c.cfg.step_down_rpm) }.clamp(lo, hi).max(bound_rpm);
+            if i == 0 && w.zero_ok && want <= 0.0 && c.cfg.start_duty > 0.0 && c.cal.duty(new) < c.cfg.start_duty {
                 new = 0.0;
             }
             if from < 1.0 && want > 0.0 && c.cfg.start_duty > 0.0 {
                 new = new.max(c.cal.rpm(c.cfg.start_duty)).min(hi);
             }
-            let duty = c.cfg.commandable(c.cal.duty(new), i == 0 && zero_ok);
+            let duty = c.cfg.commandable(c.cal.duty(new), i == 0 && w.zero_ok);
             c.target = Some(c.cal.rpm(duty));
             c.note = None;
             if c.duty_cmd.is_none_or(|d| (d - duty).abs() >= c.cfg.deadband_duty) || c.drive == Drive::Firmware {
                 set.push((c.spec.kind, Setting::Duty(duty)));
+                if bound > 0.0 && duty <= bound + 1e-9 {
+                    exempt.push(c.spec.kind);
+                }
             }
         }
         if !set.is_empty() {
-            self.write(&set, now, Drive::Duty);
+            self.write(&set, now, Drive::Duty, &exempt);
         }
     }
 
@@ -1069,13 +1150,14 @@ impl Control {
         self.refresh_alarms(now);
         self.check_faults(now);
         self.progress_test(now);
+        self.enforce_bound(now);
         self.decide(now);
         self.try_release(now, false);
         self.autostart(now);
-        rows.extend(self.telemetry());
+        rows.extend(self.telemetry(now));
     }
 
-    fn telemetry(&self) -> Vec<Row> {
+    fn telemetry(&self, now: i64) -> Vec<Row> {
         let row = |ch: String, text: String, unit: &str, v: f64, role: &'static str| Row::new("daisyloop", format!("daisyloop/{ch}"), text, "other", unit, v).role(role);
         let mut rows = Vec::new();
         for (i, c) in self.chans.iter().enumerate() {
@@ -1110,7 +1192,7 @@ impl Control {
         }
         if let Some(t) = &self.test {
             rows.push(row("step/phase".into(), "step test phase".into(), "", (t.idx + 1) as f64, "input"));
-            rows.push(row("step/duty".into(), "step test duty".into(), "%", self.step_duty(t), "input"));
+            rows.push(row("step/duty".into(), "step test duty".into(), "%", self.step_duty(t, now), "input"));
         }
         rows
     }
@@ -1152,7 +1234,7 @@ impl Control {
             let s = self.shown.unwrap_or_default();
             Predicted { horizon_s: self.cfg.horizon_secs, water: s[0], cpu: s[1], gpu: s[2], water_limit: p.limits[0], cpu_limit: p.limits[1], gpu_limit: p.limits[2], feasible: p.feasible, age_ms: now - at }
         });
-        let step = self.test.as_ref().map(|t| StepStatus { id: format!("d5.{}", self.chans[t.chan].spec.name), phase: t.idx as u32 + 1, phases: t.steps.len() as u32, duty: self.step_duty(t), left_s: ((t.steps[t.idx][1] * 1000.0 - (now - t.since) as f64) / 1000.0).max(0.0) as u32 });
+        let step = self.test.as_ref().map(|t| StepStatus { id: format!("d5.{}", self.chans[t.chan].spec.name), phase: t.idx as u32 + 1, phases: t.steps.len() as u32, duty: self.step_duty(t, now), left_s: ((t.steps[t.idx][1] * 1000.0 - (now - t.since) as f64) / 1000.0).max(0.0) as u32 });
         let limits = vec![
             Limit { channel: self.cfg.water_channel.clone(), low: None, high: Some(self.cfg.water_limit), plan: Some(self.cfg.water_plan_limit), top: Some(self.cfg.water_top_limit) },
             Limit { channel: self.chans[1].rpm_channel(), low: Some(self.chans[1].cfg.alarm_rpm), high: None, plan: None, top: None },
@@ -1160,6 +1242,9 @@ impl Control {
         Status { controls, alarms: self.alarms.clone(), limits, model, predicted, step, weight: self.weight }
     }
 }
+
+#[path = "bound.rs"]
+mod bound;
 
 #[cfg(test)]
 #[path = "control_tests.rs"]
