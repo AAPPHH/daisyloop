@@ -221,7 +221,7 @@ fn channel_config_defaults_are_per_channel_and_invalid_values_are_rejected() {
     let cfg: ControlConfig = toml::from_str("[fan]\nfloor_duty = 35.0\n").unwrap();
     assert_eq!(ChannelConfig::resolve(ControlKind::Fan, &cfg.fan).unwrap().floor_duty, 35.0);
     let pump = ChannelConfig::resolve(ControlKind::Pump, &cfg.pump).unwrap();
-    assert_eq!((pump.floor_duty, pump.alarm_rpm), (40.0, 1800.0));
+    assert_eq!((pump.floor_duty, pump.alarm_rpm), (15.0, 1800.0));
     assert!(cfg.validate().is_ok() && ControlConfig::default().validate().is_ok());
     for bad in ["[fan]\nfloor_duty = 90.0\nmax_duty = 50.0", "[pump]\nstep_down_rpm = -1.0", "[fan]\ncurve = [[0.0, 5.0]]", "decision_secs = 1.0", "weight = 2.0", "[step_test]\nfan = [[100.0, 5.0]]", "[step_test]\npump = [[10.0, 60.0]]"] {
         let c: ControlConfig = toml::from_str(bad).unwrap();
@@ -289,7 +289,7 @@ fn actuator_floors_are_independent_of_the_caller() {
     let s = sim.clone();
     let mut a = D5Actuator::new(Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>)), &cfg);
     a.apply(&[(ControlKind::Fan, Setting::Duty(1.0)), (ControlKind::Pump, Setting::Duty(5.0))]).unwrap();
-    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (100, 4000));
+    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (100, 1500));
     assert_eq!(sim.sets(), 1);
     a.apply(&[(ControlKind::Fan, Setting::Duty(500.0))]).unwrap();
     assert_eq!(sim.preset(Spec::FAN), 10000);

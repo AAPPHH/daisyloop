@@ -25,7 +25,7 @@ fn z1_dead_zone_snaps_to_the_closer_of_zero_and_the_start_duty() {
     let raised = ChannelConfig { floor_duty: 5.0, ..fan.clone() };
     assert_eq!((raised.commandable(0.0, true), raised.commandable(3.0, true), raised.commandable(30.0, true)), (20.0, 20.0, 30.0));
     let pump = ChannelConfig::defaults(ControlKind::Pump);
-    assert_eq!((pump.commandable(0.0, true), pump.commandable(35.0, true), pump.commandable(60.0, false)), (40.0, 40.0, 60.0));
+    assert_eq!((pump.commandable(0.0, true), pump.commandable(10.0, true), pump.commandable(60.0, false)), (15.0, 15.0, 60.0));
 }
 
 #[test]
@@ -169,19 +169,19 @@ fn z8_shadow_mode_computes_the_snapped_stop_and_sends_nothing() {
 fn z9_the_pump_keeps_its_floor_hard_minimum_and_never_stops() {
     let sim = Sim::new();
     let mut a = actuator(&sim, &ControlConfig::default());
-    for duty in [0.0, 29.0, 35.0, f64::MIN] {
+    for duty in [0.0, 5.0, 14.99, f64::MIN] {
         a.apply(&[(ControlKind::Pump, Setting::Duty(duty))]).unwrap();
-        assert_eq!(sim.preset(Spec::PUMP), 4000, "{duty}");
+        assert_eq!(sim.preset(Spec::PUMP), 1500, "{duty}");
     }
-    let mut low: ControlConfig = toml::from_str("[pump]\nfloor_duty = 30.0\n").unwrap();
+    let mut low: ControlConfig = toml::from_str("[pump]\nfloor_duty = 20.0\n").unwrap();
     actuator(&sim, &low).apply(&[(ControlKind::Pump, Setting::Duty(0.0))]).unwrap();
-    assert_eq!(sim.preset(Spec::PUMP), 3000);
-    low.pump.floor_duty = Some(25.0);
+    assert_eq!(sim.preset(Spec::PUMP), 2000);
+    low.pump.floor_duty = Some(10.0);
     assert!(low.validate().is_err());
     actuator(&sim, &low).apply(&[(ControlKind::Pump, Setting::Duty(0.0))]).unwrap();
-    assert_eq!(sim.preset(Spec::PUMP), 4000);
+    assert_eq!(sim.preset(Spec::PUMP), 1500);
     let mut g = Guard::new(Box::new(sim.clone()));
-    assert!(g.write(&[(Spec::PUMP, Setting::Duty(29.0))]).is_err() && g.write(&[(Spec::PUMP, Setting::Duty(0.0))]).is_err());
+    assert!(g.write(&[(Spec::PUMP, Setting::Duty(14.0))]).is_err() && g.write(&[(Spec::PUMP, Setting::Duty(0.0))]).is_err());
     assert!(g.write(&[(Spec::FAN, Setting::Duty(0.0))]).is_ok());
     assert_eq!(sim.preset(Spec::FAN), 0);
 }

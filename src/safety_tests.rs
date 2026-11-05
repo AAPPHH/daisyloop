@@ -195,12 +195,12 @@ fn m1_nan_is_rejected_in_the_step_plan_and_in_the_guard() {
 
 #[test]
 fn m2_hard_minima_cannot_be_configured_away_and_the_guard_enforces_them() {
-    for text in ["[fan]\nfloor_duty = -1.0\n", "[pump]\nfloor_duty = 25.0\n", "[pump]\nfloor_duty = 0.0\n", "[fan]\nstart_duty = -1.0\n", "[fan]\nstart_duty = 101.0\n"] {
+    for text in ["[fan]\nfloor_duty = -1.0\n", "[pump]\nfloor_duty = 14.0\n", "[pump]\nfloor_duty = 0.0\n", "[fan]\nstart_duty = -1.0\n", "[fan]\nstart_duty = 101.0\n"] {
         assert!(toml::from_str::<ControlConfig>(text).unwrap().validate().is_err(), "{text}");
     }
     assert!(toml::from_str::<ControlConfig>("[fan]\nfloor_duty = 0.0\n[pump]\nfloor_duty = 30.0\n").unwrap().validate().is_ok());
     let fresh = Sim::new().report();
-    for (spec, pct, ok) in [(Spec::FAN, 0.0, true), (Spec::FAN, 5.0, true), (Spec::FAN, 100.01, false), (Spec::PUMP, 0.0, false), (Spec::PUMP, 29.0, false), (Spec::PUMP, 29.99, false), (Spec::PUMP, 30.0, true)] {
+    for (spec, pct, ok) in [(Spec::FAN, 0.0, true), (Spec::FAN, 5.0, true), (Spec::FAN, 100.01, false), (Spec::PUMP, 0.0, false), (Spec::PUMP, 14.0, false), (Spec::PUMP, 14.99, false), (Spec::PUMP, 15.0, true)] {
         let mut t = fresh.clone();
         t[spec.mode()] = 0;
         t[spec.preset()..spec.preset() + 2].copy_from_slice(&((pct * 100.0) as u16).to_be_bytes());

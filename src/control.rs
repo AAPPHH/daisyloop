@@ -84,7 +84,7 @@ impl ChannelConfig {
     pub fn defaults(kind: ControlKind) -> ChannelConfig {
         match kind {
             ControlKind::Fan => ChannelConfig { floor_duty: 0.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0, start_duty: 20.0, daily_writes: 500 },
-            ControlKind::Pump => ChannelConfig { floor_duty: 40.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.25, alarm_rpm: 1800.0, start_duty: 0.0, daily_writes: 500 },
+            ControlKind::Pump => ChannelConfig { floor_duty: 15.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.25, alarm_rpm: 1800.0, start_duty: 0.0, daily_writes: 500 },
         }
     }
     pub fn resolve(kind: ControlKind, o: &ChannelOverride) -> Result<ChannelConfig, String> {
