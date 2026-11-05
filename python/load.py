@@ -9,9 +9,9 @@ CONFIG = {
 
 
 class Loader:
-    def __init__(self, config=CONFIG):
+    def __init__(self, config=CONFIG, lake=None):
         self.cfg = config
-        self.lake = Lake()
+        self.lake = lake or Lake()
         self.con = self.lake.con
 
     def rows(self, t0=None, t1=None, device=None):
