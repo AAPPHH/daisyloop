@@ -164,7 +164,7 @@ impl Rig {
     fn rows(&self) -> Vec<Row> {
         let r = self.sim.report();
         let mut rows = vec![
-            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water + if self.live { (self.now / 1000 % 2) as f64 * 0.01 } else { 0.0 }),
+            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water + if self.live { (self.now / 1000 % 2) as f64 * 0.05 } else { 0.0 }),
             Row::new("lhm", "/intelcpu/0/temperature/0", "cpu", "temperature", "degC", self.cpu),
         ];
         if let Some(g) = self.gpu {

@@ -383,8 +383,21 @@ impl Smooth {
 struct Frozen {
     since: i64,
     water: f64,
+    lo: f64,
+    hi: f64,
     heat_k: f64,
     last: i64,
+    latched: bool,
+}
+
+impl Frozen {
+    fn tripped(&self, now: i64) -> bool {
+        let held = now - self.since;
+        held >= Control::FROZEN_MS || held >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
+    }
+    fn spread(&self, w: f64) -> f64 {
+        w.max(self.hi) - w.min(self.lo)
+    }
 }
 
 struct Latch {
@@ -456,6 +469,8 @@ impl Control {
     const BOOT_RETRY_MS: i64 = 5000;
     const FOREIGN_RECHECK_MS: i64 = 60_000;
     const FROZEN_MS: i64 = 600_000;
+    const FROZEN_BAND_K: f64 = 0.01 + 1e-9;
+    const FROZEN_RELEASE_K: f64 = 0.05;
     const BOUND_GAP_MS: i64 = 5000;
     const RAISE_WINDOW_MS: i64 = 3_600_000;
     const HEAT_MIN_MS: i64 = 90_000;
@@ -638,12 +653,16 @@ impl Control {
         let Some(w) = map.get(&self.cfg.water_channel).copied() else { return };
         let dt = self.frozen.as_ref().map_or(0, |f| (now - f.last).min(5000));
         let step = self.heat_expected_k(w, now, dt);
-        match self.frozen.as_mut().filter(|f| f.water == w) {
+        match self.frozen.as_mut().filter(|f| f.spread(w) <= Self::FROZEN_BAND_K + if f.latched { Self::FROZEN_RELEASE_K } else { 0.0 }) {
             Some(f) => {
+                if f.spread(w) <= Self::FROZEN_BAND_K {
+                    (f.water, f.lo, f.hi) = (w, f.lo.min(w), f.hi.max(w));
+                }
                 f.heat_k = (f.heat_k + step).max(Self::HEAT_FLOOR_K);
                 f.last = now;
+                f.latched |= f.tripped(now);
             }
-            None => self.frozen = Some(Frozen { since: now, water: w, heat_k: 0.0, last: now }),
+            None => self.frozen = Some(Frozen { since: now, water: w, lo: w, hi: w, heat_k: 0.0, last: now, latched: false }),
         }
     }
 

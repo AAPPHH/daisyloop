@@ -615,9 +615,10 @@ struct Frozen {
     handed_over: bool,
     alarm: bool,
     why: Option<String>,
+    changes: [usize; 2],
 }
 
-fn frozen_run(spec: PlantSpec, stuck: f64, power: f64, cpu_alive: bool) -> Frozen {
+fn frozen_run(spec: PlantSpec, stuck: f64, power: f64, cpu_alive: bool, dither: usize) -> Frozen {
     let mut rig = blind_rig(|_| {});
     let mut plant = Plant::new(spec);
     (plant.t1, plant.t2, plant.seen) = (stuck, stuck, VecDeque::from(vec![stuck]));
@@ -626,27 +627,33 @@ fn frozen_run(spec: PlantSpec, stuck: f64, power: f64, cpu_alive: bool) -> Froze
     rig.active("d5.fan");
     rig.active("d5.pump");
     let cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
-    let (mut detect, mut peak) = (None, 0.0f64);
+    let (mut detect, mut peak, mut changes, mut last) = (None, 0.0f64, [0usize; 2], [None, None]);
     for t in 0..7200 {
         let r = rig.sim.report();
         plant.step(power, cal.rpm(if r[Spec::FAN.mode()] == 0 { be16(&r, Spec::FAN.preset()) as f64 / 100.0 } else { 90.0 }));
         peak = peak.max(plant.t1);
+        rig.water = stuck + if dither > 0 && t / dither % 2 == 1 { 0.01 } else { 0.0 };
         rig.cpu = if cpu_alive { 50.0 } else { f64::NAN };
         rig.extra = if cpu_alive { vec![(CPU_POWER, power * 0.6), (GPU_POWER, power * 0.4), (PUMP_POWER, 5.0)] } else { vec![(GPU_POWER, power), (PUMP_POWER, 5.0)] };
         rig.tick();
         if detect.is_none() && rig.c.frozen_hit(rig.now).is_some() {
             detect = Some(t);
         }
+        for i in 0..2 {
+            let d = duty(&rig, i);
+            changes[i] += (detect.is_some() && d != last[i]) as usize;
+            last[i] = d;
+        }
     }
-    Frozen { detect, peak, fan: duty(&rig, 0), pump: duty(&rig, 1), handed_over: rig.sim.mode(Spec::FAN) == 1 || rig.sim.mode(Spec::PUMP) == 1, alarm: rig.alarm(AlarmKind::WaterFrozen), why: rig.ctl("d5.fan").fallback }
+    Frozen { detect, peak, fan: duty(&rig, 0), pump: duty(&rig, 1), handed_over: rig.sim.mode(Spec::FAN) == 1 || rig.sim.mode(Spec::PUMP) == 1, alarm: rig.alarm(AlarmKind::WaterFrozen), why: rig.ctl("d5.fan").fallback, changes }
 }
 
 #[test]
 fn r21_frozen_water_is_detected_by_heat_within_200_s_or_by_the_plain_rule_after_10_minutes_and_both_channels_run_at_full_duty() {
     for (name, spec) in PlantSpec::NAMED {
-        let heat = frozen_run(spec, 30.0, 300.0, true);
+        let heat = frozen_run(spec, 30.0, 300.0, true, 0);
         assert!(heat.detect.is_some_and(|t| t < 200), "{name} {:?}", heat.detect);
-        for (f, label) in [(heat, "heat"), (frozen_run(spec, 33.0, 40.0, true), "plain"), (frozen_run(spec, 37.5, 300.0, false), "plain, cpu dead")] {
+        for (f, label) in [(heat, "heat"), (frozen_run(spec, 33.0, 40.0, true, 0), "plain"), (frozen_run(spec, 37.5, 300.0, false, 0), "plain, cpu dead")] {
             assert!(f.detect.is_some() && f.fan == Some(100.0) && f.pump == Some(100.0) && !f.handed_over && f.alarm, "{name} {label}");
             assert!(label == "heat" || f.detect.is_some_and(|t| (590..700).contains(&t)), "{name} {label} {:?}", f.detect);
         }
@@ -657,7 +664,7 @@ fn r21_frozen_water_is_detected_by_heat_within_200_s_or_by_the_plain_rule_after_
 fn r28_a_stuck_water_value_never_lets_the_measured_plant_pass_50_c_up_to_400_w() {
     for stuck in [30.0, 33.0, 34.5, 35.5, 36.5, 37.5, 39.0, 41.0, 43.0] {
         for power in [40.0, 100.0, 200.0, 300.0, 400.0] {
-            let f = frozen_run(PlantSpec::MEASURED, stuck, power, true);
+            let f = frozen_run(PlantSpec::MEASURED, stuck, power, true, 0);
             assert!(f.peak <= 50.0 && f.detect.is_some() && !f.handed_over, "stuck {stuck} load {power} {:?} peak {:.1}", f.detect, f.peak);
         }
     }
@@ -672,13 +679,50 @@ fn r27_frozen_table_stuck_value_load_detection_and_peak_true_water() {
     for (name, spec) in variants {
         for stuck in [30.0, 33.0, 34.5, 35.5, 36.5, 37.5, 39.0, 41.0, 43.0] {
             for power in [40.0, 100.0, 200.0, 300.0, 400.0, 600.0] {
-                let f = frozen_run(spec, stuck, power, true);
+                let f = frozen_run(spec, stuck, power, true, 0);
                 table.push_str(&format!("{name} | {stuck} | {power} | {} | {:.1} | {:?} / {:?}
 ", f.detect.map_or("none".into(), |t| t.to_string()), f.peak, f.fan, f.pump));
             }
         }
     }
     eprintln!("{table}");
+}
+
+#[test]
+fn r31_a_stuck_water_value_flickering_by_one_lsb_is_still_frozen_and_the_heat_rule_accumulates_across_it() {
+    for stuck in [30.0, 33.0, 37.5] {
+        for power in [100.0, 400.0] {
+            for dither in [1, 60] {
+                let f = frozen_run(PlantSpec::MEASURED, stuck, power, true, dither);
+                assert!(f.peak <= 50.0 && f.detect.is_some() && f.fan == Some(100.0) && f.pump == Some(100.0) && !f.handed_over, "stuck {stuck} load {power} dither {dither} {:?} peak {:.1}", f.detect, f.peak);
+            }
+        }
+    }
+}
+
+#[test]
+fn r32_frozen_state_latches_and_the_commands_do_not_chatter_before_the_reading_moves() {
+    for (stuck, power) in [(34.5, 400.0), (37.5, 400.0), (39.0, 400.0), (36.5, 300.0), (30.0, 200.0)] {
+        for dither in [0, 1] {
+            let f = frozen_run(PlantSpec::MEASURED, stuck, power, true, dither);
+            assert!(f.changes.iter().all(|c| *c <= 2) && f.fan == Some(100.0) && f.pump == Some(100.0), "stuck {stuck} load {power} dither {dither} {:?}", f.changes);
+        }
+    }
+}
+
+#[test]
+fn r33_the_frozen_state_ends_only_when_the_reading_has_moved_clearly_beyond_the_band() {
+    let mut rig = running(36.5, |_| {});
+    rig.run(700);
+    assert!(rig.alarm(AlarmKind::WaterFrozen));
+    for w in [36.51, 36.52, 36.53, 36.54, 36.55] {
+        rig.water = w;
+        rig.run(5);
+        assert!(rig.alarm(AlarmKind::WaterFrozen), "{w}");
+    }
+    rig.water = 36.6;
+    rig.run(5);
+    assert!(!rig.alarm(AlarmKind::WaterFrozen));
 }
 
 #[test]
