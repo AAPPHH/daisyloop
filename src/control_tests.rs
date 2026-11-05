@@ -123,6 +123,7 @@ struct Rig {
     model_fail: Rc<Cell<bool>>,
     warm: Rc<Cell<i64>>,
     heat: Rc<Cell<f64>>,
+    extra: Vec<(&'static str, f64)>,
     dir: std::path::PathBuf,
 }
 
@@ -157,7 +158,7 @@ impl Rig {
         let heat = Rc::new(Cell::new(heat));
         let model = Fake { ident, warm: warm.clone(), heat: heat.clone(), fail: model_fail.clone() };
         let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
-        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, dir: cfg.state_dir() }
+        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, extra: vec![], dir: cfg.state_dir() }
     }
     fn rows(&self) -> Vec<Row> {
         let r = self.sim.report();
@@ -167,6 +168,9 @@ impl Rig {
         ];
         if let Some(g) = self.gpu {
             rows.push(Row::new("nvml", "nvml/0/temp", "gpu", "temperature", "degC", g));
+        }
+        for (ch, v) in &self.extra {
+            rows.push(Row::new("test", *ch, *ch, "power", "W", *v));
         }
         let (frozen, force) = (self.sim.0.borrow().freeze_rpm, self.sim.0.borrow().force);
         for (n, (s, curve)) in [(Spec::FAN, ChannelConfig::defaults(ControlKind::Fan).calibration()), (Spec::PUMP, ChannelConfig::defaults(ControlKind::Pump).calibration())].into_iter().enumerate() {

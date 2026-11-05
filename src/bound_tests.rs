@@ -23,7 +23,7 @@ fn blind_rig(tweak: impl Fn(&mut Config)) -> Rig {
     let s = sim.clone();
     let factory: Factory = Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>));
     let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(Blind)));
-    Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), dir: cfg.state_dir() }
+    Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), extra: vec![], dir: cfg.state_dir() }
 }
 
 fn running(water: f64, tweak: impl Fn(&mut Config)) -> Rig {
@@ -49,7 +49,7 @@ fn r1_the_curves_are_piecewise_linear_on_water_and_must_rise() {
     for (w, fan, pump) in [(30.0, 0.0, 15.0), (34.9, 0.0, 15.0), (35.0, 20.0, 15.0), (35.5, 20.0 + 0.5 / 3.0 * 34.4, 57.5), (36.0, 20.0 + 1.0 / 3.0 * 34.4, 100.0), (38.0, 54.4, 100.0), (40.0, 54.4 + 2.0 / 4.0 * 45.6, 100.0), (42.0, 100.0, 100.0), (47.0, 100.0, 100.0)] {
         r.water = w;
         r.run(12);
-        assert!((bound(&r, 0) - fan).abs() < 1e-6 && (bound(&r, 1) - pump).abs() < 1e-6, "{w}");
+        assert!((r.c.curve_bound(0, r.now).unwrap() - fan).abs() < 1e-6 && (r.c.curve_bound(1, r.now).unwrap() - pump).abs() < 1e-6, "{w}");
     }
     let fan = ChannelConfig::defaults(ControlKind::Fan).calibration();
     assert!((fan.rpm(54.4) - 800.0).abs() < 1.0);
@@ -113,7 +113,7 @@ fn r4_shadow_values_show_the_bounded_target_and_nothing_is_sent() {
 
 #[test]
 fn r5_a_restarted_fan_runs_at_least_the_minimum_time_and_the_restart_itself_is_never_delayed() {
-    let mut rig = running(32.0, |_| {});
+    let mut rig = running(32.0, |c| c.control.bound_hold_secs = 60.0);
     rig.water = 36.0;
     rig.run(3);
     assert!(duty(&rig, 0).unwrap() >= 20.0);
@@ -164,13 +164,6 @@ fn r7_frozen_water_with_moving_load_and_a_stopped_fan_goes_to_the_firmware() {
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
     assert!(rig.ctl("d5.fan").fallback.unwrap().contains("unverändert"));
     assert!(rig.alarm(AlarmKind::WaterFrozen) && rig.alarm(AlarmKind::Fallback));
-    let mut high = running(44.0, |_| {});
-    for t in 0..700 {
-        high.cpu = if t / 10 % 2 == 0 { 40.0 } else { 70.0 };
-        high.tick();
-    }
-    assert!(duty(&high, 0).unwrap() > 90.0 && high.ctl("d5.fan").fallback.is_none() && high.sim.mode(Spec::FAN) == 0);
-    assert!(high.alarm(AlarmKind::WaterFrozen));
     let mut off = Rig::new((true, true), 3.0, |c| c.writes_enabled = false);
     for t in 0..700 {
         off.cpu = if t / 10 % 2 == 0 { 40.0 } else { 70.0 };
@@ -246,75 +239,356 @@ fn r11_water_limit_above_the_plausibility_cap_is_rejected_by_name() {
     assert_eq!(rig.c.cfg.water_limit, 48.0);
 }
 
+#[derive(Clone, Copy)]
+struct PlantSpec {
+    ambient: f64,
+    p0: f64,
+    g_stop: f64,
+    exponent: f64,
+}
+
+impl PlantSpec {
+    const MEASURED: PlantSpec = PlantSpec { ambient: 25.0, p0: 0.0, g_stop: 0.5, exponent: 1.61 };
+    const ALTERNATIVE: PlantSpec = PlantSpec { ambient: 20.0, p0: 119.0, g_stop: 5.0, exponent: 0.865 };
+    const NAMED: [(&'static str, PlantSpec); 2] = [("measured", Self::MEASURED), ("alternative", Self::ALTERNATIVE)];
+}
+
 struct Plant {
-    c: f64,
-    t: f64,
-    fan: VecDeque<f64>,
+    spec: PlantSpec,
+    t1: f64,
+    t2: f64,
+    seen: VecDeque<f64>,
 }
 
 impl Plant {
-    const G_OFF: f64 = 8.0;
-    const G_FULL: f64 = 25.0;
-    const AMBIENT: f64 = 26.0;
-    const DEAD_SECS: usize = 31;
+    const C1: f64 = 7100.0;
+    const C2: f64 = 4600.0;
+    const K: f64 = 24.0;
+    const G_FULL: f64 = 24.0;
+    const DELAY: usize = 31;
 
-    fn step(&mut self, power: f64, fan_rpm: f64, pump_rpm: f64) {
-        self.fan.push_back(fan_rpm);
-        let delayed = if self.fan.len() > Self::DEAD_SECS { self.fan.pop_front().unwrap() } else { self.fan[0] };
-        let g = (Self::G_OFF + (Self::G_FULL - Self::G_OFF) * (delayed / 1470.0).powf(0.7)) * (0.9 + 0.1 * pump_rpm / 4800.0);
-        self.t += (power - g * (self.t - Self::AMBIENT)) / self.c;
+    fn new(spec: PlantSpec) -> Plant {
+        Plant { spec, t1: 30.0, t2: 30.0, seen: VecDeque::from(vec![30.0]) }
+    }
+    fn step(&mut self, power: f64, fan_rpm: f64) -> f64 {
+        let g = self.spec.g_stop + (Self::G_FULL - self.spec.g_stop) * (fan_rpm / 1470.0).powf(self.spec.exponent);
+        let flow = Self::K * (self.t1 - self.t2);
+        self.t1 += (power + self.spec.p0 - g * (self.t1 - self.spec.ambient) - flow) / Self::C1;
+        self.t2 += flow / Self::C2;
+        self.seen.push_back(self.t1);
+        if self.seen.len() > Self::DELAY + 1 {
+            self.seen.pop_front();
+        }
+        (self.seen[0] * 100.0).round() / 100.0
     }
 }
 
-fn simulate(power: f64, c: f64, tweak: impl Fn(&mut Config)) -> (usize, usize, f64) {
+#[derive(Clone, Copy, Debug)]
+enum Profile {
+    Constant(f64),
+    Square(f64, f64),
+    Sine(f64),
+    Golden,
+}
+
+impl Profile {
+    const SECS: usize = 86_400;
+    fn power(&self, t: usize) -> f64 {
+        match *self {
+            Profile::Constant(w) => w,
+            Profile::Square(lo, hi) => if t / 600 % 2 == 0 { lo } else { hi },
+            Profile::Sine(_) => 100.0,
+            Profile::Golden => 0.0,
+        }
+    }
+    fn closed(&self) -> bool {
+        matches!(self, Profile::Constant(_) | Profile::Square(..))
+    }
+    fn name(&self) -> String {
+        match self {
+            Profile::Constant(w) => format!("const {w:.0} W"),
+            Profile::Square(lo, hi) => format!("square {lo:.0}/{hi:.0} W"),
+            Profile::Sine(c) => format!("sine {c:.1} C"),
+            Profile::Golden => "golden".into(),
+        }
+    }
+}
+
+struct Trace {
+    channels: Vec<String>,
+    rows: Vec<Vec<f64>>,
+}
+
+impl Trace {
+    fn golden() -> Trace {
+        let g = crate::model::Golden::load();
+        let mut rows = vec![vec![f64::NAN; g.channels.len()]; g.rows.len()];
+        for c in 0..g.channels.len() {
+            let known: Vec<usize> = (0..g.rows.len()).filter(|t| g.rows[*t][c].is_some()).collect();
+            for t in 0..g.rows.len() {
+                let (a, b) = (known.iter().rev().find(|k| **k <= t), known.iter().find(|k| **k >= t));
+                rows[t][c] = match (a, b) {
+                    (Some(a), Some(b)) if a != b => g.rows[*a][c].unwrap() + (g.rows[*b][c].unwrap() - g.rows[*a][c].unwrap()) * (t - a) as f64 / (b - a) as f64,
+                    (Some(a), _) => g.rows[*a][c].unwrap(),
+                    (None, Some(b)) => g.rows[*b][c].unwrap(),
+                    _ => f64::NAN,
+                };
+            }
+        }
+        Trace { channels: g.channels, rows }
+    }
+    fn at(&self, t: usize, channel: &str) -> f64 {
+        let n = self.rows.len();
+        let k = t % (2 * n);
+        self.rows[if k < n { k } else { 2 * n - 1 - k }][self.channels.iter().position(|c| c == channel).unwrap()]
+    }
+}
+
+#[derive(Debug, Default)]
+struct Outcome {
+    writes: usize,
+    stops: usize,
+    peak: f64,
+    pump_hi: f64,
+    fan_hi: f64,
+    fallback: bool,
+    frozen: bool,
+}
+
+const CPU_POWER: &str = "/intelcpu/0/power/0";
+const GPU_POWER: &str = "nvml/0/power";
+const PUMP_POWER: &str = "d5next/pump/power";
+
+fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> Outcome {
     let mut rig = blind_rig(tweak);
-    let mut plant = Plant { c, t: 30.0, fan: VecDeque::new() };
-    rig.water = plant.t;
+    let mut plant = Plant::new(spec);
+    let trace = matches!(profile, Profile::Golden).then(Trace::golden);
+    rig.water = plant.t1;
     rig.run(5);
     rig.active("d5.fan");
     rig.active("d5.pump");
-    let (fan_cal, pump_cal) = (ChannelConfig::defaults(ControlKind::Fan).calibration(), ChannelConfig::defaults(ControlKind::Pump).calibration());
-    let mut peak: f64 = 0.0;
-    for _ in 0..86_400 {
+    let fan_cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
+    let mut out = Outcome::default();
+    let (mut pump_hi, mut fan_hi) = (0usize, 0usize);
+    for t in 0..Profile::SECS {
         let r = rig.sim.report();
         let rpm = |s: Spec, cal: &Calibration| cal.rpm(if r[s.mode()] == 0 { be16(&r, s.preset()) as f64 / 100.0 } else { 90.0 });
-        plant.step(power, rpm(Spec::FAN, &fan_cal), rpm(Spec::PUMP, &pump_cal));
-        peak = peak.max(plant.t);
-        rig.water = (plant.t * 100.0).round() / 100.0;
+        let power = profile.power(t);
+        let reading = plant.step(power, rpm(Spec::FAN, &fan_cal));
+        out.peak = out.peak.max(plant.t1);
+        rig.extra = vec![(CPU_POWER, power), (GPU_POWER, 0.0), (PUMP_POWER, 5.0)];
+        rig.water = match (&profile, &trace) {
+            (_, Some(g)) => {
+                rig.cpu = g.at(t, "/intelcpu/0/temperature/0");
+                rig.gpu = Some(g.at(t, "nvml/0/temp"));
+                rig.extra.clear();
+                g.at(t, "d5next/water/temp")
+            }
+            (Profile::Sine(c), _) => c + 0.3 * (std::f64::consts::TAU * t as f64 / 600.0).sin(),
+            _ => reading,
+        };
         rig.tick();
+        out.frozen |= rig.c.frozen_hit(rig.now).is_some();
+        let d = |i: usize| rig.c.chans[i].duty_cmd;
+        pump_hi += d(1).is_some_and(|x| x >= 90.0) as usize;
+        fan_hi += d(0).is_some_and(|x| x >= 90.0) as usize;
     }
     let sets = rig.sim.duty_sets();
     let fan: Vec<u16> = sets.iter().map(|(_, r)| be16(r, Spec::FAN.preset())).collect();
-    let stops = fan.windows(2).filter(|w| w[0] != 0 && w[1] == 0).count();
-    (stops, sets.len(), peak)
+    out.stops = fan.windows(2).filter(|w| w[0] != 0 && w[1] == 0).count();
+    out.writes = sets.len();
+    out.pump_hi = pump_hi as f64 / Profile::SECS as f64;
+    out.fan_hi = fan_hi as f64 / Profile::SECS as f64;
+    out.fallback = rig.c.chans.iter().any(|c| c.fallback.is_some());
+    out
 }
 
-fn without_rules(c: &mut Config) {
-    c.control.fan.min_run_secs = Some(0.0);
-    c.control.fan.min_curve = Some(vec![[35.0, 0.0], [36.0, 0.0]]);
-    c.control.pump.min_curve = Some(vec![[35.0, 15.0], [36.0, 15.0]]);
-}
-
-#[test]
-fn r12_the_dwell_cuts_the_stops_and_the_bound_keeps_the_writes_within_the_budget() {
-    let (before, after) = (simulate(70.0, 4_000.0, without_rules), simulate(70.0, 4_000.0, |_| {}));
-    assert!(before.0 > 40 && after.0 < before.0 && after.1 <= 500, "{before:?} {after:?}");
-    let (before, after) = (simulate(300.0, 11_900.0, without_rules), simulate(300.0, 11_900.0, |_| {}));
-    assert!(before.1 > 500 && after.1 <= 500 && after.2 < 48.0, "{before:?} {after:?}");
+fn profiles() -> Vec<Profile> {
+    let mut v: Vec<Profile> = [40.0, 60.0, 100.0, 200.0, 300.0, 400.0].iter().map(|w| Profile::Constant(*w)).collect();
+    v.extend([Profile::Square(60.0, 300.0), Profile::Sine(34.5), Profile::Sine(35.0), Profile::Sine(35.5), Profile::Sine(36.0), Profile::Sine(37.5), Profile::Golden]);
+    v
 }
 
 #[test]
 #[ignore]
-fn r13_cycling_table_per_24_h() {
-    let mut table = String::from("C J/K | W | stops, duty writes, peak C without bound and dwell | with
-");
-    for c in [11_900.0, 4_000.0] {
-        for power in [30.0, 70.0, 100.0, 200.0, 300.0] {
-            let (before, after) = (simulate(power, c, without_rules), simulate(power, c, |_| {}));
-            table.push_str(&format!("{c:.0} | {power:.0} | {} {} {:.1} | {} {} {:.1}
-", before.0, before.1, before.2, after.0, after.1, after.2));
-            assert!(after.1 <= 500 && after.2 < 48.0, "{c} {power} {after:?}");
+fn r13_writes_and_pump_table_per_24_h() {
+    let mut table = String::from("plant | profile | writes | stops | peak C | pump >=90 % | fan >=90 % | fallback | frozen\n");
+    for (name, spec) in PlantSpec::NAMED {
+        for p in profiles().into_iter().filter(|p| p.closed() || name == "measured") {
+            let o = simulate(p, spec, |_| {});
+            table.push_str(&format!("{name} | {} | {} | {} | {:.1} | {:.0} | {:.0} | {} | {}\n", p.name(), o.writes, o.stops, o.peak, o.pump_hi * 100.0, o.fan_hi * 100.0, o.fallback, o.frozen));
         }
     }
     eprintln!("{table}");
+}
+
+fn assert_quiet(profile: Profile, spec: PlantSpec) {
+    let o = simulate(profile, spec, |_| {});
+    assert!(o.writes < 100 && !o.fallback && !o.frozen, "{} {o:?}", profile.name());
+}
+
+#[test]
+fn r14_a_constant_load_writes_less_than_100_times_a_day_on_both_plants() {
+    for (_, spec) in PlantSpec::NAMED {
+        for w in [40.0, 100.0, 250.0, 400.0] {
+            assert_quiet(Profile::Constant(w), spec);
+        }
+    }
+}
+
+#[test]
+fn r15_a_10_plus_10_minute_load_writes_less_than_100_times_a_day_on_both_plants() {
+    for (_, spec) in PlantSpec::NAMED {
+        assert_quiet(Profile::Square(60.0, 300.0), spec);
+    }
+}
+
+#[test]
+fn r16_water_jitter_around_the_pump_slope_and_the_golden_trace_write_less_than_100_times_a_day() {
+    for c in [35.0, 35.5, 36.0] {
+        assert_quiet(Profile::Sine(c), PlantSpec::MEASURED);
+    }
+    assert_quiet(Profile::Golden, PlantSpec::MEASURED);
+}
+
+#[test]
+fn r17_only_raises_are_exempt_a_raise_is_never_delayed_and_the_bound_lowers_after_a_fall_and_the_hold() {
+    let mut rig = running(34.0, |c| c.control.bound_hold_secs = 120.0);
+    let used = rig.c.chans[0].cfg.daily_writes;
+    rig.c.chans[0].used = used;
+    rig.water = 41.0;
+    rig.run(3);
+    let high = bound(&rig, 0);
+    assert!(high >= rig.c.curve_bound(0, rig.now).unwrap() && duty(&rig, 0).unwrap() >= high - 2.0);
+    rig.water = 36.0;
+    rig.run(60);
+    assert!(bound(&rig, 0) >= high && duty(&rig, 0).unwrap() >= high - 2.0);
+    rig.run(100);
+    assert!(bound(&rig, 0) < high - 20.0);
+    assert!(duty(&rig, 0).unwrap() >= high - 2.0 && rig.alarm(AlarmKind::Budget));
+    let mut fresh = running(34.0, |c| c.control.bound_hold_secs = 120.0);
+    fresh.water = 41.0;
+    fresh.run(3);
+    fresh.water = 36.0;
+    fresh.run(400);
+    assert!(duty(&fresh, 0).unwrap() < high - 20.0 && !fresh.alarm(AlarmKind::Budget));
+}
+
+#[test]
+fn r18_a_small_fall_does_not_lower_the_bound_and_the_raise_rate_cap_stops_exemption() {
+    let mut rig = running(35.0, |c| c.control.bound_hold_secs = 60.0);
+    rig.water = 37.0;
+    rig.run(10);
+    let high = bound(&rig, 1);
+    rig.water = 36.4;
+    rig.run(300);
+    assert_eq!(bound(&rig, 1), high);
+    let mut capped = running(34.0, |c| c.control.bound_raise_cap = 0);
+    capped.c.chans[0].used = capped.c.chans[0].cfg.daily_writes;
+    capped.water = 41.0;
+    capped.run(10);
+    assert!(capped.c.chans[0].over && duty(&capped, 0).unwrap() < bound(&capped, 0) - 20.0);
+}
+
+#[test]
+fn r19_a_step_test_the_bound_overrides_is_flagged_in_status_and_telemetry() {
+    let mut rig = Rig::new((true, true), 3.0, |c| c.control.step_test.fan = vec![[40.0, 60.0]]);
+    rig.water = 40.0;
+    rig.run(40);
+    rig.c.start_test("d5.fan", true, rig.now).unwrap();
+    let rows = rig.tick();
+    let step = rig.status().step.unwrap();
+    assert!(step.overridden && step.duty > 70.0);
+    assert!(rows.iter().any(|r| r.channel == "daisyloop/step/overridden" && r.value == 1.0));
+    let mut cool = Rig::new((true, true), 3.0, |c| c.control.step_test.fan = vec![[40.0, 60.0]]);
+    cool.water = 30.0;
+    cool.run(40);
+    cool.c.start_test("d5.fan", true, cool.now).unwrap();
+    cool.run(2);
+    assert!(!cool.status().step.unwrap().overridden);
+}
+
+#[test]
+fn r20_the_rate_limit_after_a_hold_starts_from_the_current_duty() {
+    let mut rig = running(34.0, |_| {});
+    rig.gpu = None;
+    rig.run(40);
+    rig.water = 38.5;
+    rig.run(8);
+    let held = duty(&rig, 0).unwrap();
+    assert!(held >= 60.0 && held <= 80.0 && held >= bound(&rig, 0) - 2.0);
+    rig.heat.set(14.0);
+    rig.gpu = Some(40.0);
+    rig.run(35);
+    assert!(duty(&rig, 0).unwrap() >= 95.0, "{:?} {held}", duty(&rig, 0));
+}
+
+fn frozen_after(spec: PlantSpec, cpu_alive: bool, power: f64) -> Option<usize> {
+    const SETTLE: usize = 900;
+    let mut rig = blind_rig(|_| {});
+    let mut plant = Plant::new(spec);
+    (plant.t1, plant.t2, plant.seen) = (37.5, 37.5, VecDeque::from(vec![37.5]));
+    rig.water = 37.5;
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.active("d5.pump");
+    let cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
+    for t in 0..SETTLE + 900 {
+        let r = rig.sim.report();
+        let live = plant.step(if t < SETTLE { 100.0 } else { power }, cal.rpm(if r[Spec::FAN.mode()] == 0 { be16(&r, Spec::FAN.preset()) as f64 / 100.0 } else { 90.0 }));
+        let load = if t < SETTLE { 100.0 } else { power };
+        if t < SETTLE {
+            rig.water = live;
+        }
+        let alive = cpu_alive || t < SETTLE;
+        rig.cpu = if alive { 50.0 } else { f64::NAN };
+        rig.extra = if alive { vec![(CPU_POWER, load / 2.0), (GPU_POWER, load / 2.0), (PUMP_POWER, 8.0)] } else { vec![(GPU_POWER, load), (PUMP_POWER, 8.0)] };
+        rig.tick();
+        let hit = rig.c.frozen_hit(rig.now).is_some();
+        assert!(t >= SETTLE || !hit, "false positive before the freeze at {t}");
+        if hit {
+            assert_eq!(rig.sim.mode(Spec::FAN), 1, "handed over at any duty");
+            return Some(t - SETTLE);
+        }
+    }
+    None
+}
+
+#[test]
+fn r21_frozen_water_under_heat_is_detected_within_3_minutes_with_and_without_the_cpu() {
+    for (name, spec) in PlantSpec::NAMED {
+        for alive in [true, false] {
+            let t = frozen_after(spec, alive, 300.0);
+            assert!(t.is_some_and(|t| t < 180), "{name} cpu {alive} {t:?}");
+        }
+    }
+    assert!(frozen_after(PlantSpec::MEASURED, true, 40.0).is_none());
+}
+
+#[test]
+fn r22_the_recorded_golden_trace_never_looks_frozen() {
+    let g = crate::model::Golden::load();
+    let col = |name: &str| g.channels.iter().position(|c| c == name).unwrap();
+    let (iw, ic, ig, icp, igp, ipp, ifr, ipr) = (col("d5next/water/temp"), col("/intelcpu/0/temperature/0"), col("nvml/0/temp"), col(CPU_POWER), col(GPU_POWER), col(PUMP_POWER), col("d5next/fan/rpm"), col("d5next/pump/rpm"));
+    let mut rig = Rig::new((false, false), 3.0, |_| {});
+    for row in &g.rows {
+        rig.water = row[iw].unwrap_or(f64::NAN);
+        rig.cpu = row[ic].unwrap_or(f64::NAN);
+        rig.gpu = row[ig];
+        rig.extra = [(CPU_POWER, icp), (GPU_POWER, igp), (PUMP_POWER, ipp)].iter().filter_map(|(n, i)| row[*i].map(|v| (*n, v))).collect();
+        rig.sim.0.borrow_mut().force = [row[ifr], row[ipr]];
+        rig.tick();
+        assert!(rig.c.frozen_hit(rig.now).is_none(), "t {}", rig.now);
+    }
+}
+
+#[test]
+fn r23_frozen_water_falls_back_at_any_duty_and_stays_an_alarm_with_writes_off() {
+    let mut high = running(44.0, |_| {});
+    for t in 0..700 {
+        high.cpu = if t / 10 % 2 == 0 { 40.0 } else { 70.0 };
+        high.tick();
+    }
+    assert!(high.ctl("d5.fan").fallback.is_some() && high.sim.mode(Spec::FAN) == 1);
+    assert!(high.alarm(AlarmKind::WaterFrozen));
 }

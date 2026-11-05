@@ -42,7 +42,7 @@ fn rig_with(model: impl Model + 'static, tweak: impl Fn(&mut Config)) -> Rig {
     let s = sim.clone();
     let factory: Factory = Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>));
     let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
-    Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), dir: cfg.state_dir() }
+    Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), extra: vec![], dir: cfg.state_dir() }
 }
 
 fn stepped(secs: f64) -> impl Fn(&mut Config) {
