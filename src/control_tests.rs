@@ -235,7 +235,7 @@ fn invalid_config_falls_back_to_defaults_instead_of_panicking() {
         c.control.fan.floor_duty = Some(80.0);
         c.control.fan.max_duty = Some(40.0);
     });
-    assert_eq!(rig.ctl("d5.fan").floor_duty, 30.0);
+    assert_eq!(rig.ctl("d5.fan").floor_duty, 0.0);
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn actuator_floors_are_independent_of_the_caller() {
     let s = sim.clone();
     let mut a = D5Actuator::new(Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>)), &cfg);
     a.apply(&[(ControlKind::Fan, Setting::Duty(1.0)), (ControlKind::Pump, Setting::Duty(5.0))]).unwrap();
-    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (3000, 4000));
+    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (100, 4000));
     assert_eq!(sim.sets(), 1);
     a.apply(&[(ControlKind::Fan, Setting::Duty(500.0))]).unwrap();
     assert_eq!(sim.preset(Spec::FAN), 10000);
@@ -355,14 +355,15 @@ fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
     assert!(!sets.is_empty());
     assert!(rig.ctl("d5.fan").drive == Drive::Duty && rig.ctl("d5.pump").drive == Drive::Firmware);
     for (_, r) in &sets {
-        assert!(be16(r, Spec::FAN.preset()) >= 3000 && r[Spec::FAN.mode()] == 0 && r[Spec::PUMP.mode()] == 1);
+        assert!((be16(r, Spec::FAN.preset()) == 0 || be16(r, Spec::FAN.preset()) >= 2000) && r[Spec::FAN.mode()] == 0 && r[Spec::PUMP.mode()] == 1);
         assert_eq!(&r[Spec::PUMP.base..Spec::PUMP.base + 0x55], &initial[Spec::PUMP.base..Spec::PUMP.base + 0x55]);
     }
     assert!(sets.windows(2).all(|w| w[1].0 - w[0].0 >= 30_000));
     let n = rig.sim.sets();
     rig.run(600);
     assert_eq!(rig.sim.sets(), n, "a steady plan must not rewrite the report");
-    assert!(rig.ctl("d5.fan").commanded_duty.unwrap() >= 30.0);
+    let cmd = rig.ctl("d5.fan").commanded_duty.unwrap();
+    assert!(cmd == 0.0 || cmd >= 20.0);
 }
 
 #[test]

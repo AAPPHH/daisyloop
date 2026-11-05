@@ -87,6 +87,8 @@ pub struct Control {
     pub duty: Option<f64>,
     pub commanded_duty: Option<f64>,
     pub floor_duty: f64,
+    #[serde(default)]
+    pub start_duty: f64,
     pub min_rpm: f64,
     pub max_rpm: f64,
     pub fallback: Option<String>,

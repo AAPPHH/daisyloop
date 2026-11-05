@@ -83,7 +83,7 @@ pub struct Spec {
 }
 
 impl Spec {
-    pub const FAN: Spec = Spec { kind: ControlKind::Fan, name: "fan", base: 0x41, hard_min: 20.0 };
+    pub const FAN: Spec = Spec { kind: ControlKind::Fan, name: "fan", base: 0x41, hard_min: 0.0 };
     pub const PUMP: Spec = Spec { kind: ControlKind::Pump, name: "pump", base: 0x96, hard_min: 30.0 };
     pub const ALL: [Spec; 2] = [Spec::FAN, Spec::PUMP];
     pub fn of(kind: ControlKind) -> Spec {

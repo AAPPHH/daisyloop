@@ -123,11 +123,24 @@ pub struct Axis<'a> {
     pub cal: &'a Calibration,
     pub free: bool,
     pub base: Operating,
+    pub zero_ok: bool,
 }
 
 impl Axis<'_> {
+    const SCALE_MIN_RPM: f64 = 100.0;
+    const SCALE_MAX: f64 = 20.0;
+
     pub fn rpm_range(&self) -> (f64, f64) {
         (self.cal.rpm(self.cfg.floor_duty), self.cal.rpm(self.cfg.max_duty))
+    }
+
+    pub fn fit(&self, rpm: f64) -> (f64, f64) {
+        if !self.free {
+            return (self.base.duty, self.base.rpm);
+        }
+        let (lo, hi) = self.rpm_range();
+        let duty = self.cfg.commandable(self.cal.duty(rpm.clamp(lo, hi)), self.zero_ok);
+        (duty, self.cal.rpm(duty))
     }
 
     pub fn candidates(&self, n: usize) -> Vec<f64> {
@@ -135,13 +148,23 @@ impl Axis<'_> {
             return vec![self.base.rpm];
         }
         let (lo, hi) = self.rpm_range();
-        (0..n).map(|i| if i + 1 == n { hi } else { lo + (hi - lo) * i as f64 / (n - 1) as f64 }).collect()
+        let mut out: Vec<f64> = Vec::new();
+        for r in (0..n).map(|i| if i + 1 == n { hi } else { lo + (hi - lo) * i as f64 / (n - 1) as f64 }) {
+            let r = self.fit(r).1;
+            if out.last() != Some(&r) {
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    fn scale(&self, rpm: f64) -> f64 {
+        if self.base.rpm < Self::SCALE_MIN_RPM { 1.0 } else { (rpm / self.base.rpm).clamp(0.0, Self::SCALE_MAX) }
     }
 
     fn hold(&self, rpm: f64, out: &mut HashMap<String, f64>) {
-        let rpm = if self.free { rpm.clamp(self.rpm_range().0, self.rpm_range().1) } else { self.base.rpm };
-        let duty = if self.free { self.cal.duty(rpm) } else { self.base.duty };
-        let r = if self.base.rpm > 1.0 { rpm / self.base.rpm } else { 1.0 };
+        let (duty, rpm) = self.fit(rpm);
+        let r = self.scale(rpm);
         let key = |s: &str| format!("d5next/{}/{s}", self.name);
         out.insert(key("duty"), duty);
         out.insert(key("rpm"), rpm);
@@ -221,7 +244,7 @@ impl Planner<'_> {
         let cheapest = |margin: f64| all.iter().filter(|(_, p)| Self::within(p, margin)).min_by(|a, b| a.0.total_cmp(&b.0));
         let stay = match prev {
             Some((f, p)) if now.all() => {
-                let (f, p) = (if fan.free { f.clamp(fan.rpm_range().0, fan.rpm_range().1) } else { fan.base.rpm }, if pump.free { p.clamp(pump.rpm_range().0, pump.rpm_range().1) } else { pump.base.rpm });
+                let (f, p) = (fan.fit(f).1, pump.fit(p).1);
                 let plan = eval(f, p)?;
                 Self::within(&plan, 0.0).then(|| (self.noise(fan, pump, f, p), plan))
             }
@@ -293,8 +316,8 @@ mod tests {
         let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
         let (fcal, pcal) = (fc.calibration(), pc.calibration());
         let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
-        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op };
-        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op } };
+        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
+        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
         let t0 = std::time::Instant::now();
         let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
         assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());

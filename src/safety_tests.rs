@@ -195,12 +195,12 @@ fn m1_nan_is_rejected_in_the_step_plan_and_in_the_guard() {
 
 #[test]
 fn m2_hard_minima_cannot_be_configured_away_and_the_guard_enforces_them() {
-    for text in ["[fan]\nfloor_duty = 0.0\n", "[pump]\nfloor_duty = 25.0\n", "[fan]\nfloor_duty = 19.0\n"] {
+    for text in ["[fan]\nfloor_duty = -1.0\n", "[pump]\nfloor_duty = 25.0\n", "[pump]\nfloor_duty = 0.0\n", "[fan]\nstart_duty = -1.0\n", "[fan]\nstart_duty = 101.0\n"] {
         assert!(toml::from_str::<ControlConfig>(text).unwrap().validate().is_err(), "{text}");
     }
-    assert!(toml::from_str::<ControlConfig>("[fan]\nfloor_duty = 20.0\n[pump]\nfloor_duty = 30.0\n").unwrap().validate().is_ok());
+    assert!(toml::from_str::<ControlConfig>("[fan]\nfloor_duty = 0.0\n[pump]\nfloor_duty = 30.0\n").unwrap().validate().is_ok());
     let fresh = Sim::new().report();
-    for (spec, pct, ok) in [(Spec::FAN, 19.0, false), (Spec::FAN, 20.0, true), (Spec::PUMP, 29.0, false), (Spec::PUMP, 30.0, true)] {
+    for (spec, pct, ok) in [(Spec::FAN, 0.0, true), (Spec::FAN, 5.0, true), (Spec::FAN, 100.01, false), (Spec::PUMP, 0.0, false), (Spec::PUMP, 29.0, false), (Spec::PUMP, 29.99, false), (Spec::PUMP, 30.0, true)] {
         let mut t = fresh.clone();
         t[spec.mode()] = 0;
         t[spec.preset()..spec.preset() + 2].copy_from_slice(&((pct * 100.0) as u16).to_be_bytes());
@@ -294,7 +294,7 @@ fn knife(fan: f64, _pump: f64, _r: u32) -> f64 {
 
 fn axes<'a>(fc: &'a ChannelConfig, pc: &'a ChannelConfig, fcal: &'a Calibration, pcal: &'a Calibration) -> (Axis<'a>, Axis<'a>) {
     let op = Operating { duty: 90.0, rpm: 1323.0, power: None, current: None };
-    (Axis { name: "fan", cfg: fc, cal: fcal, free: true, base: op }, Axis { name: "pump", cfg: pc, cal: pcal, free: false, base: Operating { duty: 90.0, rpm: 4400.0, ..op } })
+    (Axis { name: "fan", cfg: fc, cal: fcal, free: true, base: op, zero_ok: true }, Axis { name: "pump", cfg: pc, cal: pcal, free: false, base: Operating { duty: 90.0, rpm: 4400.0, ..op }, zero_ok: false })
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn plan_changes_need_a_margin_and_missing_inputs_are_not_feasible() {
     let now = Temps { water: Some(30.0), cpu: Some(50.0), gpu: Some(40.0) };
     let planner = Planner { cfg: &cfg };
     let fresh = planner.plan(&m, &fan, &pump, &now, 0.0, None).unwrap();
-    assert!((fresh.fan_rpm - fan.rpm_range().0).abs() < 1e-9 && fresh.feasible);
+    assert!((fresh.fan_rpm - fan.cal.rpm(fc.start_duty)).abs() < 1e-9 && fresh.feasible);
     let kept = planner.plan(&m, &fan, &pump, &now, 0.0, Some((fan.rpm_range().1, 4400.0))).unwrap();
     assert!(kept.fan_rpm > fan.rpm_range().0 + 100.0, "{}", kept.fan_rpm);
     let blind = planner.plan(&m, &fan, &pump, &Temps { cpu: None, ..now }, 0.0, None).unwrap();
