@@ -150,7 +150,8 @@ class Row {
   render(c) {
     const stale = isStale(c.rpm_channel);
     const ch = channel(c.rpm_channel);
-    this.rpmT.set(ch?.value ?? null);
+    this.rpmT.set(ch?.value ?? null, this.kind === 'fan' ? 'steht' : undefined);
+    this.el.classList.toggle('still', this.kind === 'fan' && ch?.value != null && ch.value < 1 && !stale);
     const dch = channel(c.duty_channel);
     this.duty.textContent = num(dch?.value ?? null, 0);
     this.el.classList.toggle('stale', stale || isStale(c.duty_channel));

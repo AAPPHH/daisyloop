@@ -11,8 +11,8 @@
 <div class="alarm-edge"></div>
 <header class="top">
   <div class="brand"><span class="mark"></span><span>daisyloop</span></div>
-  <nav>
-    <a href="#hero">Übersicht</a>
+  <nav class="index" aria-label="Abschnitte">
+    <a href="#hero" class="on">Übersicht</a>
     <a href="#controls">Regelung</a>
     <a href="#history">Verlauf</a>
     <a href="#sensors">Sensoren</a>
@@ -27,6 +27,7 @@
       <p class="eyebrow">Wassertemperatur</p>
       <div class="water"><span id="water-v">–</span><span class="deg">°C</span></div>
       <p id="water-trend" class="trend">&nbsp;</p>
+      <div class="lim-bar" id="lim-bar"><div class="lb-track" id="lb-track"><i class="lb-now" id="lb-now"></i></div><div class="lb-ticks" id="lb-ticks"></div><p class="lb-legend" id="lb-legend"></p></div>
       <div class="forecast" id="hero-pred">
         <div class="fc-head"><span id="pred-title">Prognose</span><em id="pred-tag"></em></div>
         <div class="fc-grid">
@@ -55,12 +56,12 @@
       <div class="node plain" id="n-pump" style="left:27%;top:47%">
         <span class="lbl">Pumpe</span>
         <span class="big"><span id="pump-rpm">–</span><small>U/min</small></span>
-        <span class="sub"><span id="pump-duty">–</span> % Duty</span>
+        <span class="sub"><span id="pump-duty">–</span> % Duty · Boden <span id="pump-floor">15</span> %</span>
         <span class="sub tgt">Soll <span id="pump-target">–</span> U/min</span>
         <span class="age" id="pump-age"></span>
       </div>
       <div class="node plain" id="n-fan" style="left:50%;top:56%">
-        <span class="lbl">Radiatorlüfter</span>
+        <span class="lbl">3 × 360 · 9 Lüfter</span>
         <span class="big"><span id="fan-rpm">–</span><small>U/min</small></span>
         <span class="sub"><span id="fan-duty">–</span> % Duty</span>
         <span class="sub tgt">Soll <span id="fan-target">–</span> U/min</span>
@@ -94,7 +95,7 @@
     </div>
     <div id="groups"></div>
   </section>
-  <footer>daisyloop · Protokoll v2 · Pipe \\.\pipe\daisyloop</footer>
+  <footer>daisyloop</footer>
 </main>
 <script type="module" src="app.js"></script>
 </body>

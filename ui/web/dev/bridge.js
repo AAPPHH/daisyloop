@@ -15,6 +15,8 @@ state.controls.forEach((c) => {
 if (q.get('fault')) {
   Object.assign(state.controls[0], { mode: 'active', drive: 'firmware', fallback: q.get('fault') });
 }
+const still = q.get('still') === '1';
+const water = parseFloat(q.get('water'));
 const wave = (i, t, p) => Math.sin(t / p + i * 1.7);
 
 function snapshot() {
@@ -25,6 +27,8 @@ function snapshot() {
   s.channels.forEach((c, i) => {
     const b = base.channels[i].value;
     if (b != null) c.value = b * (1 + (c.kind === 'temperature' || c.kind === 'power' || c.kind === 'fan' ? 0.04 : 0.01) * (0.6 * wave(i, t, 9) + 0.4 * wave(i, t, 41)));
+    if (still && /^d5next\/fan\/(rpm|duty|power|current)$/.test(c.id)) c.value = 0;
+    if (c.id === 'd5next/water/temp' && isFinite(water)) c.value = water;
     if (stale.has(c.id)) Object.assign(c, { stale: true, age_ms: 42000, value: b });
   });
   s.alarms = [];
@@ -33,6 +37,7 @@ function snapshot() {
     if (c.stale) s.alarms.push({ kind: 'stale', channel: c.id, message: `${c.label}: keine Daten seit 42 s`, value: null, limit: null, since_ms: Date.now() - 42000 });
     else if (l.high != null && c.value > l.high) s.alarms.push({ kind: 'water_high', channel: c.id, message: `${c.label} ${c.value.toFixed(1)} über Grenze ${l.high}`, value: c.value, limit: l.high, since_ms: Date.now() - 20000 });
   }
+  if (still) s.controls[0].target_rpm = 0;
   state.controls.forEach((c, i) => {
     s.controls[i].actual_rpm = s.channels.find((x) => x.id === c.rpm_channel).value;
     s.controls[i].duty = s.channels.find((x) => x.id === c.duty_channel).value;

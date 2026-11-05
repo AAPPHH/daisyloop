@@ -30,11 +30,11 @@ export class Hero {
     this.phase = 0;
     this.pumpAng = 0;
     this.fanAng = 0;
-    new ResizeObserver(() => this.layout()).observe(this.stage);
+    new ResizeObserver(() => this.layout()).observe(this.cv);
   }
 
   layout() {
-    const r = this.stage.getBoundingClientRect();
+    const r = this.cv.getBoundingClientRect();
     this.dpr = window.devicePixelRatio || 1;
     this.W = r.width;
     this.H = r.height;
@@ -46,7 +46,7 @@ export class Hero {
 
   buildPath() {
     const { W, H } = this;
-    const L = 0.1 * W, R = 0.9 * W, T = 0.17 * H, B = 0.74 * H, r = 0.17 * H;
+    const L = 0.07 * W, R = 0.93 * W, T = 0.17 * H, B = 0.76 * H, r = 0.15 * H;
     const midY = 0.45 * H;
     const pts = [];
     const line = (x0, y0, x1, y1) => {
@@ -85,7 +85,7 @@ export class Hero {
       return cum[best] / this.total;
     };
     this.u = { cpu: at(0.36 * W, true), gpu: at(0.66 * W, true), rad: at(0.5 * W, false) };
-    this.geo = { L, R, T, B, midY };
+    this.geo = { L, R, T, B, midY, r };
   }
 
   tempAt(u, tc, dcpu, dgpu) {
@@ -107,7 +107,10 @@ export class Hero {
     const pump = ctl(KEYS.pump), fan = ctl(KEYS.fan);
     set('pumpRpm', pump ? value(pump.rpm_channel) : null);
     set('pumpDuty', pump ? value(pump.duty_channel) : null);
-    set('fanRpm', fan ? value(fan.rpm_channel) : null);
+    const fanRpm = fan ? value(fan.rpm_channel) : null;
+    this.tw.fanRpm.set(fanRpm, 'steht');
+    $('#n-fan').classList.toggle('still', live && fanRpm != null && fanRpm < 1);
+    $('#pump-floor').textContent = num(pump?.floor_duty ?? 15, 0);
     set('fanDuty', fan ? value(fan.duty_channel) : null);
     set('pumpTarget', pump?.target_rpm ?? null);
     set('fanTarget', fan?.target_rpm ?? null);
@@ -124,6 +127,7 @@ export class Hero {
     $('#water-trend').innerHTML = !live ? '&nbsp;' : tr == null ? '&nbsp;' : `<b>${tr >= 0 ? '+' : '−'}${num(Math.abs(tr), 1)} K</b> pro Minute`;
     this.agePills();
     this.forecast(live);
+    this.limits(live);
     const pill = $('#alarm-pill');
     const alarms = S.snap?.alarms ?? [];
     if (live && alarms.length) {
@@ -157,10 +161,30 @@ export class Hero {
     for (const [k, lim] of [['water', 'water_limit'], ['cpu', 'cpu_limit'], ['gpu', 'gpu_limit']]) {
       $('#pred-' + k).textContent = p?.[k] != null ? num(p[k], 1) + ' °C' : '–';
       $('#pred-' + k).classList.toggle('over', p?.[k] != null && p[k] > p[lim]);
-      $('#pred-' + k + '-lim').textContent = p ? `Grenze ${num(p[lim], 1)}` : '';
+      $('#pred-' + k + '-lim').textContent = p ? `Plan bis ${num(p[lim], 1)}` : '';
     }
     const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
     $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));
+  }
+
+  limits(live) {
+    const l = S.snap?.limits.find((x) => x.channel === KEYS.water);
+    const bar = $('#lim-bar');
+    bar.hidden = !l;
+    if (!l) return;
+    const [lo, hi] = [28, 52];
+    const pos = (v) => clamp((v - lo) / (hi - lo), 0, 1) * 100 + '%';
+    const ticks = [[l.plan, 'Plan'], [l.high, 'Firmware'], [l.top, 'Obergrenze']].filter(([v]) => v != null);
+    const sig = ticks.map(([v]) => v).join();
+    if (bar.dataset.sig !== sig) {
+      bar.dataset.sig = sig;
+      $('#lb-ticks').replaceChildren(...ticks.map(([v, name]) => h('span', { style: `left:${pos(v)}` }, h('b', {}, num(v, 0)))));
+      $('#lb-legend').textContent = ticks.map(([v, name]) => `${name} ${num(v, 0)}`).join(' · ') + ' °C';
+      $('#lb-track').style.setProperty('--plan', pos(l.plan ?? hi));
+    }
+    const w = value(KEYS.water);
+    $('#lb-now').style.left = w == null || !live ? '-10%' : pos(w);
+    bar.classList.toggle('off', !live || w == null);
   }
 
   animating() {
@@ -251,7 +275,7 @@ export class Hero {
       ctx.restore();
     }
     this.drawPump(this.geo.L, this.geo.midY, H * 0.07, live);
-    this.drawRadiator(0.5 * W, this.geo.B, W * 0.34, H * 0.085, live);
+    this.drawRadiators(live);
   }
 
   drawPump(x, y, r, live) {
@@ -278,49 +302,68 @@ export class Hero {
     ctx.restore();
   }
 
-  drawRadiator(cx, cy, w, h, live) {
-    const { ctx, H } = this;
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.fillStyle = '#10161d';
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(-w / 2, -h / 2, w, h, h * 0.3);
-    ctx.fill();
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
-    for (let x = -w / 2 + h * 0.5; x < w / 2 - h * 0.4; x += h * 0.22) {
-      ctx.beginPath();
-      ctx.moveTo(x, -h / 2 + 3);
-      ctx.lineTo(x, h / 2 - 3);
-      ctx.stroke();
-    }
-    const fr = H * 0.085;
-    for (const dx of [-w * 0.26, w * 0.26]) {
+  drawRadiators(live) {
+    const { ctx } = this;
+    const { L, R, B, r } = this.geo;
+    const gap = 0.022 * this.W;
+    const w = (R - L - 2 * r - 2 * gap) / 3;
+    const h = Math.min(w / 3, 0.17 * this.H);
+    const spin = clamp(this.sm.fanRpm / 400, 0, 1);
+    for (let n = 0; n < 3; n++) {
       ctx.save();
-      ctx.translate(dx, h * 0.5 + fr * 1.25);
-      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-      ctx.lineWidth = 1.5;
+      ctx.translate(L + r + w / 2 + n * (w + gap), B);
+      ctx.fillStyle = '#10161d';
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(-fr * 1.1, -fr * 1.1, fr * 2.2, fr * 2.2, fr * 0.35);
-      ctx.stroke();
-      ctx.rotate(this.fanAng);
-      ctx.fillStyle = live ? 'rgba(200,225,255,0.55)' : '#2c3440';
-      for (let i = 0; i < 7; i++) {
-        ctx.rotate(TAU / 7);
-        ctx.beginPath();
-        ctx.moveTo(fr * 0.18, 0);
-        ctx.bezierCurveTo(fr * 0.4, -fr * 0.55, fr * 0.95, -fr * 0.5, fr * 0.98, -fr * 0.08);
-        ctx.bezierCurveTo(fr * 0.7, -fr * 0.2, fr * 0.4, -fr * 0.12, fr * 0.18, 0);
-        ctx.fill();
-      }
-      ctx.fillStyle = live ? '#e7eef9' : '#3b4452';
-      ctx.beginPath();
-      ctx.arc(0, 0, fr * 0.17, 0, TAU);
+      ctx.roundRect(-w / 2, -h / 2, w, h, h * 0.16);
       ctx.fill();
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      for (let x = -w / 2 + h * 0.12; x < w / 2 - h * 0.1; x += h * 0.09) {
+        ctx.beginPath();
+        ctx.moveTo(x, -h / 2 + 2);
+        ctx.lineTo(x, h / 2 - 2);
+        ctx.stroke();
+      }
+      for (let k = 0; k < 3; k++) {
+        ctx.save();
+        ctx.translate((k - 1) * (w / 3), 0);
+        this.drawFan(h * 0.44, n * 3 + k, spin, live);
+        ctx.restore();
+      }
       ctx.restore();
     }
-    ctx.restore();
+  }
+
+  drawFan(fr, i, spin, live) {
+    const { ctx } = this;
+    ctx.fillStyle = '#0b0f14';
+    ctx.strokeStyle = live ? `rgba(200,225,255,${0.1 + 0.14 * spin})` : 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, fr * 1.04, 0, TAU);
+    ctx.fill();
+    ctx.stroke();
+    if (live && spin > 0.05) {
+      ctx.fillStyle = `rgba(150,200,255,${0.07 * spin})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, fr * 0.98, 0, TAU);
+      ctx.fill();
+    }
+    ctx.rotate(this.fanAng + i * 0.9);
+    ctx.fillStyle = live ? `rgba(200,225,255,${0.34 + 0.26 * spin})` : '#2c3440';
+    for (let b = 0; b < 7; b++) {
+      ctx.rotate(TAU / 7);
+      ctx.beginPath();
+      ctx.moveTo(fr * 0.18, 0);
+      ctx.bezierCurveTo(fr * 0.4, -fr * 0.55, fr * 0.95, -fr * 0.5, fr * 0.98, -fr * 0.08);
+      ctx.bezierCurveTo(fr * 0.7, -fr * 0.2, fr * 0.4, -fr * 0.12, fr * 0.18, 0);
+      ctx.fill();
+    }
+    ctx.fillStyle = live ? '#e7eef9' : '#3b4452';
+    ctx.beginPath();
+    ctx.arc(0, 0, fr * 0.17, 0, TAU);
+    ctx.fill();
   }
 }

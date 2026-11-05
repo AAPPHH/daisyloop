@@ -98,6 +98,12 @@ tauri.event.listen('visibility', (e) => setVisible(e.payload));
 document.addEventListener('visibilitychange', () => setVisible(!document.hidden));
 initControls();
 
+const links = [...document.querySelectorAll('.index a')];
+const spy = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) links.forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id));
+}, { rootMargin: '-45% 0px -50% 0px' });
+links.forEach((a) => spy.observe(document.querySelector(a.getAttribute('href'))));
+
 setInterval(() => {
   if (!S.visible) return;
   const a = age();
