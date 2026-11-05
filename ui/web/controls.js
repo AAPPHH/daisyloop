@@ -130,7 +130,7 @@ class Row {
     const step = S.snap.step_test?.id === this.id ? S.snap.step_test : null;
     this.test.replaceChildren();
     if (step) {
-      this.test.append(h('span', { class: 'prog' }, `Stufe ${step.phase} von ${step.phases} · ${num(step.duty, 0)} % Duty · noch ${step.left_s} s`), h('button', { class: 'no', onclick: () => command({ cmd: 'stop_step_test' }, this) }, 'Stopp'));
+      this.test.append(h('span', { class: 'prog' }, `Stufe ${step.phase} von ${step.phases} · ${num(step.duty, 0)} % Duty${step.overridden ? ' (vom Mindestwert angehoben)' : ''} · noch ${step.left_s} s`), h('button', { class: 'no', onclick: () => command({ cmd: 'stop_step_test' }, this) }, 'Stopp'));
     } else if (this.armed.test) {
       this.test.append(h('span', {}, 'Fährt feste Duty-Stufen. Nur mit dir am Rechner.'), h('button', { class: 'go', onclick: () => this.startTest() }, 'Ja, starten'), h('button', { class: 'no', onclick: () => this.arm('test', null) }, 'Abbrechen'));
     } else {

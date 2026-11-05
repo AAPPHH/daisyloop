@@ -43,7 +43,7 @@ function snapshot() {
     s.controls[i].duty = s.channels.find((x) => x.id === c.duty_channel).value;
   });
   if (q.get('fault')) s.alarms.push({ kind: 'fallback', channel: state.controls[0].id, message: `${state.controls[0].label}: Rückfall auf Firmware-PID (${q.get('fault')})`, value: null, limit: null, since_ms: Date.now() - 90000 });
-  if (test) s.step_test = { id: test, phase: 2, phases: 5, duty: 80, left_s: 412 };
+  if (test) s.step_test = { id: test, phase: 2, phases: 5, duty: 80, overridden: true, left_s: 412 };
   return s;
 }
 
