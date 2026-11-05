@@ -40,6 +40,8 @@ Research only, nothing was sent to any device. No LINK hub is attached yet, so n
 
 ## Planned fans: iCUE LINK RX360 II Unified Frame RGB (CO-9051061-WW, expansion kit)
 
+Count, per the user on 2026-11-05: today 3 x 360 radiators with 9 fans on the D5 fan channel, and the same after the swap, so 3 RX360 II frames with 9 fans. The D5 reports one tach for all of them.
+
 Sources: Corsair product page, RX II guide, quick start guide, TweakTown review (2026-11-04).
 
 - Hub not included in this kit ("iCUE LINK System Hub required"). The starter kit CO-9051059-WW includes one.
