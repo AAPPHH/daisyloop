@@ -10,6 +10,9 @@ impl Control {
 
     pub(super) fn bound_duty(&self, i: usize, now: i64) -> Option<f64> {
         let raw = self.curve_bound(i, now)?;
+        if self.writes && self.frozen_hit(now).is_some() {
+            return Some(self.chans[i].cfg.max_duty);
+        }
         Some(self.chans[i].latch.as_ref().map_or(raw, |l| l.duty.max(raw)))
     }
 
@@ -25,15 +28,18 @@ impl Control {
                 c.seen.pop_front();
             }
             let fresh = |duty: f64| Latch { duty, water: w, low_since: None };
+            let lifted = |raw: f64, running: bool| if raw > floor && running { (raw + step).min(max) } else { raw };
             c.latch = Some(match c.latch.take() {
                 None => fresh(raw),
-                Some(l) if raw > l.duty => fresh(if raw > floor && l.duty > 0.0 { (raw + step).min(max) } else { raw }),
+                Some(l) if raw > l.duty => fresh(lifted(raw, l.duty > 0.0)),
                 Some(l) => {
                     let low_since = if raw < l.duty && w <= l.water - fall { l.low_since.or(Some(now)) } else { None };
                     if low_since.is_some_and(|s| now - s >= hold) {
                         let duty = c.seen.iter().fold(raw, |m, x| m.max(x.1));
                         Latch { duty, water: l.water, low_since: (duty > raw).then_some(now) }
-                    } else { Latch { water: l.water.max(w), low_since, ..l } }
+                    } else {
+                        Latch { water: l.water.max(w), low_since, ..l }
+                    }
                 }
             });
         }
@@ -52,15 +58,17 @@ impl Control {
     }
 
     pub(super) fn enforce_bound(&mut self, now: i64) {
+        let frozen = self.writes && self.frozen_hit(now).is_some();
         for i in 0..self.chans.len() {
-            let (Some(cmd), Some(bound)) = (self.chans[i].duty_cmd, self.bound_duty(i, now)) else { continue };
+            let Some(bound) = self.bound_duty(i, now) else { continue };
             let open = Self::raise_open(&mut self.chans[i], now, self.cfg.bound_raise_cap);
             let c = &self.chans[i];
+            let Some(cmd) = c.duty_cmd.or((frozen && c.mode == Mode::Active).then_some(0.0)) else { continue };
             let behind = bound - cmd >= c.cfg.deadband_duty.max(f64::EPSILON) && now - c.wrote_ms >= Self::BOUND_GAP_MS;
-            if c.driving() && !c.release_due && bound > cmd && (cmd <= 0.0 || behind) {
-                let (kind, drive) = (c.spec.kind, c.drive);
-                let exempt = if open { vec![kind] } else { vec![] };
-                self.restarted |= self.write(&[(kind, Setting::Duty(bound))], now, drive, &exempt) && cmd <= 0.0;
+            if (c.driving() || frozen && c.mode == Mode::Active) && !c.release_due && bound > cmd && (cmd <= 0.0 || behind) {
+                let kind = c.spec.kind;
+                let exempt = if open || frozen { vec![kind] } else { vec![] };
+                self.restarted |= self.write(&[(kind, Setting::Duty(bound))], now, Drive::Duty, &exempt) && cmd <= 0.0;
             }
         }
     }
@@ -68,8 +76,8 @@ impl Control {
     pub(super) fn frozen_hit(&self, now: i64) -> Option<(f64, i64, &'static str)> {
         let f = self.frozen.as_ref()?;
         let held = now - f.since;
-        if held >= Self::FROZEN_MS && f.cpu_hi - f.cpu_lo >= Self::FROZEN_CPU_SPAN_K {
-            Some((f.water, f.since, "trotz wechselnder Last"))
+        if held >= Self::FROZEN_MS {
+            Some((f.water, f.since, "bei jeder Last"))
         } else if held >= Self::HEAT_MIN_MS && f.heat_k >= Self::HEAT_MARGIN_K {
             Some((f.water, f.since, "trotz Heizleistung"))
         } else {
@@ -79,6 +87,6 @@ impl Control {
 
     pub(super) fn frozen_fault(&self, now: i64) -> Option<(String, bool)> {
         let (w, since, why) = self.frozen_hit(now)?;
-        Some((format!("Wasserwert {w:.2} °C seit {} s unverändert {why}, Firmware übernimmt", (now - since) / 1000), true))
+        Some((format!("Wasserwert {w:.2} °C seit {} s unverändert {why}, Messung unglaubwürdig", (now - since) / 1000), true))
     }
 }

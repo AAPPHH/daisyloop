@@ -59,6 +59,7 @@ pub struct ChannelOverride {
     pub max_duty: Option<f64>,
     pub step_up_rpm: Option<f64>,
     pub step_down_rpm: Option<f64>,
+    pub down_step_duty: Option<f64>,
     pub deadband_duty: Option<f64>,
     pub autostart_active: Option<bool>,
     pub curve: Option<Vec<[f64; 2]>>,
@@ -76,6 +77,7 @@ pub struct ChannelConfig {
     pub max_duty: f64,
     pub step_up_rpm: f64,
     pub step_down_rpm: f64,
+    pub down_step_duty: f64,
     pub deadband_duty: f64,
     pub autostart_active: bool,
     pub curve: Vec<[f64; 2]>,
@@ -90,8 +92,8 @@ pub struct ChannelConfig {
 impl ChannelConfig {
     pub fn defaults(kind: ControlKind) -> ChannelConfig {
         match kind {
-            ControlKind::Fan => ChannelConfig { floor_duty: 0.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0, start_duty: 20.0, daily_writes: 500, min_curve: vec![[35.0, 20.0], [38.0, 54.4], [42.0, 100.0]], min_run_secs: 600.0 },
-            ControlKind::Pump => ChannelConfig { floor_duty: 15.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.3, alarm_rpm: 1800.0, start_duty: 0.0, daily_writes: 500, min_curve: vec![[35.0, 15.0], [36.0, 100.0]], min_run_secs: 0.0 },
+            ControlKind::Fan => ChannelConfig { floor_duty: 0.0, max_duty: 100.0, step_up_rpm: 700.0, step_down_rpm: 150.0, down_step_duty: 35.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 0.0], [100.0, 1470.0]], rpm_tolerance: 0.25, alarm_rpm: 1.0, start_duty: 20.0, daily_writes: 500, min_curve: vec![[35.0, 20.0], [38.0, 54.4], [42.0, 100.0]], min_run_secs: 600.0 },
+            ControlKind::Pump => ChannelConfig { floor_duty: 15.0, max_duty: 100.0, step_up_rpm: 1000.0, step_down_rpm: 200.0, down_step_duty: 35.0, deadband_duty: 2.0, autostart_active: false, curve: vec![[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]], rpm_tolerance: 0.3, alarm_rpm: 1800.0, start_duty: 0.0, daily_writes: 500, min_curve: vec![[35.0, 15.0], [36.0, 100.0]], min_run_secs: 0.0 },
         }
     }
     pub fn resolve(kind: ControlKind, o: &ChannelOverride) -> Result<ChannelConfig, String> {
@@ -101,6 +103,7 @@ impl ChannelConfig {
             max_duty: o.max_duty.unwrap_or(d.max_duty),
             step_up_rpm: o.step_up_rpm.unwrap_or(d.step_up_rpm),
             step_down_rpm: o.step_down_rpm.unwrap_or(d.step_down_rpm),
+            down_step_duty: o.down_step_duty.unwrap_or(d.down_step_duty),
             deadband_duty: o.deadband_duty.unwrap_or(d.deadband_duty),
             autostart_active: o.autostart_active.unwrap_or(d.autostart_active),
             curve: o.curve.clone().unwrap_or(d.curve),
@@ -111,11 +114,11 @@ impl ChannelConfig {
             min_curve: o.min_curve.clone().unwrap_or(d.min_curve),
             min_run_secs: o.min_run_secs.unwrap_or(d.min_run_secs),
         };
-        let all = [c.floor_duty, c.max_duty, c.step_up_rpm, c.step_down_rpm, c.deadband_duty, c.rpm_tolerance, c.alarm_rpm, c.start_duty];
+        let all = [c.floor_duty, c.max_duty, c.step_up_rpm, c.step_down_rpm, c.down_step_duty, c.deadband_duty, c.rpm_tolerance, c.alarm_rpm, c.start_duty];
         if all.iter().any(|v| !v.is_finite()) || c.floor_duty < Spec::of(kind).hard_min || c.max_duty > 100.0 || c.floor_duty > c.max_duty {
             return Err("duty floor and ceiling must satisfy hard minimum <= floor <= max <= 100".into());
         }
-        if c.step_up_rpm <= 0.0 || c.step_down_rpm <= 0.0 || c.deadband_duty < 0.0 || !(0.0..=1.0).contains(&c.rpm_tolerance) || c.alarm_rpm < 0.0 || c.start_duty < 0.0 || c.start_duty > c.max_duty {
+        if c.step_up_rpm <= 0.0 || c.step_down_rpm <= 0.0 || c.down_step_duty < 0.0 || c.deadband_duty < 0.0 || !(0.0..=1.0).contains(&c.rpm_tolerance) || c.alarm_rpm < 0.0 || c.start_duty < 0.0 || c.start_duty > c.max_duty {
             return Err("step, deadband, tolerance or alarm value out of range".into());
         }
         if c.floor_duty <= 0.0 && c.start_duty <= 0.0 {
@@ -233,7 +236,7 @@ impl Default for ControlConfig {
             fan_stop_water: 33.0,
             fan_start_water: 35.0,
             bound_drop_k: 1.0,
-            bound_hold_secs: 7200.0,
+            bound_hold_secs: 900.0,
             bound_raise_cap: 120,
             bound_raise_step: 10.0,
             cpu_power_channel: "/intelcpu/0/power/0".into(),
@@ -274,6 +277,9 @@ impl ControlConfig {
         }
         if self.water_plan_limit - self.weight_span_k <= self.fan_start_water {
             return Err("weight_span_k must keep the water plan limit above fan_start_water".into());
+        }
+        if self.bound_raise_cap == 0 {
+            return Err("bound_raise_cap must be at least 1".into());
         }
         if self.cpu_plan_limit <= 0.0 || self.gpu_plan_limit <= 0.0 {
             return Err("cpu_plan_limit and gpu_plan_limit must be positive".into());
@@ -377,8 +383,6 @@ impl Smooth {
 struct Frozen {
     since: i64,
     water: f64,
-    cpu_lo: f64,
-    cpu_hi: f64,
     heat_k: f64,
     last: i64,
 }
@@ -452,7 +456,6 @@ impl Control {
     const BOOT_RETRY_MS: i64 = 5000;
     const FOREIGN_RECHECK_MS: i64 = 60_000;
     const FROZEN_MS: i64 = 600_000;
-    const FROZEN_CPU_SPAN_K: f64 = 5.0;
     const BOUND_GAP_MS: i64 = 5000;
     const RAISE_WINDOW_MS: i64 = 3_600_000;
     const HEAT_MIN_MS: i64 = 90_000;
@@ -535,7 +538,7 @@ impl Control {
 
     fn sensor_fault(&self, now: i64) -> Option<(String, bool)> {
         let t = self.temps(now);
-        self.water_fault(now).or_else(|| [(t.cpu, "CPU-Temperatur"), (t.gpu, "GPU-Temperatur")].iter().find(|x| x.0.is_none()).map(|x| (format!("{} veraltet (> {:.0} s)", x.1, self.cfg.stale_secs), false)))
+        self.water_fault(now).or_else(|| self.frozen_fault(now)).or_else(|| [(t.cpu, "CPU-Temperatur"), (t.gpu, "GPU-Temperatur")].iter().find(|x| x.0.is_none()).map(|x| (format!("{} veraltet (> {:.0} s)", x.1, self.cfg.stale_secs), false)))
     }
 
     fn water_fault(&self, now: i64) -> Option<(String, bool)> {
@@ -546,7 +549,7 @@ impl Control {
         if w >= self.cfg.water_limit {
             return Some((format!("Wasser {w:.1} °C am Limit {:.0} °C", self.cfg.water_limit), true));
         }
-        self.frozen_fault(now)
+        None
     }
 
     fn run_fault(&self, now: i64) -> Option<(String, bool)> {
@@ -633,19 +636,14 @@ impl Control {
 
     fn track_frozen(&mut self, map: &HashMap<String, f64>, now: i64) {
         let Some(w) = map.get(&self.cfg.water_channel).copied() else { return };
-        let cpu = map.get(&self.cfg.cpu_channel).copied();
         let dt = self.frozen.as_ref().map_or(0, |f| (now - f.last).min(5000));
         let step = self.heat_expected_k(w, now, dt);
         match self.frozen.as_mut().filter(|f| f.water == w) {
             Some(f) => {
-                if let Some(c) = cpu {
-                    f.cpu_lo = f.cpu_lo.min(c);
-                    f.cpu_hi = f.cpu_hi.max(c);
-                }
                 f.heat_k = (f.heat_k + step).max(Self::HEAT_FLOOR_K);
                 f.last = now;
             }
-            None => self.frozen = Some(Frozen { since: now, water: w, cpu_lo: cpu.unwrap_or(f64::MAX), cpu_hi: cpu.unwrap_or(f64::MIN), heat_k: 0.0, last: now }),
+            None => self.frozen = Some(Frozen { since: now, water: w, heat_k: 0.0, last: now }),
         }
     }
 
@@ -1061,7 +1059,8 @@ impl Control {
                 continue;
             }
             let from = c.duty_cmd.filter(|_| c.driving()).map_or(w.bases[i].rpm, |d| c.cal.rpm(d));
-            let mut new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - c.cfg.step_down_rpm) }.clamp(lo, hi).max(bound_rpm);
+            let down = c.cfg.step_down_rpm.max(from - c.cal.rpm((c.cal.duty(from) - c.cfg.down_step_duty).max(0.0)));
+            let mut new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - down) }.clamp(lo, hi).max(bound_rpm);
             if i == 0 && w.zero_ok && want <= 0.0 && c.cfg.start_duty > 0.0 && c.cal.duty(new) < c.cfg.start_duty {
                 new = 0.0;
             }

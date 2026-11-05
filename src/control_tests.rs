@@ -124,6 +124,7 @@ struct Rig {
     warm: Rc<Cell<i64>>,
     heat: Rc<Cell<f64>>,
     extra: Vec<(&'static str, f64)>,
+    live: bool,
     dir: std::path::PathBuf,
 }
 
@@ -158,12 +159,12 @@ impl Rig {
         let heat = Rc::new(Cell::new(heat));
         let model = Fake { ident, warm: warm.clone(), heat: heat.clone(), fail: model_fail.clone() };
         let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
-        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, extra: vec![], dir: cfg.state_dir() }
+        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, extra: vec![], live: false, dir: cfg.state_dir() }
     }
     fn rows(&self) -> Vec<Row> {
         let r = self.sim.report();
         let mut rows = vec![
-            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water),
+            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water + if self.live { (self.now / 1000 % 2) as f64 * 0.01 } else { 0.0 }),
             Row::new("lhm", "/intelcpu/0/temperature/0", "cpu", "temperature", "degC", self.cpu),
         ];
         if let Some(g) = self.gpu {
@@ -352,6 +353,7 @@ fn active_is_refused_with_a_reason() {
 fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
     let initial = Sim::new().report();
     let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.live = true;
     rig.run(5);
     rig.active("d5.fan");
     rig.run(400);
@@ -372,7 +374,7 @@ fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
 
 #[test]
 fn target_moves_down_slowly_and_up_fast() {
-    let mut rig = Rig::new((true, true), 20.0, |_| {});
+    let mut rig = Rig::new((true, true), 20.0, |c| c.control.fan.down_step_duty = Some(0.0));
     rig.run(5);
     rig.active("d5.fan");
     rig.run(35);
@@ -490,7 +492,7 @@ fn only_water_above_the_takeover_releases_and_the_top_limit_is_a_display_alarm()
 
 #[test]
 fn rpm_that_does_not_follow_the_command_is_a_fault() {
-    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    let mut rig = Rig::new((true, true), 3.0, |c| c.control.fan.down_step_duty = Some(0.0));
     rig.run(5);
     rig.active("d5.fan");
     rig.run(35);

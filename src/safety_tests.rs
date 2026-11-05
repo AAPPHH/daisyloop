@@ -42,7 +42,7 @@ fn rig_with(model: impl Model + 'static, tweak: impl Fn(&mut Config)) -> Rig {
     let s = sim.clone();
     let factory: Factory = Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>));
     let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
-    Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), extra: vec![], dir: cfg.state_dir() }
+    Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), extra: vec![], live: false, dir: cfg.state_dir() }
 }
 
 fn stepped(secs: f64) -> impl Fn(&mut Config) {
@@ -231,6 +231,7 @@ fn m3_water_limit_fallback_names_the_firmware_setpoints_without_extra_writes() {
 #[test]
 fn m4_autostart_waits_for_the_model_to_warm_up() {
     let mut rig = rig_with(Warming { n: 0 }, |c| c.control.fan.autostart_active = Some(true));
+    rig.live = true;
     rig.run(1700);
     assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
     rig.run(300);
@@ -250,7 +251,11 @@ fn m5_a_device_change_between_get_and_set_aborts_the_write() {
 
 #[test]
 fn m6_daily_write_budget_holds_the_last_duty_with_an_alarm_and_resets_next_day() {
-    let mut rig = Rig::new((true, true), 3.0, |c| c.control.fan.daily_writes = Some(3));
+    let mut rig = Rig::new((true, true), 3.0, |c| {
+        c.control.fan.daily_writes = Some(3);
+        c.control.fan.down_step_duty = Some(0.0);
+    });
+    rig.live = true;
     rig.run(5);
     rig.active("d5.fan");
     for i in 0..1200 {
