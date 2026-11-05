@@ -161,7 +161,7 @@ export class Hero {
     for (const [k, lim] of [['water', 'water_limit'], ['cpu', 'cpu_limit'], ['gpu', 'gpu_limit']]) {
       $('#pred-' + k).textContent = p?.[k] != null ? num(p[k], 1) + ' °C' : '–';
       $('#pred-' + k).classList.toggle('over', p?.[k] != null && p[k] > p[lim]);
-      $('#pred-' + k + '-lim').textContent = p ? `Plan bis ${num(p[lim], 1)}` : '';
+      $('#pred-' + k + '-lim').textContent = p ? `wirksame Planobergrenze ${num(p[lim], 1)}` : '';
     }
     const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
     $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));
@@ -178,8 +178,8 @@ export class Hero {
     const sig = ticks.map(([v]) => v).join();
     if (bar.dataset.sig !== sig) {
       bar.dataset.sig = sig;
-      $('#lb-ticks').replaceChildren(...ticks.map(([v, name]) => h('span', { style: `left:${pos(v)}` }, h('b', {}, num(v, 0)))));
-      $('#lb-legend').textContent = ticks.map(([v, name]) => `${name} ${num(v, 0)}`).join(' · ') + ' °C';
+      $('#lb-ticks').replaceChildren(...ticks.map(([v, name]) => h('span', { style: `left:${pos(v)}`, title: name === 'Plan' ? 'Plan-Grenze ohne Gewichtung' : name }, h('b', {}, num(v, 0)))));
+      $('#lb-legend').textContent = ticks.filter(([, name]) => name !== 'Plan').map(([v, name]) => `${name} ${num(v, 0)}`).join(' · ') + ' °C';
       $('#lb-track').style.setProperty('--plan', pos(l.plan ?? hi));
     }
     const w = value(KEYS.water);
