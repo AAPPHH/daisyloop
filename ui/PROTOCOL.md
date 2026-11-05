@@ -11,13 +11,13 @@ Response bodies (`type`): `snapshot`, `history`, `ack`, `error {message}`. A ref
 
 ## Snapshot
 
-`ts_ms`, `seq`, `weight` (0 leise, 1 kuehl), `model` (`loaded`, `warm`, `warmup_left_s`, `fan_identified`, `pump_identified`, `error`), `predicted` (`horizon_s`, `water`, `cpu`, `gpu`, limits, `feasible`, `age_ms`; null before the first plan), `step_test` (`id`, `phase`, `phases`, `duty`, `left_s`; null when idle), `channels[]`, `controls[]`, `limits[]`, `alarms[]`.
+`ts_ms`, `seq`, `weight` (0 leise, 1 kuehl), `model` (`loaded`, `warm`, `warmup_left_s`, `fan_identified`, `pump_identified`, `error`), `predicted` (`horizon_s`, `water`, `cpu`, `gpu`, limits, `feasible`, `age_ms`; null before the first plan), `step_test` (`id`, `phase`, `phases`, `duty`, `left_s`; null when idle), `channels[]`, `controls[]`, `limits[]` (`channel`, `low`, `high`, and for the water channel `plan` 46 and `top` 50, both optional; `high` is the takeover), `alarms[]`.
 
 `channels[]`: `id` (globally unique), `label`, `hardware` (passed through per sensor), `kind`, `unit` (normalised, for example `°C`, `rpm`), `value`, `min`, `max`, `age_ms`, `stale`. A stale channel keeps its last `value`; the UI greys it and shows the age.
 
-`controls[]` (one per channel, `d5.fan` and `d5.pump`): `mode` (`off`|`shadow`|`active`), `allowed` (`writes_enabled` is on), `identified` (the model's response for this channel is identified), `drive` (`firmware` | `duty` | `test`), `target_rpm`, `actual_rpm`, `duty`, `commanded_duty`, `floor_duty`, `min_rpm`, `max_rpm`, `fallback` (reason while the channel sits on the firmware PID after a fault), `note`.
+`controls[]` (one per channel, `d5.fan` and `d5.pump`): `mode` (`off`|`shadow`|`active`), `allowed` (`writes_enabled` is on), `identified` (the model's response for this channel is identified), `drive` (`firmware` | `duty` | `test`), `target_rpm`, `actual_rpm`, `duty`, `commanded_duty`, `floor_duty`, `start_duty` (lowest commandable duty above 0; a computed duty between 0 and `start_duty` snaps to 0 when `floor_duty` is 0 and the planner may stop the fan, else to `start_duty`; 0 means no dead zone, as for the pump; the daemon rejects 0 when `floor_duty` is 0 and a `deadband_duty` above it), `min_rpm`, `max_rpm`, `fallback` (reason while the channel sits on the firmware PID after a fault), `note`.
 
-`alarms[]`: `kind` (`water_high`, `cpu_high`, `pump_low`, `fan_stopped`, `stale`, `fallback`, `foreign`, `budget`), `channel`, `message`, `value`, `limit`, `since_ms`.
+`alarms[]`: `kind` (`water_high` at the takeover limit, `water_top` display only, `cpu_high` and `gpu_high` smoothed 105 C display only, `water_frozen` display only, `pump_low`, `fan_stopped`, `stale`, `fallback`, `foreign`, `budget`), `channel`, `message`, `value`, `limit`, `since_ms`.
 
 The first snapshot is available before the first control tick: `controls` may be empty and the UI must tolerate that. The UI polls `snapshot` at 1 Hz. History is requested only on range or selection change and every 10 s / 60 s / 5 min for 1 h / 1 d / 1 w; the daemon keeps 6 h in RAM.
 

@@ -109,6 +109,12 @@ impl ChannelConfig {
         if c.step_up_rpm <= 0.0 || c.step_down_rpm <= 0.0 || c.deadband_duty < 0.0 || !(0.0..=1.0).contains(&c.rpm_tolerance) || c.alarm_rpm < 0.0 || c.start_duty < 0.0 || c.start_duty > c.max_duty {
             return Err("step, deadband, tolerance or alarm value out of range".into());
         }
+        if c.floor_duty <= 0.0 && c.start_duty <= 0.0 {
+            return Err("a channel whose floor is 0 needs a start_duty above 0".into());
+        }
+        if c.start_duty > 0.0 && c.deadband_duty > c.start_duty {
+            return Err("deadband_duty must not exceed start_duty".into());
+        }
         Calibration::new(&c.curve)?;
         Ok(c)
     }
@@ -281,6 +287,7 @@ struct Chan {
 }
 
 impl Chan {
+    const STALL_RPM: f64 = 100.0;
     fn new(kind: ControlKind, o: &ChannelOverride) -> Chan {
         let cfg = ChannelConfig::resolve(kind, o).unwrap_or_else(|e| {
             log::error!("control: invalid {kind:?} channel config ({e}), defaults used");
@@ -300,8 +307,14 @@ impl Chan {
     fn driving(&self) -> bool {
         self.drive != Drive::Firmware
     }
+    fn stall_rpm(&self) -> f64 {
+        self.cfg.alarm_rpm.max(Self::STALL_RPM.min(0.5 * self.cal.rpm(self.cfg.start_duty)))
+    }
     fn stalled(&self, rpm: Option<f64>) -> bool {
-        self.cfg.start_duty > 0.0 && self.duty_cmd.is_some_and(|d| d > 0.0) && rpm.is_some_and(|r| r < self.cfg.alarm_rpm)
+        self.cfg.start_duty > 0.0 && self.duty_cmd.is_some_and(|d| d >= self.cfg.start_duty) && rpm.is_some_and(|r| r < self.stall_rpm())
+    }
+    fn spinning(&self, rpm: Option<f64>) -> Option<f64> {
+        rpm.filter(|r| self.duty_cmd == Some(0.0) && *r > Self::STALL_RPM)
     }
 }
 
@@ -491,7 +504,7 @@ impl Control {
                 continue;
             }
             match (r.mode == 0, self.owned.contains(&r.kind)) {
-                (true, true) if self.writes => stuck.push(r.kind),
+                (true, owned) if self.writes && (owned || r.kind == ControlKind::Fan) => stuck.push(r.kind),
                 (true, _) => foreign.push(r.kind),
                 (false, true) => self.disown(r.kind),
                 _ => {}
@@ -503,7 +516,7 @@ impl Control {
                 log::error!("control: return of {stuck:?} to the firmware PID failed, retrying: {e}");
                 return;
             }
-            log::warn!("control: {stuck:?} was left in duty mode by daisyloop, returned to the firmware PID");
+            log::warn!("control: {stuck:?} was found in duty mode at start, returned to the firmware PID");
             for k in stuck {
                 self.disown(k);
             }
@@ -624,7 +637,11 @@ impl Control {
         }
         for k in self.foreign.clone() {
             let ch = self.chans.iter().find(|c| c.spec.kind == k).unwrap().rpm_channel();
-            let msg = if self.writes { "Kanal steht im Duty-Modus, nicht von daisyloop gesetzt, bleibt unberührt" } else { "Kanal steht im Duty-Modus (Schreiben deaktiviert), daisyloop ändert nichts" };
+            let msg = match (self.writes, k) {
+                (true, _) => "Kanal steht im Duty-Modus, nicht von daisyloop gesetzt, bleibt unberührt",
+                (false, ControlKind::Fan) => "Lüfter steht im Duty-Modus und könnte bei 0 % stehen (Schreiben deaktiviert): daisyloop ändert nichts und schützt ihn nicht, bitte Firmware-PID in aquasuite setzen",
+                (false, ControlKind::Pump) => "Pumpe steht im Duty-Modus (Schreiben deaktiviert), daisyloop ändert nichts",
+            };
             self.raise(&mut out, AlarmKind::Foreign, &ch, msg.into(), None, None, now);
         }
         let over: Vec<(String, u32)> = self.chans.iter().filter(|c| c.over).map(|c| (c.rpm_channel(), c.cfg.daily_writes)).collect();
@@ -671,7 +688,9 @@ impl Control {
             let Some(cmd) = c.duty_cmd.filter(|_| now - c.wrote_ms >= (self.cfg.follow_settle_secs * 1000.0) as i64) else { continue };
             let (lo, hi) = c.rpm_range();
             let rpm = self.fresh(&c.rpm_channel(), now);
-            let off = rpm.is_none_or(|r| (r - c.cal.rpm(cmd)).abs() > c.cfg.rpm_tolerance * (hi - lo).max(1.0)) || c.stalled(rpm);
+            let spin = c.spinning(rpm);
+            let hot = self.temps(now).water.is_some_and(|w| w > self.cfg.water_plan_limit);
+            let off = if cmd <= 0.0 && c.cfg.start_duty > 0.0 { rpm.is_none() || spin.is_some() && hot } else { rpm.is_none_or(|r| (r - c.cal.rpm(cmd)).abs() > c.cfg.rpm_tolerance * (hi - lo).max(1.0)) || c.stalled(rpm) };
             let since = if off { c.follow_since.or(Some(now)) } else { None };
             self.chans[i].follow_since = since;
             if since.is_some_and(|s| now - s >= (self.cfg.follow_secs * 1000.0) as i64) {
@@ -689,7 +708,8 @@ impl Control {
                 if c.day != day {
                     (c.day, c.used, c.over) = (day, 0, false);
                 }
-                if c.used >= c.cfg.daily_writes {
+                let leaving_zero = c.duty_cmd == Some(0.0) && matches!(s, Setting::Duty(d) if c.cfg.commandable(*d, true) > 0.0);
+                if c.used >= c.cfg.daily_writes && !leaving_zero {
                     if !c.over {
                         c.over = true;
                         log::error!("control: {} reached its daily budget of {} duty writes, holding the last value", c.spec.name, c.cfg.daily_writes);
@@ -900,6 +920,9 @@ impl Control {
             }
             let from = c.target.unwrap_or(base_op.rpm);
             let mut new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - c.cfg.step_down_rpm) }.clamp(lo, hi);
+            if i == 0 && zero_ok && want <= 0.0 && c.cfg.start_duty > 0.0 && c.cal.duty(new) < c.cfg.start_duty {
+                new = 0.0;
+            }
             if from < 1.0 && want > 0.0 && c.cfg.start_duty > 0.0 {
                 new = new.max(c.cal.rpm(c.cfg.start_duty)).min(hi);
             }
@@ -1099,7 +1122,7 @@ impl Control {
             .enumerate()
             .map(|(i, c)| {
                 let (lo, hi) = c.rpm_range();
-                let note = c.note.clone().or_else(|| (!self.writes).then(|| "Schreiben deaktiviert".to_string()));
+                let note = c.note.clone().or_else(|| c.spinning(self.fresh(&c.rpm_channel(), now)).filter(|_| now - c.wrote_ms >= (self.cfg.follow_settle_secs * 1000.0) as i64).map(|r| format!("Lüfter dreht mit {r:.0} U/min trotz Befehl 0"))).or_else(|| (!self.writes).then(|| "Schreiben deaktiviert".to_string()));
                 PControl {
                     id: format!("d5.{}", c.spec.name),
                     label: if c.spec.kind == ControlKind::Pump { "Pumpe (D5 NEXT)".into() } else { "Radiatorlüfter (D5 NEXT)".into() },
