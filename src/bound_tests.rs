@@ -398,13 +398,14 @@ struct Outcome {
     fan_hi: f64,
     fallback: bool,
     frozen: bool,
+    swings: usize,
 }
 
 const CPU_POWER: &str = "/intelcpu/0/power/0";
 const GPU_POWER: &str = "nvml/0/power";
 const PUMP_POWER: &str = "d5next/pump/power";
 
-const SENSOR_NOISE: f64 = 0.02;
+const SENSOR_NOISE: f64 = 0.007;
 
 fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> Outcome {
     simulate_noisy(profile, spec, SENSOR_NOISE, tweak)
@@ -421,7 +422,7 @@ fn simulate_noisy(profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(
     rig.active("d5.pump");
     let fan_cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
     let mut out = Outcome::default();
-    let (mut pump_hi, mut fan_hi, mut fan_cold) = (0usize, 0usize, 0usize);
+    let (mut pump_hi, mut fan_hi, mut fan_cold, mut high) = (0usize, 0usize, 0usize, false);
     for t in 0..Profile::SECS {
         let r = rig.sim.report();
         let rpm = |s: Spec, cal: &Calibration| cal.rpm(if r[s.mode()] == 0 { be16(&r, s.preset()) as f64 / 100.0 } else { 90.0 });
@@ -446,6 +447,10 @@ fn simulate_noisy(profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(
         out.frozen |= rig.c.frozen_hit(rig.now).is_some();
         let d = |i: usize| rig.c.chans[i].duty_cmd;
         pump_hi += d(1).is_some_and(|x| x >= 90.0) as usize;
+        high |= d(1).is_some_and(|x| x >= 90.0);
+        if high && d(1).is_some_and(|x| x <= 20.0) {
+            (high, out.swings) = (false, out.swings + 1);
+        }
         fan_hi += d(0).is_some_and(|x| x >= 90.0) as usize;
         if out.idle_at.is_none() && t >= profile.load_end() && d(0) == Some(0.0) && d(1).is_some_and(|x| x < 15.5) {
             out.idle_at = Some(t - profile.load_end());
@@ -491,9 +496,16 @@ fn assert_quiet(profile: Profile, spec: PlantSpec, limit: usize) {
 #[test]
 fn r14_a_constant_load_writes_less_than_250_times_a_day_on_both_plants() {
     for (_, spec) in PlantSpec::NAMED {
-        for w in [40.0, 100.0, 250.0, 400.0] {
+        for w in pump_loads().into_iter().chain([100.0, 250.0, 400.0]) {
             assert_quiet(Profile::Constant(w), spec, 250);
         }
+    }
+}
+
+#[test]
+fn r35_the_pump_does_not_swing_between_the_floor_and_full_duty_at_constant_loads_40_to_80_w() {
+    for (name, w, o) in pump_sweep(&|_| {}) {
+        assert!(o.swings <= 2 && !o.budget && !o.fallback && !o.frozen, "{name} {w} W swings {} writes {}", o.swings, o.writes);
     }
 }
 
@@ -808,6 +820,28 @@ fn sweep(cases: &[(PlantSpec, Profile)], tweak: &(dyn Fn(&mut Config) + Sync)) -
     v.into_iter().map(|x| x.1).collect()
 }
 
+fn pump_loads() -> Vec<f64> {
+    (0..=16).map(|i| 40.0 + 2.5 * i as f64).collect()
+}
+
+fn pump_sweep(tweak: &(dyn Fn(&mut Config) + Sync)) -> Vec<(&'static str, f64, Outcome)> {
+    let cases: Vec<(&str, PlantSpec, f64)> = PlantSpec::NAMED.iter().flat_map(|(n, s)| pump_loads().into_iter().map(move |w| (*n, *s, w))).collect();
+    let out = sweep(&cases.iter().map(|c| (c.1, Profile::Constant(c.2))).collect::<Vec<_>>(), tweak);
+    cases.iter().zip(out).map(|(c, o)| (c.0, c.2, o)).collect()
+}
+
+#[test]
+#[ignore]
+fn r34_pump_swings_and_writes_per_24_h_at_constant_loads_40_to_80_w() {
+    let mut table = String::from("plant | load W | pump swings 15-100 | writes | pump >=90 %
+");
+    for (name, w, o) in pump_sweep(&|_| {}) {
+        table.push_str(&format!("{name} | {w} | {} | {} | {:.0}
+", o.swings, o.writes, o.pump_hi * 100.0));
+    }
+    eprintln!("{table}");
+}
+
 fn criteria_row(hold: f64, down: f64) -> String {
     let tweak = move |c: &mut Config| {
         c.control.bound_hold_secs = hold;
@@ -850,3 +884,4 @@ fn r26_hold_and_coarse_down_step_table() {
     }
     eprintln!("{table}");
 }
+

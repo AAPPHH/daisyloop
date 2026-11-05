@@ -1,6 +1,8 @@
 use super::*;
 
 impl Control {
+    const LIFT_WINDOW_MS: i64 = 0;
+
     pub(super) fn curve_bound(&self, i: usize, now: i64) -> Option<f64> {
         let w = self.temps(now).water?;
         let c = &self.chans[i];
@@ -27,6 +29,8 @@ impl Control {
             while c.seen.front().is_some_and(|x| now - x.0 > hold) {
                 c.seen.pop_front();
             }
+            let recent = c.seen.iter().filter(|x| now - x.0 <= Self::LIFT_WINDOW_MS || true).fold(raw, |m, x| m.min(x.1));
+            let step = step.min(raw - recent);
             let fresh = |duty: f64| Latch { duty, water: w, low_since: None };
             let lifted = |raw: f64, running: bool| if raw > floor && running { (raw + step).min(max) } else { raw };
             c.latch = Some(match c.latch.take() {
