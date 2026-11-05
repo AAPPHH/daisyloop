@@ -1,4 +1,4 @@
-﻿import { $, Tween, heat, heatRGB, norm, WATER, COMPONENT, clamp, num, motion, fmt, ageText, h } from './ui.js';
+import { $, Tween, heat, heatRGB, norm, WATER, COMPONENT, clamp, num, motion, fmt, ageText, h } from './ui.js';
 import { S, KEYS, value, trend, isStale, ageMs } from './state.js';
 
 const TAU = Math.PI * 2;
@@ -124,7 +124,7 @@ export class Hero {
     nodeHeat('#n-cpu', cpuT);
     nodeHeat('#n-gpu', gpuT);
     const tr = trend(KEYS.water, 60);
-    $('#water-trend').innerHTML = !live ? '&nbsp;' : tr == null ? '&nbsp;' : `<b>${tr >= 0 ? '+' : 'âˆ’'}${num(Math.abs(tr), 1)} K</b> pro Minute`;
+    $('#water-trend').innerHTML = !live ? '&nbsp;' : tr == null ? '&nbsp;' : `<b>${tr >= 0 ? '+' : '−'}${num(Math.abs(tr), 1)} K</b> pro Minute`;
     this.agePills();
     this.forecast(live);
     this.limits(live);
@@ -132,7 +132,7 @@ export class Hero {
     const alarms = S.snap?.alarms ?? [];
     if (live && alarms.length) {
       pill.className = 'pill bad';
-      pill.textContent = alarms.length > 1 ? `${alarms.length} Alarme: ${alarms[0].message} â€¦` : alarms[0].message;
+      pill.textContent = alarms.length > 1 ? `${alarms.length} Alarme: ${alarms[0].message} …` : alarms[0].message;
     } else {
       pill.className = 'pill ' + (live ? 'ok' : '');
       pill.textContent = live ? 'Alle Werte im Rahmen' : 'Keine aktuellen Werte';
@@ -157,14 +157,14 @@ export class Hero {
     el.classList.toggle('off', !p || !live);
     const m = S.snap?.model;
     $('#pred-title').textContent = p ? `Prognose in ${Math.round(p.horizon_s / 60)} min` : 'Prognose';
-    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : !m.warm ? `Modell wÃ¤rmt auf (${Math.ceil(m.warmup_left_s / 60)} min)` : [p ? (p.feasible ? 'nur berechnet, innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewÃ¤hlt') : '', m.fan_identified && m.pump_identified ? '' : 'nicht identifiziert, nicht belastbar'].filter(Boolean).join(' Â· ');
+    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : !m.warm ? `Modell wärmt auf (${Math.ceil(m.warmup_left_s / 60)} min)` : [p ? (p.feasible ? 'nur berechnet, innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewählt') : '', m.fan_identified && m.pump_identified ? '' : 'nicht identifiziert, nicht belastbar'].filter(Boolean).join(' · ');
     for (const [k, lim] of [['water', 'water_limit'], ['cpu', 'cpu_limit'], ['gpu', 'gpu_limit']]) {
-      $('#pred-' + k).textContent = p?.[k] != null ? num(p[k], 1) + ' Â°C' : 'â€“';
+      $('#pred-' + k).textContent = p?.[k] != null ? num(p[k], 1) + ' °C' : '–';
       $('#pred-' + k).classList.toggle('over', p?.[k] != null && p[k] > p[lim]);
       $('#pred-' + k + '-lim').textContent = p ? `wirksame Planobergrenze ${num(p[lim], 1)}` : '';
     }
     const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
-    $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'LÃ¼fter'} ${c.fallback ? 'RÃ¼ckfall' : modes[c.mode]}`)));
+    $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));
   }
 
   limits(live) {
@@ -179,7 +179,7 @@ export class Hero {
     if (bar.dataset.sig !== sig) {
       bar.dataset.sig = sig;
       $('#lb-ticks').replaceChildren(...ticks.map(([v, name]) => h('span', { style: `left:${pos(v)}`, title: name === 'Plan' ? 'Plan-Grenze ohne Gewichtung' : name }, h('b', {}, num(v, 0)))));
-      $('#lb-legend').textContent = ticks.filter(([, name]) => name !== 'Plan').map(([v, name]) => `${name} ${num(v, 0)}`).join(' Â· ') + ' Â°C';
+      $('#lb-legend').textContent = ticks.filter(([, name]) => name !== 'Plan').map(([v, name]) => `${name} ${num(v, 0)}`).join(' · ') + ' °C';
       $('#lb-track').style.setProperty('--plan', pos(l.plan ?? hi));
     }
     const w = value(KEYS.water);
