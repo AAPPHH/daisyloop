@@ -107,7 +107,7 @@ fn z5_stale_or_missing_water_never_means_stopped() {
 fn z6_water_limit_releases_a_stopped_fan_to_the_firmware_pid() {
     let mut rig = stopped_fan(|_| {});
     let sets = rig.sim.sets();
-    rig.water = 40.5;
+    rig.water = 48.5;
     rig.run(3);
     assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.sets()), (1, sets + 1));
     let c = rig.ctl("d5.fan");
@@ -159,7 +159,7 @@ fn z8_shadow_mode_computes_the_snapped_stop_and_sends_nothing() {
     let rows = rig.tick();
     assert!(rows.iter().any(|r| r.channel == "daisyloop/fan/target_rpm" && r.value == 0.0));
     assert!(!rows.iter().any(|r| r.channel == "daisyloop/fan/duty_cmd"));
-    rig.water = 34.0;
+    rig.water = 35.5;
     rig.run(70);
     assert!(rig.ctl("d5.fan").target_rpm.unwrap() >= rig.c.chans[0].cal.rpm(20.0) - 1e-9);
     assert_eq!((rig.sim.sets(), rig.sim.mode(Spec::FAN)), (0, 1));
@@ -219,7 +219,8 @@ fn z10_calibration_and_the_features_cope_with_rpm_zero_and_duty_zero() {
 
 #[test]
 fn z11_stop_and_start_water_must_be_ordered_below_the_plan_limit() {
-    for bad in ["fan_stop_water = 36.0", "fan_start_water = 38.0", "fan_stop_water = 35.0", "fan_start_water = 30.0"] {
+    for bad in ["fan_stop_water = 36.0", "fan_start_water = 46.0", "fan_stop_water = 35.0", "fan_start_water = 30.0", "water_plan_limit = 48.0", "water_limit = 50.0
+water_top_limit = 49.0", "water_plan_limit = 40.0", "cpu_plan_limit = 0.0"] {
         assert!(toml::from_str::<ControlConfig>(bad).unwrap().validate().is_err(), "{bad}");
     }
     assert!(toml::from_str::<ControlConfig>("fan_stop_water = 30.0\nfan_start_water = 36.0").unwrap().validate().is_ok());

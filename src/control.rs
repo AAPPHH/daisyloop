@@ -161,8 +161,7 @@ pub struct ControlConfig {
     pub cpu_plan_limit: f64,
     pub gpu_plan_limit: f64,
     pub water_limit: f64,
-    pub cpu_limit: f64,
-    pub cpu_hold_secs: f64,
+    pub water_top_limit: f64,
     pub stale_secs: f64,
     pub pump_low_secs: f64,
     pub fan_stop_secs: f64,
@@ -195,12 +194,11 @@ impl Default for ControlConfig {
             pump_noise: 0.5,
             plan_hysteresis_k: 0.3,
             cpu_smooth_secs: 30.0,
-            water_plan_limit: 38.0,
-            cpu_plan_limit: 95.0,
-            gpu_plan_limit: 80.0,
-            water_limit: 40.0,
-            cpu_limit: 104.0,
-            cpu_hold_secs: 60.0,
+            water_plan_limit: 46.0,
+            cpu_plan_limit: 105.0,
+            gpu_plan_limit: 105.0,
+            water_limit: 48.0,
+            water_top_limit: 50.0,
             stale_secs: 10.0,
             pump_low_secs: 3.0,
             fan_stop_secs: 10.0,
@@ -223,15 +221,21 @@ impl ControlConfig {
         water.is_some_and(|w| w < if stopped { self.fan_start_water } else { self.fan_stop_water })
     }
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.cpu_limit, self.cpu_hold_secs, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.follow_settle_secs, self.follow_secs];
+        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.follow_settle_secs, self.follow_secs];
         if nums.iter().any(|v| !v.is_finite() || *v < 0.0) || self.decision_secs < 5.0 || self.stale_secs < 2.0 {
             return Err("timing or limit value out of range".into());
         }
         if !(0.0..=1.0).contains(&self.weight) || self.horizon_secs == 0 || self.rollout_secs == 0 || self.fan_candidates < 2 || self.pump_candidates < 2 || self.fan_candidates > 16 || self.pump_candidates > 16 {
             return Err("weight, horizon, rollout or candidate count out of range".into());
         }
-        if self.fan_stop_water >= self.fan_start_water || self.fan_start_water >= self.water_plan_limit {
-            return Err("fan_stop_water must be below fan_start_water, which must be below water_plan_limit".into());
+        if !(self.fan_stop_water < self.fan_start_water && self.fan_start_water < self.water_plan_limit && self.water_plan_limit < self.water_limit && self.water_limit <= self.water_top_limit) {
+            return Err("water limits must satisfy fan_stop_water < fan_start_water < water_plan_limit < water_limit <= water_top_limit".into());
+        }
+        if self.water_plan_limit - self.weight_span_k <= self.fan_start_water {
+            return Err("weight_span_k must keep the water plan limit above fan_start_water".into());
+        }
+        if self.cpu_plan_limit <= 0.0 || self.gpu_plan_limit <= 0.0 {
+            return Err("cpu_plan_limit and gpu_plan_limit must be positive".into());
         }
         for (kind, o, steps) in [(ControlKind::Fan, &self.fan, &self.step_test.fan), (ControlKind::Pump, &self.pump, &self.step_test.pump)] {
             let c = ChannelConfig::resolve(kind, o)?;
@@ -301,6 +305,29 @@ impl Chan {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct Smooth(Option<(i64, f64)>);
+
+impl Smooth {
+    fn push(&mut self, now: i64, v: f64, tau_ms: f64, stale_ms: i64) {
+        let next = match self.0.filter(|(t, _)| now - t <= stale_ms) {
+            Some((t, a)) => a + (v - a) * (1.0 - (-((now - t) as f64) / tau_ms).exp()),
+            None => v,
+        };
+        self.0 = Some((now, next));
+    }
+    fn get(&self, now: i64, stale_ms: i64) -> Option<f64> {
+        self.0.filter(|(t, _)| now - t <= stale_ms).map(|a| a.1)
+    }
+}
+
+struct Frozen {
+    since: i64,
+    water: f64,
+    cpu_lo: f64,
+    cpu_hi: f64,
+}
+
 struct StepTest {
     fresh: bool,
     chan: usize,
@@ -322,7 +349,9 @@ pub struct Control {
     model: Option<Box<dyn Model>>,
     model_error: Option<String>,
     last: HashMap<String, (i64, f64)>,
-    cpu_avg: Option<(i64, f64)>,
+    cpu_avg: Smooth,
+    gpu_avg: Smooth,
+    frozen: Option<Frozen>,
     start: i64,
     started: bool,
     weight: f64,
@@ -335,7 +364,6 @@ pub struct Control {
     release_gap: i64,
     test: Option<StepTest>,
     since: BTreeMap<(String, String), i64>,
-    cpu_hot: Option<i64>,
     pump_low: Option<i64>,
     fan_stop: Option<i64>,
     alarms: Vec<Alarm>,
@@ -347,6 +375,10 @@ impl Control {
     const RELEASE_GAP_MAX_MS: i64 = 60_000;
     const BOOT_RETRY_MS: i64 = 5000;
     const FOREIGN_RECHECK_MS: i64 = 60_000;
+    const WATER_MIN: f64 = 5.0;
+    const WATER_MAX: f64 = 80.0;
+    const FROZEN_MS: i64 = 600_000;
+    const FROZEN_CPU_SPAN_K: f64 = 5.0;
 
     pub fn new(cfg: &Config, act: Box<dyn Actuator>, model: Result<Box<dyn Model>, String>) -> Control {
         let cc = match cfg.control.validate() {
@@ -363,7 +395,7 @@ impl Control {
         let chans = vec![Chan::new(ControlKind::Fan, &cc.fan), Chan::new(ControlKind::Pump, &cc.pump)];
         let store = Ownership::new(cfg.state_dir());
         let owned = store.read();
-        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: None, start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), cpu_hot: None, pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0 }
+        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0 }
     }
 
     fn ix(&self, id: &str) -> Result<usize, String> {
@@ -383,7 +415,8 @@ impl Control {
     }
     fn plan_temps(&self, now: i64) -> Temps {
         let t = self.temps(now);
-        Temps { cpu: t.cpu.map(|c| self.cpu_avg.filter(|(at, _)| now - at <= self.stale_ms()).map_or(c, |a| a.1)), ..t }
+        let ms = self.stale_ms();
+        Temps { cpu: t.cpu.map(|c| self.cpu_avg.get(now, ms).unwrap_or(c)), gpu: t.gpu.map(|g| self.gpu_avg.get(now, ms).unwrap_or(g)), ..t }
     }
     fn watched(&self) -> Vec<String> {
         let mut w = vec![self.cfg.water_channel.clone(), self.cfg.cpu_channel.clone(), self.cfg.gpu_channel.clone()];
@@ -423,9 +456,6 @@ impl Control {
         }
         if t.water.is_some_and(|w| w >= self.cfg.water_limit) {
             return Some((format!("Wasser {:.1} °C am Limit {:.0} °C", t.water.unwrap(), self.cfg.water_limit), true));
-        }
-        if self.cpu_hot.is_some_and(|s| now - s >= (self.cfg.cpu_hold_secs * 1000.0) as i64) {
-            return Some((format!("CPU seit {:.0} s über {:.0} °C", self.cfg.cpu_hold_secs, self.cfg.cpu_limit), true));
         }
         None
     }
@@ -485,24 +515,43 @@ impl Control {
         self.booted = true;
     }
 
+    fn plausible(&self, ch: &str, v: f64) -> bool {
+        v.is_finite() && (ch != self.cfg.water_channel || (Self::WATER_MIN..=Self::WATER_MAX).contains(&v))
+    }
+
+    fn track_frozen(&mut self, map: &HashMap<String, f64>, now: i64) {
+        let Some(w) = map.get(&self.cfg.water_channel).copied() else { return };
+        let cpu = map.get(&self.cfg.cpu_channel).copied();
+        match self.frozen.as_mut().filter(|f| f.water == w) {
+            Some(f) => {
+                if let Some(c) = cpu {
+                    f.cpu_lo = f.cpu_lo.min(c);
+                    f.cpu_hi = f.cpu_hi.max(c);
+                }
+            }
+            None => self.frozen = Some(Frozen { since: now, water: w, cpu_lo: cpu.unwrap_or(f64::MAX), cpu_hi: cpu.unwrap_or(f64::MIN) }),
+        }
+    }
+
     fn absorb(&mut self, rows: &[Row], now: i64, epoch: i64) {
-        let map: HashMap<String, f64> = rows.iter().map(|r| (r.channel.clone(), r.value)).collect();
+        let map: HashMap<String, f64> = rows.iter().filter(|r| self.plausible(&r.channel, r.value)).map(|r| (r.channel.clone(), r.value)).collect();
         for w in self.watched() {
-            if let Some(v) = map.get(&w).filter(|v| v.is_finite()) {
+            if let Some(v) = map.get(&w) {
                 self.last.insert(w, (now, *v));
             }
         }
-        if let Some(v) = map.get(&self.cfg.cpu_channel).filter(|v| v.is_finite()) {
-            let tau = (self.cfg.cpu_smooth_secs * 1000.0).max(1.0);
-            self.cpu_avg = Some((now, match self.cpu_avg.filter(|(t, _)| now - t <= self.stale_ms()) {
-                Some((t, a)) => a + (v - a) * (1.0 - (-((now - t) as f64) / tau).exp()),
-                None => *v,
-            }));
+        self.track_frozen(&map, now);
+        let (tau, ms) = ((self.cfg.cpu_smooth_secs * 1000.0).max(1.0), self.stale_ms());
+        if let Some(v) = map.get(&self.cfg.cpu_channel) {
+            self.cpu_avg.push(now, *v, tau, ms);
+        }
+        if let Some(v) = map.get(&self.cfg.gpu_channel) {
+            self.gpu_avg.push(now, *v, tau, ms);
         }
         for c in &self.chans {
             for s in ["power", "current"] {
                 let ch = format!("d5next/{}/{s}", c.spec.name);
-                if let Some(v) = map.get(&ch).filter(|v| v.is_finite()) {
+                if let Some(v) = map.get(&ch) {
                     self.last.insert(ch, (now, *v));
                 }
             }
@@ -526,9 +575,17 @@ impl Control {
         if let Some(w) = t.water.filter(|w| *w >= cfg.water_limit) {
             self.raise(&mut out, AlarmKind::WaterHigh, &cfg.water_channel, format!("Wasser {w:.1} °C über {:.0} °C", cfg.water_limit), Some(w), Some(cfg.water_limit), now);
         }
-        self.cpu_hot = if t.cpu.is_some_and(|c| c >= cfg.cpu_limit) { self.cpu_hot.or(Some(now)) } else { None };
-        if hold(self.cpu_hot, cfg.cpu_hold_secs) {
-            self.raise(&mut out, AlarmKind::CpuHigh, &cfg.cpu_channel, format!("CPU seit {:.0} s über {:.0} °C", cfg.cpu_hold_secs, cfg.cpu_limit), t.cpu, Some(cfg.cpu_limit), now);
+        if let Some(w) = t.water.filter(|w| *w >= cfg.water_top_limit) {
+            self.raise(&mut out, AlarmKind::WaterTop, &cfg.water_channel, format!("Wasser {w:.1} °C über der Obergrenze {:.0} °C", cfg.water_top_limit), Some(w), Some(cfg.water_top_limit), now);
+        }
+        let ms = self.stale_ms();
+        for (avg, kind, ch, name, limit) in [(self.cpu_avg.get(now, ms), AlarmKind::CpuHigh, &cfg.cpu_channel, "CPU", cfg.cpu_plan_limit), (self.gpu_avg.get(now, ms), AlarmKind::GpuHigh, &cfg.gpu_channel, "GPU", cfg.gpu_plan_limit)] {
+            if let Some(v) = avg.filter(|v| *v >= limit) {
+                self.raise(&mut out, kind, ch, format!("{name} im Mittel {v:.0} °C über {limit:.0} °C (nur Anzeige)"), Some(v), Some(limit), now);
+            }
+        }
+        if let Some((w, since)) = self.frozen.as_ref().filter(|f| now - f.since >= Self::FROZEN_MS && f.cpu_hi - f.cpu_lo >= Self::FROZEN_CPU_SPAN_K).map(|f| (f.water, f.since)) {
+            self.raise(&mut out, AlarmKind::WaterFrozen, &cfg.water_channel, format!("Wasserwert {w:.2} °C seit {} min unverändert trotz wechselnder Last (nur Anzeige)", (now - since) / 60_000), Some(w), None, now);
         }
         let pump = &self.chans[1];
         let (pch, plimit) = (pump.rpm_channel(), pump.cfg.alarm_rpm);
@@ -1074,9 +1131,8 @@ impl Control {
         });
         let step = self.test.as_ref().map(|t| StepStatus { id: format!("d5.{}", self.chans[t.chan].spec.name), phase: t.idx as u32 + 1, phases: t.steps.len() as u32, duty: self.step_duty(t), left_s: ((t.steps[t.idx][1] * 1000.0 - (now - t.since) as f64) / 1000.0).max(0.0) as u32 });
         let limits = vec![
-            Limit { channel: self.cfg.water_channel.clone(), low: None, high: Some(self.cfg.water_limit) },
-            Limit { channel: self.cfg.cpu_channel.clone(), low: None, high: Some(self.cfg.cpu_limit) },
-            Limit { channel: self.chans[1].rpm_channel(), low: Some(self.chans[1].cfg.alarm_rpm), high: None },
+            Limit { channel: self.cfg.water_channel.clone(), low: None, high: Some(self.cfg.water_limit), plan: Some(self.cfg.water_plan_limit), top: Some(self.cfg.water_top_limit) },
+            Limit { channel: self.chans[1].rpm_channel(), low: Some(self.chans[1].cfg.alarm_rpm), high: None, plan: None, top: None },
         ];
         Status { controls, alarms: self.alarms.clone(), limits, model, predicted, step, weight: self.weight }
     }

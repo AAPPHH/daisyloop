@@ -49,6 +49,9 @@ pub enum Drive {
 pub enum AlarmKind {
     WaterHigh,
     CpuHigh,
+    GpuHigh,
+    WaterTop,
+    WaterFrozen,
     PumpLow,
     FanStopped,
     Stale,
@@ -100,6 +103,10 @@ pub struct Limit {
     pub channel: String,
     pub low: Option<f64>,
     pub high: Option<f64>,
+    #[serde(default)]
+    pub plan: Option<f64>,
+    #[serde(default)]
+    pub top: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

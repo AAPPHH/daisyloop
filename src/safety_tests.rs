@@ -138,7 +138,7 @@ fn b3_foreign_mode_on_one_channel_does_not_block_the_release_of_the_other() {
     rig.active("d5.pump");
     rig.run(40);
     rig.sim.set_raw(|r| r[Spec::PUMP.mode()] = 2);
-    rig.water = 40.0;
+    rig.water = 48.5;
     rig.run(5);
     rig.water = 30.0;
     rig.run(120);
@@ -216,7 +216,7 @@ fn m3_water_limit_fallback_names_the_firmware_setpoints_without_extra_writes() {
     rig.active("d5.fan");
     rig.run(40);
     let sets = rig.sim.sets();
-    rig.water = 40.5;
+    rig.water = 48.5;
     rig.run(3);
     assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.sets()), (1, sets + 1));
     let f = rig.ctl("d5.fan").fallback.unwrap();
@@ -272,7 +272,7 @@ fn a_device_that_ignores_sets_is_retried_with_backoff() {
     rig.run(40);
     let sets = rig.sim.sets();
     rig.sim.0.borrow_mut().ignore_sets = true;
-    rig.water = 40.0;
+    rig.water = 48.5;
     rig.run(3600);
     assert!(rig.sim.sets() - sets <= 80, "{}", rig.sim.sets() - sets);
     rig.sim.0.borrow_mut().ignore_sets = false;
@@ -289,7 +289,7 @@ fn shadow_target_is_the_plan_not_the_rate_limited_step() {
 }
 
 fn knife(fan: f64, _pump: f64, _r: u32) -> f64 {
-    7.9 - 0.0005 * (fan - 441.0)
+    15.9 - 0.0005 * (fan - 441.0)
 }
 
 fn axes<'a>(fc: &'a ChannelConfig, pc: &'a ChannelConfig, fcal: &'a Calibration, pcal: &'a Calibration) -> (Axis<'a>, Axis<'a>) {
