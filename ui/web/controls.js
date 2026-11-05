@@ -150,7 +150,8 @@ class Row {
   render(c) {
     const stale = isStale(c.rpm_channel);
     const ch = channel(c.rpm_channel);
-    this.rpmT.set(ch?.value ?? null);
+    this.rpmT.set(ch?.value ?? null, this.kind === 'fan' ? 'steht' : undefined);
+    this.el.classList.toggle('still', this.kind === 'fan' && ch?.value != null && ch.value < 1 && !stale);
     const dch = channel(c.duty_channel);
     this.duty.textContent = num(dch?.value ?? null, 0);
     this.el.classList.toggle('stale', stale || isStale(c.duty_channel));
@@ -174,7 +175,7 @@ class Row {
     this.tgtDot.classList.toggle('shadow', shadow);
     if (c.target_rpm != null) this.tgtDot.style.left = pos(c.target_rpm);
     this.fill.style.width = pos(c.target_rpm ?? 0);
-    this.scale.children[0].textContent = `Boden ${num(c.min_rpm, 0)} (${num(c.floor_duty, 0)} % Duty)`;
+    this.scale.children[0].textContent = c.min_rpm <= 0 && c.floor_duty <= 0 ? (c.start_duty > 0 ? `darf stehen, läuft ab ${num(c.start_duty, 0)} % Duty` : 'darf stehen') : `Boden ${num(c.min_rpm, 0)} (${num(c.floor_duty, 0)} % Duty)`;
     this.scale.children[1].textContent = `${num(max, 0)} U/min`;
     this.paint();
   }

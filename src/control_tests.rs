@@ -221,7 +221,7 @@ fn channel_config_defaults_are_per_channel_and_invalid_values_are_rejected() {
     let cfg: ControlConfig = toml::from_str("[fan]\nfloor_duty = 35.0\n").unwrap();
     assert_eq!(ChannelConfig::resolve(ControlKind::Fan, &cfg.fan).unwrap().floor_duty, 35.0);
     let pump = ChannelConfig::resolve(ControlKind::Pump, &cfg.pump).unwrap();
-    assert_eq!((pump.floor_duty, pump.alarm_rpm), (40.0, 1800.0));
+    assert_eq!((pump.floor_duty, pump.alarm_rpm), (15.0, 1800.0));
     assert!(cfg.validate().is_ok() && ControlConfig::default().validate().is_ok());
     for bad in ["[fan]\nfloor_duty = 90.0\nmax_duty = 50.0", "[pump]\nstep_down_rpm = -1.0", "[fan]\ncurve = [[0.0, 5.0]]", "decision_secs = 1.0", "weight = 2.0", "[step_test]\nfan = [[100.0, 5.0]]", "[step_test]\npump = [[10.0, 60.0]]"] {
         let c: ControlConfig = toml::from_str(bad).unwrap();
@@ -235,7 +235,7 @@ fn invalid_config_falls_back_to_defaults_instead_of_panicking() {
         c.control.fan.floor_duty = Some(80.0);
         c.control.fan.max_duty = Some(40.0);
     });
-    assert_eq!(rig.ctl("d5.fan").floor_duty, 30.0);
+    assert_eq!(rig.ctl("d5.fan").floor_duty, 0.0);
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn actuator_floors_are_independent_of_the_caller() {
     let s = sim.clone();
     let mut a = D5Actuator::new(Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>)), &cfg);
     a.apply(&[(ControlKind::Fan, Setting::Duty(1.0)), (ControlKind::Pump, Setting::Duty(5.0))]).unwrap();
-    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (3000, 4000));
+    assert_eq!((sim.preset(Spec::FAN), sim.preset(Spec::PUMP)), (100, 1500));
     assert_eq!(sim.sets(), 1);
     a.apply(&[(ControlKind::Fan, Setting::Duty(500.0))]).unwrap();
     assert_eq!(sim.preset(Spec::FAN), 10000);
@@ -355,19 +355,20 @@ fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
     assert!(!sets.is_empty());
     assert!(rig.ctl("d5.fan").drive == Drive::Duty && rig.ctl("d5.pump").drive == Drive::Firmware);
     for (_, r) in &sets {
-        assert!(be16(r, Spec::FAN.preset()) >= 3000 && r[Spec::FAN.mode()] == 0 && r[Spec::PUMP.mode()] == 1);
+        assert!((be16(r, Spec::FAN.preset()) == 0 || be16(r, Spec::FAN.preset()) >= 2000) && r[Spec::FAN.mode()] == 0 && r[Spec::PUMP.mode()] == 1);
         assert_eq!(&r[Spec::PUMP.base..Spec::PUMP.base + 0x55], &initial[Spec::PUMP.base..Spec::PUMP.base + 0x55]);
     }
     assert!(sets.windows(2).all(|w| w[1].0 - w[0].0 >= 30_000));
     let n = rig.sim.sets();
     rig.run(600);
     assert_eq!(rig.sim.sets(), n, "a steady plan must not rewrite the report");
-    assert!(rig.ctl("d5.fan").commanded_duty.unwrap() >= 30.0);
+    let cmd = rig.ctl("d5.fan").commanded_duty.unwrap();
+    assert!(cmd == 0.0 || cmd >= 20.0);
 }
 
 #[test]
 fn target_moves_down_slowly_and_up_fast() {
-    let mut rig = Rig::new((true, true), 12.0, |_| {});
+    let mut rig = Rig::new((true, true), 20.0, |_| {});
     rig.run(5);
     rig.active("d5.fan");
     rig.run(35);
@@ -390,8 +391,8 @@ fn infeasible_plan_takes_maximum() {
 
 #[test]
 fn weight_shifts_the_limits_toward_cooling() {
-    let mut cool = Rig::new((true, true), 7.5, |c| c.control.weight = 1.0);
-    let mut quiet = Rig::new((true, true), 7.5, |c| c.control.weight = 0.0);
+    let mut cool = Rig::new((true, true), 15.5, |c| c.control.weight = 1.0);
+    let mut quiet = Rig::new((true, true), 15.5, |c| c.control.weight = 0.0);
     cool.water = 30.0;
     quiet.water = 30.0;
     cool.run(35);
@@ -430,30 +431,57 @@ fn water_at_the_limit_releases_every_active_channel() {
     rig.active("d5.pump");
     rig.run(40);
     assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.mode(Spec::PUMP)), (0, 0));
-    rig.water = 40.0;
+    rig.water = 48.5;
     rig.run(2);
     assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.mode(Spec::PUMP)), (1, 1));
     assert!(rig.alarm(AlarmKind::WaterHigh));
 }
 
 #[test]
-fn cpu_must_stay_hot_for_sixty_seconds() {
+fn cpu_and_gpu_spikes_and_heat_never_release_the_fan_and_only_the_smoothed_value_alarms() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(5);
     rig.active("d5.fan");
     rig.run(40);
-    rig.cpu = 105.0;
-    rig.run(30);
+    let sets = rig.sim.sets();
+    rig.cpu = 120.0;
+    rig.gpu = Some(120.0);
+    rig.run(3);
     rig.cpu = 60.0;
-    rig.run(2);
+    rig.gpu = Some(60.0);
+    rig.run(30);
+    assert!(!rig.alarm(AlarmKind::CpuHigh) && !rig.alarm(AlarmKind::GpuHigh));
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    assert!(!rig.alarm(AlarmKind::CpuHigh));
-    rig.cpu = 105.0;
-    rig.run(58);
+    assert!(rig.c.plan_temps(rig.now).cpu.unwrap() < 61.0);
+    rig.cpu = 110.0;
+    rig.gpu = Some(110.0);
+    rig.run(300);
+    assert!(rig.alarm(AlarmKind::CpuHigh) && rig.alarm(AlarmKind::GpuHigh));
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    rig.run(4);
+    assert!(rig.ctl("d5.fan").fallback.is_none() && !rig.alarm(AlarmKind::Fallback) && !rig.alarm(AlarmKind::WaterHigh));
+    assert!(rig.sim.sets() >= sets);
+    assert!(rig.status().limits.iter().all(|l| l.channel == "d5next/water/temp" || l.channel == "d5next/pump/rpm"));
+}
+
+#[test]
+fn only_water_above_the_takeover_releases_and_the_top_limit_is_a_display_alarm() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    rig.water = 47.9;
+    rig.run(20);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    assert!(!rig.alarm(AlarmKind::WaterHigh) && !rig.alarm(AlarmKind::WaterTop));
+    rig.water = 48.0;
+    rig.run(3);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
-    assert!(rig.alarm(AlarmKind::CpuHigh));
+    assert!(rig.alarm(AlarmKind::WaterHigh) && !rig.alarm(AlarmKind::WaterTop));
+    rig.water = 50.2;
+    rig.run(2);
+    assert!(rig.alarm(AlarmKind::WaterTop));
+    let l = &rig.status().limits[0];
+    assert_eq!((l.plan, l.high, l.top), (Some(46.0), Some(48.0), Some(50.0)));
 }
 
 #[test]
@@ -607,7 +635,7 @@ fn step_test_is_refused_without_writes_and_aborted_by_faults_and_stop() {
     rig.c.start_test("d5.fan", true, rig.now).unwrap();
     rig.run(20);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    rig.water = 41.0;
+    rig.water = 49.0;
     rig.run(2);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
     assert!(rig.status().step.is_none());
@@ -644,3 +672,6 @@ mod safety;
 
 #[path = "replay_tests.rs"]
 mod replay;
+
+#[path = "fan_stop_tests.rs"]
+mod fan_stop;

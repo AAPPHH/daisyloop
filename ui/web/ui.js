@@ -67,7 +67,12 @@ export class Tween {
       this.el.textContent = t;
     }
   }
-  set(v) {
+  set(v, zero) {
+    if (zero != null && v != null && v < 1) {
+      this.cur = this.target = v;
+      tweens.delete(this);
+      return this.write(zero);
+    }
     if (v == null) {
       this.cur = this.target = null;
       tweens.delete(this);

@@ -197,7 +197,7 @@ impl Sim {
     }
 
     fn build_controls(&mut self) {
-        for (i, (name, label, kind, floor, min_rpm, max_rpm)) in [("fan", "Radiatorlüfter (D5 NEXT)", ControlKind::Fan, 30.0, 441.0, FAN_MAX_RPM), ("pump", "Pumpe (D5 NEXT)", ControlKind::Pump, 40.0, 3131.0, PUMP_RPM.1)].into_iter().enumerate() {
+        for (i, (name, label, kind, floor, min_rpm, max_rpm)) in [("fan", "Radiatorlüfter (D5 NEXT)", ControlKind::Fan, 0.0, 0.0, FAN_MAX_RPM), ("pump", "Pumpe (D5 NEXT)", ControlKind::Pump, 15.0, 2420.0, PUMP_RPM.1)].into_iter().enumerate() {
             let (rpm, duty) = (format!("d5next/{name}/rpm"), format!("d5next/{name}/duty"));
             let (ri, di) = (self.index[&rpm], self.index[&duty]);
             self.sensors[ri].role = Role::Rpm(i);
@@ -217,6 +217,7 @@ impl Sim {
                 duty: None,
                 commanded_duty: None,
                 floor_duty: floor,
+                start_duty: if i == 0 { 20.0 } else { 0.0 },
                 min_rpm,
                 max_rpm,
                 fallback: None,
@@ -229,7 +230,7 @@ impl Sim {
     }
 
     fn firmware_duty(&self, i: usize, water: f64) -> f64 {
-        if i == 0 { (25.0 + 9.0 * (water - 27.0)).clamp(30.0, 100.0) } else { (30.0 + 6.0 * (water - 28.0)).clamp(40.0, 100.0) }
+        if i == 0 { (25.0 + 9.0 * (water - 27.0)).clamp(30.0, 100.0) } else { (30.0 + 6.0 * (water - 28.0)).clamp(15.0, 100.0) }
     }
 
     fn rpm_of(i: usize, duty: f64) -> f64 {
@@ -294,7 +295,7 @@ impl Sim {
             }
         }
         let gain = 1.0 - (self.controls[0].target_rpm.unwrap_or(0.0) / FAN_MAX_RPM) * 0.8;
-        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), cpu: Some(self.live[self.index[CPU_TEMP]] + 1.0), gpu: Some(self.live[self.index[GPU_TEMP]] + 0.5), water_limit: 38.0, cpu_limit: 95.0, gpu_limit: 80.0, feasible: water + 1.6 * gain < 36.0, age_ms: (t % 30_000) };
+        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), cpu: Some(self.live[self.index[CPU_TEMP]] + 1.0), gpu: Some(self.live[self.index[GPU_TEMP]] + 0.5), water_limit: 43.5, cpu_limit: 102.5, gpu_limit: 102.5, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
     }
 
     fn tick(&mut self) {
@@ -351,8 +352,8 @@ impl Sim {
             .collect();
         let water = self.live[self.index[WATER]];
         let mut alarms = vec![];
-        if water >= 40.0 {
-            alarms.push(Alarm { kind: AlarmKind::WaterHigh, channel: WATER.into(), message: format!("Wasser {water:.1} °C über 40 °C"), value: Some(water), limit: Some(40.0), since_ms: self.last_tick });
+        if water >= 48.0 {
+            alarms.push(Alarm { kind: AlarmKind::WaterHigh, channel: WATER.into(), message: format!("Wasser {water:.1} °C über 48 °C"), value: Some(water), limit: Some(48.0), since_ms: self.last_tick });
         }
         for c in self.controls.iter().filter(|c| c.fallback.is_some()) {
             alarms.push(Alarm { kind: AlarmKind::Fallback, channel: c.rpm_channel.clone(), message: format!("Rückfall auf Firmware-PID: {}", c.fallback.clone().unwrap()), value: None, limit: None, since_ms: self.last_tick - 20_000 });
@@ -369,7 +370,7 @@ impl Sim {
             }),
             channels,
             controls: self.controls.clone(),
-            limits: vec![Limit { channel: WATER.into(), low: None, high: Some(40.0) }, Limit { channel: CPU_TEMP.into(), low: None, high: Some(104.0) }, Limit { channel: "d5next/pump/rpm".into(), low: Some(1800.0), high: None }],
+            limits: vec![Limit { channel: WATER.into(), low: None, high: Some(48.0), plan: Some(46.0), top: Some(50.0) }, Limit { channel: "d5next/pump/rpm".into(), low: Some(1800.0), high: None, plan: None, top: None }],
             alarms,
         }
     }

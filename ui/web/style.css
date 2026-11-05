@@ -68,9 +68,11 @@ body.alarm .alarm-edge { opacity: 1; }
   -webkit-mask: radial-gradient(circle, #000 0 98%, transparent 100%);
   box-shadow: 0 0 14px rgba(94, 234, 212, 0.35);
 }
-.top nav { display: flex; gap: 0.3rem; margin-left: 1rem; }
-.top nav a { padding: 0.3rem 0.8rem; border-radius: 99px; color: var(--dim); font-size: 0.9rem; transition: color 0.25s, background 0.25s; }
-.top nav a:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+.top nav.index { display: flex; gap: 1.6rem; margin-left: 1.5rem; }
+.top nav.index a { position: relative; padding: 0.35rem 0; color: var(--faint); font-size: 0.86rem; letter-spacing: 0.02em; transition: color 0.3s; }
+.top nav.index a::after { content: ''; position: absolute; left: 0; right: 100%; bottom: -0.2rem; height: 1px; background: var(--text); opacity: 0.6; transition: right 0.45s var(--ease); }
+.top nav.index a:hover, .top nav.index a.on { color: var(--text); }
+.top nav.index a.on::after { right: 0; }
 .status { margin-left: auto; display: flex; align-items: center; gap: 0.55rem; font-size: 0.88rem; color: var(--dim); }
 .status i { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 0 transparent; }
 .status.live i { background: #6ee7a0; box-shadow: 0 0 10px rgba(110, 231, 160, 0.7); }
@@ -79,7 +81,7 @@ body.alarm .alarm-edge { opacity: 1; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(110, 231, 160, 0.5); } 70%, 100% { box-shadow: 0 0 0 0.5rem rgba(110, 231, 160, 0); } }
 body.paused * { animation-play-state: paused !important; }
 
-main { position: relative; }
+main { position: relative; overflow-x: clip; }
 #hero {
   position: relative; min-height: 100vh; padding: 5rem clamp(1.5rem, 4vw, 5rem) 3rem;
   display: grid; grid-template-columns: minmax(0, 0.66fr) minmax(0, 1.7fr); align-items: center; gap: clamp(1.5rem, 3vw, 4rem);
@@ -165,7 +167,7 @@ main { position: relative; }
 .track .knob:hover, .track .knob.dragging { transform: translate(-50%, -50%) scale(1.18); cursor: grabbing; }
 .track .knob.sm { width: 0.95rem; height: 0.95rem; }
 .track .tag { position: absolute; bottom: 1.15rem; transform: translateX(-50%); font-size: 0.78rem; font-weight: 600; white-space: nowrap; pointer-events: none; }
-.track.out { background: var(--s3); }
+.track.out { background: var(--s4); }
 .track.out .fill { position: absolute; top: 0; bottom: 0; border-radius: 99px; background: linear-gradient(90deg, rgba(103, 212, 245, 0.35), rgba(103, 212, 245, 0.85)); }
 .track.out .floor { position: absolute; left: 0; top: -2px; bottom: -2px; border-radius: 99px 0 0 99px; background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.16) 0 2px, transparent 2px 6px); box-shadow: inset -2px 0 0 rgba(255, 255, 255, 0.5); }
 .track.out .live { position: absolute; top: 50%; width: 0.62rem; height: 0.62rem; border-radius: 50%; transform: translate(-50%, -50%); background: #fff; box-shadow: 0 0 12px #fff; pointer-events: none; z-index: 2; transition: left 0.9s var(--ease); }
@@ -344,3 +346,46 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
 .scale { display: flex; justify-content: space-between; margin: 0.2rem 0.55rem 0; font-size: 0.74rem; color: var(--faint); }
 .row.stale .v, .row.stale .nm { color: var(--stale); }
 .row.stale .v::after { content: ' ·'; color: var(--amber); }
+
+.lim-bar { max-width: 31rem; margin: 0 0 2rem; padding: 0 0.3rem 3.4rem; transition: opacity 0.4s; }
+.lim-bar[hidden] { display: none; }
+.lim-bar.off { opacity: 0.4; filter: grayscale(1); }
+.lb-track { position: relative; height: 0.3rem; border-radius: 99px; background: linear-gradient(90deg, rgba(76, 201, 240, 0.5) 0%, rgba(94, 234, 212, 0.55) calc(var(--plan, 70%) - 20%), rgba(251, 212, 94, 0.6) var(--plan, 70%), rgba(255, 154, 60, 0.7) calc(var(--plan, 70%) + 10%), rgba(255, 69, 58, 0.85) 100%); }
+.lb-now { position: absolute; top: 50%; width: 0.8rem; height: 0.8rem; border-radius: 50%; transform: translate(-50%, -50%); background: #fff; box-shadow: 0 0 0 3px rgba(7, 9, 12, 0.9), 0 0 14px rgba(255, 255, 255, 0.7); transition: left 0.9s var(--ease); }
+.lb-ticks span { position: absolute; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; margin-top: 0.7rem; }
+.lb-ticks { position: relative; }
+.lb-ticks span::before { content: ''; width: 1px; height: 0.45rem; background: var(--faint); margin-bottom: 0.25rem; margin-top: -0.7rem; }
+.lb-legend { position: absolute; left: 0; right: 0; margin-top: 2.1rem; font-size: 0.74rem; color: var(--faint); letter-spacing: 0.03em; }
+.lim-bar { position: relative; }
+.lb-ticks b { font-size: 0.82rem; font-weight: 560; }
+.lb-ticks em { font-style: normal; font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); white-space: nowrap; }
+.node.still .big { color: var(--dim); font-weight: 400; font-size: 1.5rem; letter-spacing: 0.02em; }
+.node.still .big small { display: none; }
+.ch.still .rpm { color: var(--dim); font-weight: 300; font-size: 2.1rem; }
+.ch.still .rpm + small { display: none; }
+.alarm-bar .al.cpu_high, .alarm-bar .al.gpu_high, .alarm-bar .al.water_frozen { color: var(--amber); background: rgba(38, 28, 8, 0.96); }
+@media (max-width: 760px) {
+  html { font-size: 15px; }
+  .top { gap: 0.8rem; padding: 0 1rem; }
+  .top nav.index { gap: 0.9rem; margin-left: 0.4rem; }
+  .brand span:last-child { display: none; }
+  .status span { display: none; }
+  #hero { padding: 4.5rem 1rem 2rem; }
+  .stage { aspect-ratio: auto; max-height: none; display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+  .stage canvas { position: relative; grid-column: 1 / -1; aspect-ratio: 1.3; height: auto; }
+  .node { position: static; transform: none; }
+  .chip-node { min-width: 0; padding: 0.6rem 0.8rem; }
+  .node.plain { padding: 0.5rem 0.2rem 0; }
+  .node .big { font-size: 1.6rem; }
+  .node.plain .big { font-size: 1.4rem; }
+  .cue { display: none; }
+  .block { padding: 3.5rem 1rem 0.5rem; }
+  .weight { margin-left: 0; }
+  .weight input { width: 9rem; }
+  .ch { padding: 1.1rem; }
+  .ctl { grid-template-columns: 1fr; gap: 0.3rem; }
+  .ctl .k { margin-top: 0.6rem; }
+  .row { grid-template-columns: minmax(6rem, 1fr) 5.5rem 2rem; }
+  .row .spark, .row.head .spark, .row .lim, .row.head .lim { display: none; }
+  .water #water-v { font-size: clamp(5rem, 28vw, 8rem); }
+}
