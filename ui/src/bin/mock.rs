@@ -197,7 +197,7 @@ impl Sim {
     }
 
     fn build_controls(&mut self) {
-        for (i, (name, label, kind, floor, min_rpm, max_rpm)) in [("fan", "Radiatorlüfter (D5 NEXT)", ControlKind::Fan, 30.0, 441.0, FAN_MAX_RPM), ("pump", "Pumpe (D5 NEXT)", ControlKind::Pump, 40.0, 3131.0, PUMP_RPM.1)].into_iter().enumerate() {
+        for (i, (name, label, kind, floor, min_rpm, max_rpm)) in [("fan", "Radiatorlüfter (D5 NEXT)", ControlKind::Fan, 0.0, 0.0, FAN_MAX_RPM), ("pump", "Pumpe (D5 NEXT)", ControlKind::Pump, 40.0, 3131.0, PUMP_RPM.1)].into_iter().enumerate() {
             let (rpm, duty) = (format!("d5next/{name}/rpm"), format!("d5next/{name}/duty"));
             let (ri, di) = (self.index[&rpm], self.index[&duty]);
             self.sensors[ri].role = Role::Rpm(i);
@@ -217,6 +217,7 @@ impl Sim {
                 duty: None,
                 commanded_duty: None,
                 floor_duty: floor,
+                start_duty: if i == 0 { 20.0 } else { 0.0 },
                 min_rpm,
                 max_rpm,
                 fallback: None,

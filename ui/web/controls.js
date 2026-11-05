@@ -174,7 +174,7 @@ class Row {
     this.tgtDot.classList.toggle('shadow', shadow);
     if (c.target_rpm != null) this.tgtDot.style.left = pos(c.target_rpm);
     this.fill.style.width = pos(c.target_rpm ?? 0);
-    this.scale.children[0].textContent = `Boden ${num(c.min_rpm, 0)} (${num(c.floor_duty, 0)} % Duty)`;
+    this.scale.children[0].textContent = c.min_rpm <= 0 && c.floor_duty <= 0 ? (c.start_duty > 0 ? `darf stehen, läuft ab ${num(c.start_duty, 0)} % Duty` : 'darf stehen') : `Boden ${num(c.min_rpm, 0)} (${num(c.floor_duty, 0)} % Duty)`;
     this.scale.children[1].textContent = `${num(max, 0)} U/min`;
     this.paint();
   }
