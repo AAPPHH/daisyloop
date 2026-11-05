@@ -4,6 +4,7 @@ import { Hero } from './hero.js';
 import { updateControls, initControls, toast } from './controls.js';
 import { History } from './history.js';
 import { Sensors } from './sensors.js';
+import { Gaming } from './gaming.js';
 
 const tauri = window.__TAURI__ ?? (await import('./dev/bridge.js')).default;
 S.tauri = tauri;
@@ -11,6 +12,9 @@ S.tauri = tauri;
 const hero = new Hero();
 const history = new History();
 const sensors = new Sensors(history);
+const gaming = new Gaming();
+let page = 'hero';
+let alarmSig = '';
 let raf = 0;
 let last = 0;
 let heroDt = 0;
@@ -32,7 +36,7 @@ function frame(t) {
 }
 
 motion.kick = () => {
-  if (!raf && S.visible) {
+  if (!raf && S.visible && page !== 'history') {
     last = performance.now();
     raf = requestAnimationFrame(frame);
   }
@@ -47,7 +51,7 @@ function setLive(live) {
   const a = age();
   st.lastElementChild.textContent = live ? 'Live' : S.snap ? `Daemon nicht erreichbar · letzte Werte vor ${ageText(a)}` : 'Warte auf Daemon …';
   if (was !== live) {
-    hero.update(live);
+    if (page === 'hero') hero.update(live);
     motion.kick();
   }
 }
@@ -55,6 +59,9 @@ function setLive(live) {
 function alarmBar() {
   const bar = $('#alarm-bar');
   const alarms = S.snap?.alarms ?? [];
+  const sig = alarms.map((a) => a.kind + a.channel + a.message).join('|');
+  if (sig === alarmSig) return;
+  alarmSig = sig;
   bar.hidden = !alarms.length;
   bar.replaceChildren(...alarms.map((a) => h('div', { class: 'al ' + a.kind }, h('b', {}, a.message), h('span', {}, ageText((Date.now() - a.since_ms) / 1000)))));
 }
@@ -62,12 +69,18 @@ function alarmBar() {
 function render() {
   if (!S.visible) return;
   setLive(true);
-  hero.update(true);
+  gaming.ingest();
   alarmBar();
-  updateControls();
-  sensors.render();
-  history.chips();
-  history.fetch();
+  paintPage();
+}
+
+function paintPage() {
+  if (page === 'hero') hero.update(true);
+  else if (page === 'history') {
+    gaming.paint();
+    if (history.open) history.fetch();
+  } else if (page === 'controls') updateControls();
+  else if (page === 'sensors') sensors.render();
   motion.kick();
 }
 
@@ -100,7 +113,18 @@ initControls();
 
 const links = [...document.querySelectorAll('.index a')];
 const spy = new IntersectionObserver((entries) => {
-  for (const e of entries) if (e.isIntersecting) links.forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id));
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    links.forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id));
+    if (page === e.target.id) continue;
+    page = e.target.id;
+    hero.inView = page === 'hero';
+    if (S.snap && S.visible) {
+      if (page === 'history') gaming.paint();
+      else if (page === 'sensors') sensors.render();
+      paintPage();
+    }
+  }
 }, { rootMargin: '-45% 0px -50% 0px' });
 links.forEach((a) => spy.observe(document.querySelector(a.getAttribute('href'))));
 
@@ -114,6 +138,5 @@ setInterval(() => {
 const first = await tauri.core.invoke('last_snapshot');
 if (first) {
   ingest(first);
-  history.chips();
   render();
 } else setLive(false);

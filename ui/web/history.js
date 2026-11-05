@@ -168,6 +168,11 @@ export class History {
     this.window = { t0: 0, t1: 1 };
     this.hoverT = null;
     this.raf = 0;
+    this.open = false;
+    $('#gm-lanes').addEventListener('click', () => this.show(!this.open));
+    $('#lanes-close').addEventListener('click', () => this.show(false));
+    addEventListener('keydown', (e) => e.key === 'Escape' && this.open && this.show(false));
+    this.count();
     $$('#range button').forEach((b) =>
       b.addEventListener('click', () => {
         if (S.range === b.dataset.r) return;
@@ -178,6 +183,21 @@ export class History {
     );
     addEventListener('resize', () => this.thumb());
     this.thumb();
+  }
+
+  show(on) {
+    this.open = on;
+    $('#lane-panel').hidden = !on;
+    $('#gm-lanes').classList.toggle('on', on);
+    $('#gm-lanes').setAttribute('aria-expanded', on);
+    if (!on) return;
+    this.chips();
+    this.thumb();
+    this.fetch(true);
+  }
+
+  count() {
+    $('#gm-count').textContent = S.selected.length || '';
   }
 
   thumb() {
@@ -196,11 +216,13 @@ export class History {
       S.hidden.delete(id);
       this.data.delete(id);
     } else S.selected.push(id);
+    this.count();
     this.chips();
     this.fetch(true);
   }
 
   chips() {
+    if (!this.open) return;
     const host = $('#chips');
     host.replaceChildren();
     for (const id of S.selected) {
@@ -217,7 +239,7 @@ export class History {
   }
 
   fetch(force = false) {
-    if (!S.live || !S.snap) return;
+    if (!this.open || !S.live || !S.snap) return;
     const key = S.range + '|' + S.selected.join();
     if (!force && key === this.key && performance.now() - this.lastFetch < REFRESH[S.range]) return;
     if (key !== this.key) $('#lanes').classList.add('loading');

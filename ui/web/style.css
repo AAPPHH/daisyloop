@@ -386,3 +386,51 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
   .row .spark, .row.head .spark, .row .lim, .row.head .lim { display: none; }
   .water #water-v { font-size: clamp(5rem, 28vw, 8rem); }
 }
+
+#history { position: relative; height: 100vh; padding: 3.1rem clamp(1rem, 2vw, 3rem) 0; display: flex; flex-direction: column; gap: 0.7em; font-size: clamp(11px, min(1.85vh, 1.45vw), 30px); overflow: hidden; }
+.gm-head { display: flex; align-items: center; justify-content: space-between; gap: 1em; padding-top: 0.8em; }
+.gm-head h2 { font-size: 1.5em; font-weight: 600; letter-spacing: -0.02em; }
+.gm-actions { display: flex; gap: 0.6em; }
+.gm-actions button.ghost { font-size: 0.8em; padding: 0.35em 1em; }
+.gm-actions button.on { color: var(--bg); background: var(--accent); }
+#gm-count:empty { display: none; }
+.gm-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.7em; flex: none; }
+.tile { position: relative; display: flex; flex-direction: column; padding: 0.7em 1em 0.6em; border-radius: 1em; background: linear-gradient(180deg, var(--s2), var(--s1)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); min-width: 0; overflow: hidden; }
+.tile .nm { font-size: 0.8em; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+.tile .v { display: flex; align-items: baseline; gap: 0.3em; line-height: 1.05; margin: 0.1em 0; }
+.tile .v b { font-size: 2.9em; font-weight: 300; letter-spacing: -0.03em; color: var(--text); }
+.tile .v small { font-size: 0.9em; }
+.tile .tmm { display: flex; gap: 1em; font-size: 0.78em; color: var(--faint); }
+.tile .spark { position: absolute; right: 0.8em; bottom: 0.6em; width: 38%; height: 1.5em; overflow: visible; }
+.spark path { fill: none; stroke: var(--accent); stroke-width: 1.4; stroke-linejoin: round; opacity: 0.85; }
+.gm-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7em; flex: 1; min-height: 0; padding-bottom: 1em; }
+.gm-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0.7em 1em 0.6em; border-radius: 1em; background: linear-gradient(180deg, var(--s2), var(--s1)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+.gm-card > header, .gm-row { display: grid; grid-template-columns: minmax(0, 1fr) 5.6em 3.4em 3.4em 5.5em; gap: 0.6em; align-items: center; }
+.gm-card > header { flex: none; color: var(--faint); padding-bottom: 0.4em; }
+.gm-card > header span { font-size: 0.72em; letter-spacing: 0.09em; text-transform: uppercase; }
+.gm-card > header h3 { font-size: 1.1em; letter-spacing: 0.02em; color: var(--text); font-weight: 600; }
+.gm-card > header span:nth-child(2) { text-align: right; }
+.gm-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.gm-row { flex: 1 1 0; max-height: 3em; min-height: 0; border-top: 1px solid var(--line); }
+.gm-row .nm { font-size: 0.92em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gm-row .v { text-align: right; white-space: nowrap; }
+.gm-row .v b { font-size: 1.6em; font-weight: 560; letter-spacing: -0.02em; }
+.gm-row .v small { margin-left: 0.25em; font-size: 0.7em; }
+.gm-row .mm, .gm-card > header .mm { text-align: right; color: var(--faint); font-size: 0.8em; }
+.gm-row .spark { width: 100%; height: 1.4em; overflow: visible; }
+.tile.over .v b, .gm-row.over .v b { text-shadow: 0 0 0.5em currentColor; }
+.tile.stale .v b, .gm-row.stale .v b, .tile.stale .nm, .gm-row.stale .nm { color: var(--stale) !important; }
+body.stale .tile .v b, body.stale .gm-row .v b { color: var(--stale) !important; }
+.lane-panel { position: absolute; z-index: 5; left: 0; right: 0; top: 3.1rem; bottom: 0; padding: 1em clamp(1rem, 2vw, 3rem) 1em; background: var(--bg); overflow: auto; font-size: 1rem; }
+.lane-panel[hidden] { display: none; }
+.lane-panel .lane { height: 11rem; }
+@media (max-width: 1500px) {
+  .gm-cols { grid-template-columns: 1fr 1fr; grid-template-rows: minmax(0, 9fr) minmax(0, 12fr); }
+  #history { font-size: clamp(11px, min(1.85vh, 1.7vw), 30px); }
+  .gm-card:first-child { grid-row: 1; grid-column: 1; }
+  .gm-card:nth-child(2) { grid-row: 1 / 3; grid-column: 2; }
+  .gm-card:nth-child(3) { grid-row: 2; grid-column: 1; }
+  .gm-card > header, .gm-row { grid-template-columns: minmax(0, 1fr) 5.6em 3.4em 3.4em; }
+  .gm-row .spark, .gm-card > header > span:last-child { display: none; }
+  .tile .spark { display: none; }
+}

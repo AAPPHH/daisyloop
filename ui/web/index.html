@@ -13,8 +13,8 @@
   <div class="brand"><span class="mark"></span><span>daisyloop</span></div>
   <nav class="index" aria-label="Abschnitte">
     <a href="#hero" class="on">Übersicht</a>
-    <a href="#controls">Regelung</a>
     <a href="#history">Verlauf</a>
+    <a href="#controls">Regelung</a>
     <a href="#sensors">Sensoren</a>
   </nav>
   <div id="status" class="status"><i></i><span>Verbinde …</span></div>
@@ -68,7 +68,27 @@
         <span class="age" id="fan-age"></span>
       </div>
     </div>
-    <a class="cue" href="#controls" aria-label="Weiter"><span></span></a>
+    <a class="cue" href="#history" aria-label="Weiter"><span></span></a>
+  </section>
+  <section id="history">
+    <div class="gm-head">
+      <h2>Verlauf</h2>
+      <div class="gm-actions">
+        <button id="gm-reset" class="ghost" title="Min und Max dieser Spielsitzung zurücksetzen">Min/Max zurücksetzen</button>
+        <button id="gm-lanes" class="ghost" aria-expanded="false">Diagramme <b id="gm-count"></b></button>
+      </div>
+    </div>
+    <div id="gm-strip" class="gm-strip"></div>
+    <div id="gm-cols" class="gm-cols"></div>
+    <div id="lane-panel" class="lane-panel" hidden>
+      <div class="block-head">
+        <h2>Diagramme</h2>
+        <div class="seg" id="range"><i></i><button data-r="1h">1 h</button><button data-r="1d">1 d</button><button data-r="1w">1 w</button></div>
+        <button id="lanes-close" class="ghost">Schließen</button>
+      </div>
+      <div id="chips" class="chips"></div>
+      <div id="lanes" class="lanes"></div>
+    </div>
   </section>
   <section id="controls" class="block">
     <div class="block-head">
@@ -78,14 +98,6 @@
     </div>
     <div id="model-line" class="model-line"></div>
     <div id="ctl-list"></div>
-  </section>
-  <section id="history" class="block">
-    <div class="block-head">
-      <h2>Verlauf</h2>
-      <div class="seg" id="range"><i></i><button data-r="1h">1 h</button><button data-r="1d">1 d</button><button data-r="1w">1 w</button></div>
-    </div>
-    <div id="chips" class="chips"></div>
-    <div id="lanes" class="lanes"></div>
   </section>
   <section id="sensors" class="block">
     <div class="block-head">
