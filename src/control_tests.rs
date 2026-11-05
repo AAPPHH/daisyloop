@@ -409,7 +409,7 @@ fn stale_sensor_falls_back_to_the_firmware_pid_and_latches() {
     rig.active("d5.fan");
     rig.run(60);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    rig.gpu = None;
+    rig.water = f64::NAN;
     rig.run(9);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
     rig.run(4);
@@ -417,7 +417,7 @@ fn stale_sensor_falls_back_to_the_firmware_pid_and_latches() {
     let c = rig.ctl("d5.fan");
     assert!(c.mode == Mode::Shadow && c.drive == Drive::Firmware && c.fallback.as_deref().unwrap().contains("veraltet"));
     assert!(rig.alarm(AlarmKind::Stale) && rig.alarm(AlarmKind::Fallback));
-    rig.gpu = Some(40.0);
+    rig.water = 30.0;
     rig.run(120);
     assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
@@ -518,7 +518,7 @@ fn failed_release_is_retried_with_a_reopened_handle() {
     rig.run(40);
     let opens = rig.sim.0.borrow().opens;
     rig.sim.0.borrow_mut().fail_sets = 2;
-    rig.gpu = None;
+    rig.water = f64::NAN;
     rig.run(12);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
     assert!(rig.ctl("d5.fan").note.unwrap().contains("Rückfall fehlgeschlagen"));
@@ -675,3 +675,6 @@ mod replay;
 
 #[path = "fan_stop_tests.rs"]
 mod fan_stop;
+
+#[path = "bound_tests.rs"]
+mod bound;

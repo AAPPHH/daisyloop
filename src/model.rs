@@ -208,7 +208,7 @@ pub struct Planner<'a> {
 impl Planner<'_> {
     pub fn limits(cfg: &ControlConfig, weight: f64) -> [f64; 3] {
         let shift = weight.clamp(0.0, 1.0) * cfg.weight_span_k;
-        [cfg.water_plan_limit - shift, cfg.cpu_plan_limit - shift, cfg.gpu_plan_limit - shift]
+        [cfg.water_plan_limit - shift, cfg.cpu_plan_limit, cfg.gpu_plan_limit]
     }
 
     fn noise(&self, fan: &Axis, pump: &Axis, f: f64, p: f64) -> f64 {

@@ -118,16 +118,21 @@ fn b2_missing_samples_keep_the_model_warm_and_only_gaps_over_ten_seconds_reset_i
 }
 
 #[test]
-fn b2_active_channel_that_is_not_warm_falls_back_to_the_firmware_pid() {
+fn b2_active_channel_that_is_not_warm_holds_its_command_and_the_bound_keeps_acting() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(5);
     rig.active("d5.fan");
     rig.run(40);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
+    let held = rig.ctl("d5.fan").commanded_duty;
     rig.warm.set(1);
-    rig.run(3);
-    assert_eq!(rig.sim.mode(Spec::FAN), 1);
-    assert!(rig.alarm(AlarmKind::Fallback) && rig.ctl("d5.fan").fallback.unwrap().contains("nicht warm"));
+    rig.run(100);
+    let c = rig.ctl("d5.fan");
+    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && c.commanded_duty == held && c.note.unwrap().contains("wärmt"));
+    assert!(rig.c.set_mode("d5.pump", Mode::Active, true, rig.now).unwrap_err().contains("wärmt"));
+    rig.water = 42.0;
+    rig.run(10);
+    assert_eq!(rig.ctl("d5.fan").commanded_duty, Some(100.0));
 }
 
 #[test]

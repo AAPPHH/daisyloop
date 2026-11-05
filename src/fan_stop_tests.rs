@@ -72,8 +72,9 @@ fn z4_a_restart_leaves_zero_at_the_start_duty_without_waiting_for_the_rate_limit
     rig.water = 35.5;
     rig.run(2);
     assert_eq!(rig.sim.duty_sets().len(), n + 1, "restart does not wait for the decision interval");
-    assert_eq!(rig.ctl("d5.fan").commanded_duty, Some(20.0));
-    assert_eq!(rig.sim.preset(Spec::FAN), 2000);
+    let want = rig.c.bound_duty(0, rig.now).unwrap();
+    assert!(want > 25.0 && want < 26.0);
+    assert_eq!(rig.ctl("d5.fan").commanded_duty, Some(want));
     assert!(rig.ctl("d5.fan").target_rpm.unwrap() > 290.0);
 }
 
