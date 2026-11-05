@@ -30,7 +30,10 @@ impl Control {
                 Some(l) if raw > l.duty => fresh(if raw > floor && l.duty > 0.0 { (raw + step).min(max) } else { raw }),
                 Some(l) => {
                     let low_since = if raw < l.duty && w <= l.water - fall { l.low_since.or(Some(now)) } else { None };
-                    if low_since.is_some_and(|s| now - s >= hold) { fresh(c.seen.iter().fold(raw, |m, x| m.max(x.1))) } else { Latch { water: l.water.max(w), low_since, ..l } }
+                    if low_since.is_some_and(|s| now - s >= hold) {
+                        let duty = c.seen.iter().fold(raw, |m, x| m.max(x.1));
+                        Latch { duty, water: l.water, low_since: (duty > raw).then_some(now) }
+                    } else { Latch { water: l.water.max(w), low_since, ..l } }
                 }
             });
         }

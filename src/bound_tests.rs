@@ -286,9 +286,10 @@ impl Plant {
 #[derive(Clone, Copy, Debug)]
 enum Profile {
     Constant(f64),
-    Square(f64, f64),
+    Square(f64, f64, usize, usize),
     Sine(f64),
     Golden,
+    Once(f64, usize, f64),
 }
 
 impl Profile {
@@ -296,7 +297,8 @@ impl Profile {
     fn power(&self, t: usize) -> f64 {
         match *self {
             Profile::Constant(w) => w,
-            Profile::Square(lo, hi) => if t / 600 % 2 == 0 { lo } else { hi },
+            Profile::Square(lo, hi, on, off) => if t % (on + off) >= off { hi } else { lo },
+            Profile::Once(hi, secs, lo) => if t < secs { hi } else { lo },
             Profile::Sine(_) => 100.0,
             Profile::Golden => 0.0,
         }
@@ -304,12 +306,33 @@ impl Profile {
     fn closed(&self) -> bool {
         matches!(self, Profile::Constant(_) | Profile::Square(..))
     }
+    const IDLE_W: f64 = 20.0;
+    fn load_end(&self) -> usize {
+        if let Profile::Once(_, secs, _) = *self { secs } else { 0 }
+    }
+    fn recurring() -> Profile {
+        Profile::Square(Self::IDLE_W, 400.0, 300, 7200)
+    }
+    fn grid() -> Vec<Profile> {
+        let mut v = vec![];
+        for lo in [30.0, 60.0] {
+            for hi in [80.0, 120.0, 200.0] {
+                for on in [3, 10, 30] {
+                    for off in [5, 20, 60, 125, 135, 180] {
+                        v.push(Profile::Square(lo, hi, on * 60, off * 60));
+                    }
+                }
+            }
+        }
+        v
+    }
     fn name(&self) -> String {
         match self {
             Profile::Constant(w) => format!("const {w:.0} W"),
-            Profile::Square(lo, hi) => format!("square {lo:.0}/{hi:.0} W"),
+            Profile::Square(lo, hi, on, off) => format!("square {lo:.0}/{hi:.0} W {}+{} min", on / 60, off / 60),
             Profile::Sine(c) => format!("sine {c:.1} C"),
             Profile::Golden => "golden".into(),
+            Profile::Once(hi, secs, lo) => format!("once {hi:.0} W {} min then {lo:.0} W", secs / 60),
         }
     }
 }
@@ -344,8 +367,22 @@ impl Trace {
     }
 }
 
+struct Noise(u64);
+
+impl Noise {
+    fn next(&mut self, amp: f64) -> f64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        ((self.0 >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0) * amp
+    }
+}
+
 #[derive(Debug, Default)]
 struct Outcome {
+    idle_at: Option<usize>,
+    fan_cold: f64,
+    budget: bool,
     writes: usize,
     stops: usize,
     peak: f64,
@@ -359,7 +396,14 @@ const CPU_POWER: &str = "/intelcpu/0/power/0";
 const GPU_POWER: &str = "nvml/0/power";
 const PUMP_POWER: &str = "d5next/pump/power";
 
+const SENSOR_NOISE: f64 = 0.02;
+
 fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> Outcome {
+    simulate_noisy(profile, spec, SENSOR_NOISE, tweak)
+}
+
+fn simulate_noisy(profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(&mut Config)) -> Outcome {
+    let mut rng = Noise(88172645463325252);
     let mut rig = blind_rig(tweak);
     let mut plant = Plant::new(spec);
     let trace = matches!(profile, Profile::Golden).then(Trace::golden);
@@ -369,7 +413,7 @@ fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> O
     rig.active("d5.pump");
     let fan_cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
     let mut out = Outcome::default();
-    let (mut pump_hi, mut fan_hi) = (0usize, 0usize);
+    let (mut pump_hi, mut fan_hi, mut fan_cold) = (0usize, 0usize, 0usize);
     for t in 0..Profile::SECS {
         let r = rig.sim.report();
         let rpm = |s: Spec, cal: &Calibration| cal.rpm(if r[s.mode()] == 0 { be16(&r, s.preset()) as f64 / 100.0 } else { 90.0 });
@@ -385,14 +429,23 @@ fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> O
                 g.at(t, "d5next/water/temp")
             }
             (Profile::Sine(c), _) => c + 0.3 * (std::f64::consts::TAU * t as f64 / 600.0).sin(),
-            _ => reading,
+            _ => ((reading + rng.next(noise)) * 100.0).round() / 100.0,
         };
+        if trace.is_none() {
+            rig.cpu = rig.water + 15.0 + 0.1 * power;
+        }
         rig.tick();
         out.frozen |= rig.c.frozen_hit(rig.now).is_some();
         let d = |i: usize| rig.c.chans[i].duty_cmd;
         pump_hi += d(1).is_some_and(|x| x >= 90.0) as usize;
         fan_hi += d(0).is_some_and(|x| x >= 90.0) as usize;
+        if out.idle_at.is_none() && t >= profile.load_end() && d(0) == Some(0.0) && d(1).is_some_and(|x| x < 15.5) {
+            out.idle_at = Some(t - profile.load_end());
+        }
+        fan_cold += (d(0).is_some_and(|x| x > 0.0) && rig.water < 33.0) as usize;
+        out.budget |= rig.c.chans.iter().any(|c| c.over);
     }
+    out.fan_cold = fan_cold as f64 / Profile::SECS as f64;
     let sets = rig.sim.duty_sets();
     let fan: Vec<u16> = sets.iter().map(|(_, r)| be16(r, Spec::FAN.preset())).collect();
     out.stops = fan.windows(2).filter(|w| w[0] != 0 && w[1] == 0).count();
@@ -405,7 +458,7 @@ fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> O
 
 fn profiles() -> Vec<Profile> {
     let mut v: Vec<Profile> = [40.0, 60.0, 100.0, 200.0, 300.0, 400.0].iter().map(|w| Profile::Constant(*w)).collect();
-    v.extend([Profile::Square(60.0, 300.0), Profile::Sine(34.5), Profile::Sine(35.0), Profile::Sine(35.5), Profile::Sine(36.0), Profile::Sine(37.5), Profile::Golden]);
+    v.extend([Profile::Square(60.0, 300.0, 600, 600), Profile::Sine(34.5), Profile::Sine(35.0), Profile::Sine(35.5), Profile::Sine(36.0), Profile::Sine(37.5), Profile::Golden]);
     v
 }
 
@@ -437,9 +490,21 @@ fn r14_a_constant_load_writes_less_than_100_times_a_day_on_both_plants() {
 }
 
 #[test]
+fn r25_after_one_load_the_fan_stands_and_the_pump_reaches_its_floor_on_both_plants_with_sensor_noise() {
+    for (name, spec) in PlantSpec::NAMED {
+        for (hi, secs, lo) in [(400.0, 1800, 20.0), (300.0, 3600, 40.0), (150.0, 900, 25.0), (100.0, 600, 15.0)] {
+            let p = Profile::Once(hi, secs, lo);
+            let o = simulate(p, spec, |_| {});
+            let hold = ControlConfig::default().bound_hold_secs as usize;
+            assert!(o.idle_at.is_some_and(|t| t < 3 * hold + 3600) && !o.fallback && !o.frozen, "{name} {} {o:?}", p.name());
+        }
+    }
+}
+
+#[test]
 fn r15_a_10_plus_10_minute_load_writes_less_than_100_times_a_day_on_both_plants() {
     for (_, spec) in PlantSpec::NAMED {
-        assert_quiet(Profile::Square(60.0, 300.0), spec);
+        assert_quiet(Profile::Square(60.0, 300.0, 600, 600), spec);
     }
 }
 
@@ -613,3 +678,4 @@ fn r24_pump_share_at_or_above_90_percent_by_pump_ramp_start() {
     }
     eprintln!("{table}");
 }
+
