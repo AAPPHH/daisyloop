@@ -139,7 +139,7 @@ class View {
     const nm = h('span', { class: 'nm', title: metric.label }, metric.label);
     this.el = tile
       ? h('div', { class: 'tile' }, nm, val, h('div', { class: 'tfoot' }, h('span', { class: 'tmm' }, h('span', {}, 'Min ', this.mn), h('span', {}, 'Max ', this.mx)), svg))
-      : h('div', { class: 'gm-row' }, nm, val, this.mn, this.mx, svg);
+      : h('div', { class: 'gm-row' }, nm, svg, val, this.mn, this.mx);
   }
   set(key, fn, value) {
     if (this.cache[key] !== value) {
@@ -212,7 +212,7 @@ export class Gaming {
     TOP.forEach((s) => make(s, strip, true, 'top'));
     for (const col of COLS) {
       const rows = h('div', { class: 'gm-rows' });
-      cols.append(h('section', { class: 'gm-card' }, h('header', {}, h('h3', {}, col.title), h('span', {}, 'Wert'), h('span', { class: 'mm' }, 'Min'), h('span', { class: 'mm' }, 'Max'), h('span')), rows));
+      cols.append(h('section', { class: 'gm-card' }, h('header', {}, h('h3', {}, col.title), h('span'), h('span', {}, 'Wert'), h('span', { class: 'mm' }, 'Min'), h('span', { class: 'mm' }, 'Max')), rows));
       col.rows.forEach((s) => make(s, rows, false, col.title));
     }
   }

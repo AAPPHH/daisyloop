@@ -180,11 +180,11 @@ export class Heat {
     const minLeft = (HEAT.C * (limit - water)) / b / 60;
     const kj = num((Math.abs(b) * 60) / 1000, 1);
     let sub = 'Wasser hält die Temperatur';
-    if (over) sub = `Wasser über ${num(limit, 0)} °C`;
-    else if (c.dir === 'use') sub = minLeft <= HEAT.tauMin ? `bei gleicher Bilanz ${span(minLeft)} bis ${num(limit, 0)} °C` : `${kj} kJ pro Minute verbraucht`;
+    if (over) sub = `Wasser über ${num(limit, 1)} °C`;
+    else if (c.dir === 'use') sub = minLeft <= HEAT.tauMin ? `bei gleicher Bilanz ${span(minLeft)} bis ${num(limit, 1)} °C` : `${kj} kJ pro Minute verbraucht`;
     else if (c.dir === 'build') sub = `${kj} kJ pro Minute frei`;
     txt(r.midS, sub);
-    txt(r.crL, `Kredit ${num(credit, 0)} kJ bis ${num(limit, 0)} °C`);
+    txt(r.crL, `Kredit ${num(credit, 0)} kJ bis ${num(limit, 1)} °C`);
     txt(r.crR, `${num(water, 1)} °C`);
   }
 }
