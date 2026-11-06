@@ -1,6 +1,7 @@
 import { $, h, motion, stepTweens, ageText } from './ui.js';
 import { S, ingest, age, STALE_AFTER } from './state.js';
 import { Hero } from './hero.js';
+import { Heat } from './heat.js';
 import { updateControls, initControls, toast } from './controls.js';
 import { History } from './history.js';
 import { Sensors } from './sensors.js';
@@ -9,6 +10,7 @@ const tauri = window.__TAURI__ ?? (await import('./dev/bridge.js')).default;
 S.tauri = tauri;
 
 const hero = new Hero();
+const heat = new Heat();
 const history = new History();
 const sensors = new Sensors(history);
 let raf = 0;
@@ -41,6 +43,7 @@ motion.kick = () => {
 function setLive(live) {
   const was = S.live;
   S.live = live;
+  heat.update(live);
   document.body.classList.toggle('stale', !live);
   const st = $('#status');
   st.className = 'status ' + (live ? 'live' : 'down');
