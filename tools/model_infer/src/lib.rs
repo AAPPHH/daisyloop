@@ -66,6 +66,7 @@ pub struct Engine {
     pub raw_channels: Vec<String>,
     pub outputs: Vec<String>,
     out_idx: Vec<usize>,
+    scratch: Vec<f64>,
 }
 
 fn pf(v: &Value, k: &str) -> f64 {
@@ -131,13 +132,16 @@ impl Engine {
             raw_channels,
             outputs,
             out_idx,
+            scratch: Vec::new(),
         }
     }
 
     pub fn step(&mut self, raw: &[f64], k: i64) -> Vec<f64> {
+        let mut a = std::mem::take(&mut self.scratch);
         for i in 0..self.nodes.len() {
             let node = &self.nodes[i];
-            let a: Vec<f64> = node.ins.iter().map(|&j| self.vals[j]).collect();
+            a.clear();
+            a.extend(node.ins.iter().map(|&j| self.vals[j]));
             let s = &mut self.state[i];
             let y = match &node.op {
                 Op::Raw { ffill, zero_nan } => {
@@ -237,6 +241,7 @@ impl Engine {
                 h.push_back(y);
             }
         }
+        self.scratch = a;
         self.out_idx.iter().map(|&i| self.vals[i]).collect()
     }
 }
@@ -251,10 +256,27 @@ struct Tree {
     v: Vec<f64>,
 }
 
+#[derive(Deserialize, Default)]
+struct Lin {
+    w: Vec<f64>,
+    mean: Vec<f64>,
+    std: Vec<f64>,
+}
+
 #[derive(Deserialize)]
 struct Target {
+    #[serde(default)]
     base: f64,
+    #[serde(default)]
     trees: Vec<Tree>,
+    #[serde(default)]
+    lin: Option<Lin>,
+}
+
+#[derive(Deserialize)]
+struct Fallback {
+    features: Vec<String>,
+    targets: std::collections::BTreeMap<String, Target>,
 }
 
 #[derive(Deserialize, Clone, Copy, Default, Debug)]
@@ -269,18 +291,54 @@ struct RawModel {
     #[serde(default)]
     identified: Identified,
     targets: std::collections::BTreeMap<String, Target>,
+    #[serde(default)]
+    fallback: Option<Fallback>,
+    #[serde(default)]
+    clip: Option<f64>,
 }
 
 pub struct Model {
     pub features: Vec<String>,
     pub identified: Identified,
     targets: Vec<(String, Target)>,
+    fallback: Option<(Vec<usize>, Vec<(String, Target)>)>,
+    clip: Option<f64>,
 }
 
 impl Model {
     pub fn from_json(text: &str) -> Model {
         let m: RawModel = serde_json::from_str(text).unwrap();
-        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect() }
+        let fallback = m.fallback.map(|f| {
+            let idx = f.features.iter().map(|n| m.features.iter().position(|x| x == n).unwrap_or(usize::MAX)).collect();
+            (idx, f.targets.into_iter().collect())
+        });
+        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect(), fallback, clip: m.clip }
+    }
+
+    pub fn is_linear(&self) -> bool {
+        self.targets.iter().all(|t| t.1.lin.is_some())
+    }
+
+    fn dot(t: &Target, x: &[f64], pick: Option<&[usize]>, clip: Option<f64>) -> f64 {
+        let l = t.lin.as_ref().unwrap();
+        let mut s = t.base;
+        for (j, w) in l.w.iter().enumerate() {
+            let v = match pick {
+                Some(p) => if p[j] == usize::MAX { f64::NAN } else { x[p[j]] },
+                None => x[j],
+            };
+            let z = if v.is_finite() { (v - l.mean[j]) / l.std[j] } else { 0.0 };
+            s += w * clip.map_or(z, |c| z.clamp(-c, c));
+        }
+        s
+    }
+
+    fn predict_linear(&self, x: &[f64]) -> Vec<(String, f64)> {
+        let primary = self.targets.iter().all(|(_, t)| t.lin.as_ref().unwrap().w.iter().enumerate().all(|(j, w)| *w == 0.0 || x[j].is_finite()));
+        match (&self.fallback, primary) {
+            (Some((idx, ts)), false) => ts.iter().map(|(n, t)| (n.clone(), Self::dot(t, x, Some(idx), self.clip))).collect(),
+            _ => self.targets.iter().map(|(n, t)| (n.clone(), Self::dot(t, x, None, self.clip))).collect(),
+        }
     }
 
     pub fn target_names(&self) -> Vec<&str> {
@@ -288,6 +346,9 @@ impl Model {
     }
 
     pub fn predict(&self, x: &[f64]) -> Vec<(String, f64)> {
+        if self.is_linear() {
+            return self.predict_linear(x);
+        }
         let xf: Vec<f32> = x.iter().map(|&v| v as f32).collect();
         self.targets
             .iter()

@@ -54,6 +54,36 @@ impl XgbModel {
         vec![install_dir.unwrap_or(data_dir).join("models")]
     }
 
+    #[cfg(test)]
+    pub fn parts(&self, reps: usize) -> (f64, f64, f64) {
+        let raw = self.filled();
+        let t0 = std::time::Instant::now();
+        let mut x = self.x.clone();
+        for _ in 0..reps {
+            let mut p = self.p.clone();
+            for k in 1..=120i64 {
+                x = p.features(&raw, self.epoch + k);
+            }
+        }
+        let roll = t0.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        let t1 = std::time::Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(self.p.model.predict(&x));
+        }
+        let pred = t1.elapsed().as_secs_f64() * 1e3 / reps as f64;
+        let mut c = self.clone_for_observe();
+        let t2 = std::time::Instant::now();
+        for i in 0..reps {
+            c.p.features(&raw, self.epoch + 1000 + i as i64);
+        }
+        (roll, pred, t2.elapsed().as_secs_f64() * 1e3 / reps as f64)
+    }
+
+    #[cfg(test)]
+    fn clone_for_observe(&self) -> XgbModel {
+        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since }
+    }
+
     fn filled(&self) -> Vec<f64> {
         (0..self.channels.len()).map(|i| if self.epoch - self.fill_at[i] <= Self::FILL_SECS { self.fill[i] } else { f64::NAN }).collect()
     }
@@ -270,13 +300,19 @@ impl Golden {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models")
     }
     pub fn load() -> Golden {
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(Self::dir().join("golden.json")).unwrap()).unwrap();
+        Self::named("golden.json")
+    }
+    pub fn named(file: &str) -> Golden {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(Self::dir().join(file)).unwrap()).unwrap();
         let channels = v["channels"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
         let rows = v["rows"].as_array().unwrap().iter().map(|r| r.as_array().unwrap().iter().map(|x| x.as_f64()).collect()).collect();
         Golden { channels, rows, k0: v["k0"].as_i64().unwrap() }
     }
     pub fn model(&self) -> XgbModel {
         XgbModel::load(&[Self::dir()], "feature_spec_deploy.json", "model_deploy.json").unwrap()
+    }
+    pub fn linear(&self) -> XgbModel {
+        XgbModel::load(&[Self::dir()], "feature_spec_linear.json", "model_linear.json").unwrap()
     }
     pub fn row(&self, t: usize) -> HashMap<String, f64> {
         self.channels.iter().zip(&self.rows[t]).filter_map(|(c, v)| v.map(|v| (c.clone(), v))).collect()
@@ -322,5 +358,64 @@ mod tests {
         let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
         assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
         assert!(plan.fan_rpm >= fan.rpm_range().0 && plan.fan_rpm <= fan.rpm_range().1 && plan.pump_rpm >= pump.rpm_range().0);
+    }
+}
+
+#[cfg(test)]
+mod cost {
+    use super::*;
+    use crate::protocol::ControlKind;
+
+    pub fn plan_ms(m: &dyn Model, reps: usize) -> (f64, f64) {
+        let cfg = ControlConfig::default();
+        let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
+        let (fcal, pcal) = (fc.calibration(), pc.calibration());
+        let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
+        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
+        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
+        let temps = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+        let planner = Planner { cfg: &cfg };
+        let mut ts: Vec<f64> = (0..reps)
+            .map(|_| {
+                let t0 = std::time::Instant::now();
+                planner.plan(m, &fan, &pump, &temps, 0.5, Some((1200.0, 3400.0))).unwrap();
+                t0.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ts.sort_by(|a, b| a.total_cmp(b));
+        (ts[ts.len() / 2], ts[ts.len() - 1])
+    }
+
+    fn warm(g: &Golden, mut m: XgbModel) -> XgbModel {
+        for t in 3000..g.rows.len() {
+            m.observe(&g.row(t), g.k0 + t as i64);
+        }
+        m
+    }
+
+    #[test]
+    #[ignore]
+    fn plan_cost_trees_and_linear() {
+        let (gt, gl) = (Golden::load(), Golden::named("golden_linear.json"));
+        for (name, g, m) in [("trees", &gt, gt.model()), ("linear", &gl, gl.linear())] {
+            let m = warm(g, m);
+            assert!(m.warm_secs() > 0, "{name} not warm");
+            let (med, max) = plan_ms(&m, 40);
+            let (roll, pred, obs) = m.parts(200);
+            println!("COST {name}: plan median {med:.2} ms max {max:.2} ms; per forecast rollout {roll:.4} ms predict {pred:.4} ms; observe {obs:.4} ms; core share at 1 Hz {:.2} %, at 30 s {:.3} %", med / 10.0, med / 300.0);
+        }
+    }
+
+    #[test]
+    fn linear_model_loads_forecasts_and_the_planner_runs_it() {
+        let g = Golden::named("golden_linear.json");
+        let m = warm(&g, g.linear());
+        assert_eq!(m.identified(), (false, false));
+        assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
+        let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
+        let f = m.forecast(&hold, 120, 120).unwrap();
+        assert!(f.water.is_finite() && f.cpu.is_finite() && f.gpu.is_finite());
+        assert!(m.forecast(&hold, 120, 77).is_err());
+        assert!(plan_ms(&m, 1).0 < 5000.0);
     }
 }
