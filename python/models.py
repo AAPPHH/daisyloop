@@ -4,7 +4,7 @@ import math
 import os
 import time
 import numpy as np
-from features import FeatureFrame, Ops, CONFIG as FCFG
+from features import FeatureFrame, Ops, PhysSpec, Spec, CONFIG as FCFG
 from rawstore import RawStore
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,9 +47,14 @@ class Dataset:
 
     def build(self):
         cfg = self.cfg
-        meta, X = RawStore().load()
+        sd = cfg.get("store_dir")
+        meta, X = (RawStore({"cache_dir": sd}) if sd else RawStore()).load()
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"]) }
-        names, F = FeatureFrame().load()
+        ff = FeatureFrame(dict(FCFG, cache_dir=sd)) if sd else FeatureFrame()
+        if cfg.get("phys"):
+            names, F, _ = ff.compute(PhysSpec(Spec.load(FCFG["spec_path"])).build(), X, ix, meta["k0"])
+        else:
+            names, F = ff.load()
         T = F.shape[0]
         ser = {k: Ops.ffill(np.asarray(X[:, ix[ch]], dtype=np.float64), FCFG["ffill_s"], False) for k, ch in cfg["series"].items()}
         rows = np.arange(0, T, cfg["stride"])
@@ -209,7 +214,7 @@ def augment(D, X, y, feats, frac, seed):
 
 def xgb_task(job):
     import xgboost as xgb
-    cfg = CONFIG
+    cfg = job.get("cfg", CONFIG)
     D = Dataset(cfg).load()
     feats = job["feats"] or D.names
     out = {}
@@ -251,3 +256,21 @@ def physics_task(job):
                 r["preds"][t] = {b: ph.predict(D, D.sel(b, t), h) for b in D.bnames}
             out[f"{tg}{'_fan' if fan else ''}"] = r
     return out
+
+
+def build_task(cfg):
+    Dataset(cfg).build()
+    return cfg["cache"]
+
+
+LOCAL = os.path.join(os.environ.get("LOCALAPPDATA", "."), "daisyloop-ml")
+FRESH = dict(CONFIG)
+FRESH.update({
+    "horizons": [30, 60, 90, 120, 300, 900],
+    "store_dir": os.path.join(LOCAL, "cache_fresh"),
+    "cache": os.path.join(LOCAL, "cache_fresh", "D5f.npz"),
+    "phys": True,
+    "blocks": dict(CONFIG["blocks"], fresh0=[("2026-11-04 15:10", "2026-11-04 19:30")], fresh1=[("2026-11-04 19:30", "2026-11-05 08:00")],
+                   fresh2=[("2026-11-05 08:45", "2026-11-05 18:40")]),
+    "runs_log": os.path.join(HERE, "..", "models", "runs_linear.jsonl"),
+})

@@ -557,6 +557,69 @@ class FeatureFrame:
         return names, np.load(os.path.join(self.dir, f"F_{tag}.npy"), mmap_mode="r")
 
 
+PHYS = {
+    "m": 1.61, "gn_frac": 0.0, "rpm_full": 1460.0, "pump_full": 4800.0, "eta_cpu": 0.96, "eta_gpu": 1.0,
+    "lags": [11, 22, 33], "taus": [5, 30, 120, 600], "slopes": [10, 30, 120], "fan_lag": 22, "fan_slope": 30,
+}
+
+
+class PhysSpec:
+    def __init__(self, rich, cfg=PHYS):
+        self.rich, self.cfg, self.new = rich, cfg, []
+
+    def add(self, name, op, ins, p=None, out=True):
+        self.new.append(Node(name, op, ins, p or {}, "phys", out))
+        return name
+
+    def lin(self, name, ins, coef, off=0.0, out=True):
+        return self.add(name, "lin", ins, {"coef": coef, "off": off}, out)
+
+    def ewm(self, x, tau, out=True):
+        return self.add(f"{x}.e{tau}", "ewm", [x], {"tau": tau}, out)
+
+    def lag(self, x, n):
+        d = self.add(f"{x}.d{n}", "diff", [x], {"n": n}, False)
+        return self.lin(f"{x}.l{n}", [x, d], [1.0, -1.0])
+
+    def slope(self, x, n):
+        return self.add(f"{x}.d{n}", "diff", [x], {"n": n})
+
+    def build(self):
+        c = self.cfg
+        q = self.lin("ph.q", ["cpu_pkg_w", "gpu_w", "pump_pow"], [c["eta_cpu"], c["eta_gpu"], 1.0])
+        for n in c["lags"]:
+            self.lag(q, n)
+        for t in c["taus"]:
+            self.ewm(q, t)
+        for s in ("cpu_pkg_w", "gpu_w"):
+            for t in c["taus"][:2]:
+                self.ewm(s, t)
+        w5 = self.ewm("water", 5, False)
+        for n in c["slopes"]:
+            self.slope(w5, n)
+        fr = self.add("ph.fr", "scale", ["fan_rpm"], {"c": 1.0 / c["rpm_full"]}, False)
+        fm = self.add("ph.fm", "pow", [fr], {"e": c["m"]}, False)
+        gf = self.lin("ph.gf", [fm], [1.0 - c["gn_frac"]], c["gn_frac"], False)
+        fx = self.add("ph.fx", "mul", [gf, "water_minus_amb"])
+        self.ewm(fx, 30)
+        self.ewm(fx, 120)
+        gl = self.lag(gf, c["fan_lag"])
+        self.add("ph.fxl", "mul", [gl, "water_minus_amb"])
+        gs = self.slope(gf, c["fan_slope"])
+        self.add("ph.fxd", "mul", [gs, "water_minus_amb"])
+        pr = self.add("ph.pr", "scale", ["pump_rpm"], {"c": 1.0 / c["pump_full"]}, False)
+        pg = self.lin("ph.pg", [pr], [1.0], -1.0)
+        self.add("ph.px", "mul", [pg, fx])
+        self.add("ph.pgx", "mul", [pg, "water_minus_amb"])
+        for s in ("cpu_core_t", "gpu_temp", "cpucore_m_water", "gpu_m_water"):
+            self.ewm(s, 5)
+        return Spec(list(self.rich.nodes) + self.new, dict(self.rich.meta))
+
+    def names(self):
+        base = ["cpu_pkg_w", "gpu_w", "pump_pow", "water", "water_minus_amb", "cpu_core_t", "gpu_temp", "cpucore_m_water", "gpu_m_water"]
+        return base + [n.name for n in self.new if n.out]
+
+
 if __name__ == "__main__":
     ff = FeatureFrame()
     spec = ff.build_spec()

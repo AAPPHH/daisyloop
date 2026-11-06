@@ -4,7 +4,7 @@ import pickle
 import sys
 import time
 import numpy as np
-from models import CONFIG, Dataset, Metrics, RunLog, physics_task, xgb_task
+from models import CONFIG, FRESH, Dataset, Metrics, RunLog, build_task, physics_task, xgb_task
 from nets import nn_task
 from features import Spec, CONFIG as FCFG
 
@@ -249,6 +249,9 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "build"
     if mode == "build":
         Dataset().build()
+    elif mode == "fresh":
+        cl = Cluster(FRESH)
+        print(cl.ray.get(cl.submit(build_task, FRESH, num_cpus=2, memory=6e9)))
     elif mode == "stage1":
         Stage1().run()
     elif mode == "stage3":
