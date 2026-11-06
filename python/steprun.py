@@ -4,6 +4,7 @@ import json
 import math
 import multiprocessing
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -28,19 +29,20 @@ CFG = {
         "cpu_power": ["/intelcpu/0/power/0"],
         "gpu_power": ["nvml/0/power", "/gpu-nvidia/0/power/0"],
         "gpu_limit": ["nvml/0/power_limit"],
-        "cpu_temp": ["/intelcpu/0/temperature/0"],
+        "cpu_temp": ["/intelcpu/0/temperature/26"],
         "gpu_temp": ["nvml/0/temp"],
         "phase": ["daisyloop/step/phase"],
         "step_duty": ["daisyloop/step/duty"],
     },
     "history_s": 300,
-    "limits": {"water_c": 44.0, "rise_k_per_min": 1.5, "rise_hold_s": 120, "rise_window_s": 60, "cpu_c": 95.0, "gpu_c": 80.0, "pump_rpm_min": 1500.0, "stale_s": 10.0},
+    "limits": {"water_c": 44.0, "rise_k_per_min": 1.5, "rise_hold_s": 120, "rise_window_s": 60, "gpu_c": 80.0, "pump_rpm_min": 1500.0, "stale_s": 10.0, "stale_lhm_s": 15.0, "cpu_hold_c": 95.0, "cpu_hold_s": 10, "cpu_c": 100.0},
     "safety_channels": ["water", "cpu_temp", "gpu_temp", "pump_rpm"],
+    "lhm_keys": ["cpu_temp"],
     "release_wait_s": 15,
     "status_every_s": 30,
     "load": {
         "cpu_threads": 8, "cpu_max_w": 100.0, "cpu_range_w": 120.0, "cpu_ki": 0.004, "cpu_soft_c": 90.0,
-        "gpu_max_w": 320.0, "gpu_range_w": 300.0, "gpu_ki": 0.002, "gpu_soft_c": 75.0, "gpu_size": 4096,
+        "gpu_max_w": 320.0, "gpu_range_w": 300.0, "gpu_ki": 0.002, "gpu_soft_c": 75.0, "gpu_size": 2048,
         "cap_down_w": 10.0, "cap_up_w": 2.0, "cap_hyst_c": 5.0, "cpu_min_w": 0.0, "gpu_off_s": 20,
         "period_s": 0.1, "job": True,
     },
@@ -55,10 +57,17 @@ CFG = {
         "fan": {"band": [27.0, 31.0], "parts": "fan"},
         "pump": {"band": [27.0, 33.0], "parts": "pump"},
     },
+    "rehearse": {"watts": 250.0, "secs": 120, "every_s": 5},
+    "early_tol_s": 20,
     "heat": {"target_c": 30.0, "watts": 100.0, "max_s": 3600},
     "cool": {"to_c": 31.0, "max_s": 3600},
     "controls": {"fan": "d5.fan", "pump": "d5.pump"},
 }
+
+
+def stale_keys(cfg, tele):
+    lim = cfg["limits"]
+    return [k for k in cfg["safety_channels"] if tele.age(k) > (lim["stale_lhm_s"] if k in cfg["lhm_keys"] else lim["stale_s"])]
 
 
 class Clock:
@@ -74,17 +83,35 @@ class Log:
         self.clock = clock
         self.lock = threading.Lock()
         self.path = None
+        self.q = queue.SimpleQueue()
         if directory:
             os.makedirs(directory, exist_ok=True)
             self.path = os.path.join(directory, time.strftime("steprun-%Y%m%d-%H%M%S.log"))
+        threading.Thread(target=self.console, daemon=True, name="console").start()
+
+    def console(self):
+        while True:
+            line = self.q.get()
+            try:
+                print(line, flush=True)
+            except Exception:
+                pass
 
     def __call__(self, text):
-        line = f"{time.strftime('%H:%M:%S', time.localtime(self.clock.now()))} {text}"
-        with self.lock:
-            print(line, flush=True)
+        try:
+            line = f"{time.strftime('%H:%M:%S', time.localtime(self.clock.now()))} {text}"
+            self.q.put(line)
             if self.path:
-                with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
+                with self.lock:
+                    with open(self.path, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
+        except Exception:
+            pass
+
+    def flush(self, secs=2.0):
+        end = time.time() + secs
+        while not self.q.empty() and time.time() < end:
+            time.sleep(0.05)
 
 
 class Telemetry:
@@ -219,6 +246,7 @@ class Pipe:
     def __init__(self, cfg):
         self.cfg = cfg["pipe"]
         self.n = 0
+        self.lock = threading.Lock()
 
     def exchange(self, req):
         last = None
@@ -228,7 +256,7 @@ class Pipe:
                 break
             except OSError as e:
                 last = e
-                if getattr(e, "winerror", None) != 231:
+                if getattr(e, "winerror", None) != 231 and e.errno != 22:
                     raise
                 time.sleep(0.2)
         else:
@@ -244,8 +272,10 @@ class Pipe:
         return json.loads(buf.split(b"\n", 1)[0])
 
     def call(self, body):
-        self.n += 1
-        req = {"v": self.cfg["version"], "id": self.n, "body": body}
+        with self.lock:
+            self.n += 1
+            rid = self.n
+        req = {"v": self.cfg["version"], "id": rid, "body": body}
         out = {}
 
         def run():
@@ -263,7 +293,7 @@ class Pipe:
             e = out["e"]
             raise PipeError(f"{type(e).__name__}: {e}")
         r = out["r"]
-        if r.get("v") != self.cfg["version"] or r.get("id") != self.n:
+        if r.get("v") != self.cfg["version"] or r.get("id") != rid:
             raise PipeError(f"protocol mismatch: {r.get('v')}")
         b = r["body"]
         if b["type"] == "error":
@@ -402,19 +432,21 @@ def cpu_worker(duty, stop, parent, period):
             time.sleep(rest)
 
 
-def gpu_worker(duty, stop, parent, period, size):
+def gpu_worker(duty, stop, parent, period, size, ready):
     import torch
     ph = Win.parent_handle(parent)
     a = b = None
     try:
         a = torch.randn(size, size, device="cuda", dtype=torch.float16)
         b = torch.randn(size, size, device="cuda", dtype=torch.float16)
+        a @ b
+        torch.cuda.synchronize()
+        ready.value = 1
         while not stop.value and Win.alive(ph):
             t0 = time.perf_counter()
             d = duty.value
             while d > 0.001 and time.perf_counter() - t0 < d * period:
-                for _ in range(4):
-                    a @ b
+                a @ b
                 torch.cuda.synchronize()
             rest = period - (time.perf_counter() - t0)
             if rest > 0:
@@ -431,8 +463,10 @@ class Load:
         self.tele = tele
         ctx = multiprocessing.get_context("spawn")
         self.ctx = ctx
-        self.duty = {"cpu": ctx.Value("d", 0.0), "gpu": ctx.Value("d", 0.0)}
-        self.stop = {"cpu": ctx.Value("i", 0), "gpu": ctx.Value("i", 0)}
+        self.duty = {"cpu": ctx.RawValue("d", 0.0), "gpu": ctx.RawValue("d", 0.0)}
+        self.stop = {"cpu": ctx.RawValue("i", 0), "gpu": ctx.RawValue("i", 0)}
+        self.ready = ctx.RawValue("i", 0)
+        self.halted = False
         self.procs = {"cpu": [], "gpu": []}
         self.pwm = {"cpu": Pwm(self.cfg["cpu_ki"], self.cfg["cpu_range_w"]), "gpu": Pwm(self.cfg["gpu_ki"], self.cfg["gpu_range_w"])}
         self.split = Split(self.cfg)
@@ -446,6 +480,8 @@ class Load:
         self.threads = int(n)
 
     def set_total(self, watts):
+        if self.halted and watts is not None:
+            return
         self.total = watts
         if watts is None:
             self.zero()
@@ -457,11 +493,12 @@ class Load:
 
     def spawn(self, kind):
         self.stop[kind].value = 0
+        self.ready.value = 0
         if kind == "cpu":
             args = (self.duty["cpu"], self.stop["cpu"], os.getpid(), self.cfg["period_s"])
             procs = [self.ctx.Process(target=cpu_worker, args=args, daemon=True) for _ in range(self.threads)]
         else:
-            args = (self.duty["gpu"], self.stop["gpu"], os.getpid(), self.cfg["period_s"], self.cfg["gpu_size"])
+            args = (self.duty["gpu"], self.stop["gpu"], os.getpid(), self.cfg["period_s"], self.cfg["gpu_size"], self.ready)
             procs = [self.ctx.Process(target=gpu_worker, args=args, daemon=True)]
         for p in procs:
             p.start()
@@ -485,8 +522,13 @@ class Load:
     def own_watts(self):
         return self.duty["cpu"].value * self.cfg["cpu_range_w"] + self.duty["gpu"].value * self.cfg["gpu_range_w"]
 
+    def report(self):
+        return f"duty cpu {self.duty['cpu'].value:.2f} gpu {self.duty['gpu'].value:.2f} gpu_ready {self.ready.value}"
+
     def regulate(self):
         with self.lock:
+            if self.halted:
+                return
             if self.total is None:
                 self.zero()
                 self.gpu_idle += 1
@@ -500,15 +542,21 @@ class Load:
                     self.spawn("gpu")
                 self.gpu_idle = 0 if gpu_goal > 0 else self.gpu_idle + 1
                 self.duty["cpu"].value = self.pwm["cpu"].update(cpu_goal, cpu_w)
-                self.duty["gpu"].value = self.pwm["gpu"].update(gpu_goal, gpu_w)
+                self.duty["gpu"].value = self.pwm["gpu"].update(gpu_goal, gpu_w) if self.ready.value else 0.0
             if self.procs["gpu"] and self.gpu_idle >= self.cfg["gpu_off_s"]:
                 self.release("gpu")
 
     def halt(self):
+        self.halted = True
         self.total = None
         self.zero()
-        self.release("cpu")
-        self.release("gpu")
+        got = self.lock.acquire(timeout=5.0)
+        try:
+            self.release("cpu")
+            self.release("gpu")
+        finally:
+            if got:
+                self.lock.release()
 
 
 class Abort:
@@ -536,29 +584,44 @@ class Abort:
                 return False
             self.clock.sleep(1.0)
 
+    def say(self, text):
+        try:
+            self.log(text)
+        except Exception:
+            pass
+
     def fire(self, reason):
         with self.lock:
             if self.fired:
                 return
             self.fired = reason
-        self.load.halt()
-        self.log(f"ABORT {reason}: load stopped")
         try:
-            self.pipe.command({"cmd": "stop_step_test"})
-            self.log("abort: StopStepTest acknowledged")
-            ok = self.verify()
-        except Refused as e:
-            self.log(f"abort: StopStepTest refused: {e}")
+            self.load.halt()
+        except Exception as e:
+            self.say(f"abort: load halt failed: {e!r}")
+        ok = False
+        try:
+            try:
+                self.pipe.command({"cmd": "stop_step_test"})
+                note = "StopStepTest acknowledged"
+            except Refused as e:
+                note = f"StopStepTest refused: {e}"
+            self.say(f"ABORT {reason}: load stopped, {note}")
             ok = self.verify()
         except PipeError as e:
-            self.log(f"abort: pipe failed: {e}")
-            ok = False
-        if ok:
-            self.log("abort: tested channels are on firmware")
-        else:
-            self.log("abort: firmware not confirmed, running d5_abort")
-            self.log(f"abort: d5_abort verdict: {self.runner()}")
-        self.done.set()
+            self.say(f"ABORT {reason}: load stopped, pipe failed: {e}")
+        except Exception as e:
+            self.say(f"ABORT {reason}: load stopped, error {e!r}")
+        try:
+            if ok:
+                self.say("abort: tested channels are on firmware")
+            else:
+                self.say("abort: firmware not confirmed, running d5_abort")
+                self.say(f"abort: d5_abort verdict: {self.runner()}")
+        except Exception as e:
+            self.say(f"abort: d5_abort failed to run: {e!r}")
+        finally:
+            self.done.set()
 
 
 class AbortRunner:
@@ -583,6 +646,7 @@ class Watchdog:
     def __init__(self, cfg, tele, abort, clock):
         self.cfg, self.tele, self.abort, self.clock = cfg, tele, abort, clock
         self.rise_since = None
+        self.cpu_since = None
         self.stopped = threading.Event()
 
     def slope(self):
@@ -599,20 +663,24 @@ class Watchdog:
     def check(self):
         lim, t = self.cfg["limits"], self.tele
         hits = []
-        stale = [k for k in self.cfg["safety_channels"] if t.age(k) > lim["stale_s"]]
+        stale = stale_keys(self.cfg, t)
         if stale:
-            hits.append(f"telemetry older than {lim['stale_s']:.0f} s: {','.join(stale)}")
+            hits.append(f"telemetry stale (D5 over {lim['stale_s']:.0f} s, LHM over {lim['stale_lhm_s']:.0f} s): {','.join(stale)}")
         water, cpu, gpu, pump = (t.value(k) for k in ("water", "cpu_temp", "gpu_temp", "pump_rpm"))
         if water is not None and water >= lim["water_c"]:
             hits.append(f"water {water:.2f} C >= {lim['water_c']}")
-        if cpu is not None and cpu >= lim["cpu_c"]:
-            hits.append(f"CPU package {cpu:.1f} C >= {lim['cpu_c']}")
+        now = self.clock.now()
+        if cpu is not None and cpu >= lim["cpu_hold_c"]:
+            self.cpu_since = self.cpu_since or now
+        else:
+            self.cpu_since = None
+        if cpu is not None and (cpu >= lim["cpu_c"] or (self.cpu_since and now - self.cpu_since >= lim["cpu_hold_s"])):
+            hits.append(f"CPU package {cpu:.1f} C (>= {lim['cpu_c']} at once or >= {lim['cpu_hold_c']} for {lim['cpu_hold_s']} s)")
         if gpu is not None and gpu >= lim["gpu_c"]:
             hits.append(f"GPU {gpu:.1f} C >= {lim['gpu_c']}")
         if pump is not None and pump < lim["pump_rpm_min"]:
             hits.append(f"pump {pump:.0f} rpm < {lim['pump_rpm_min']:.0f}")
         s = self.slope()
-        now = self.clock.now()
         if s is not None and s > lim["rise_k_per_min"]:
             self.rise_since = self.rise_since or now
             if now - self.rise_since > lim["rise_hold_s"]:
@@ -673,11 +741,11 @@ class Session:
         self.load.regulate()
 
     def fresh(self):
-        return [k for k in self.cfg["safety_channels"] if self.tele.age(k) > self.cfg["limits"]["stale_s"]]
+        return stale_keys(self.cfg, self.tele)
 
     def refusals(self, stage, go, value=None, inner=False):
         out = []
-        if stage in ("duty", "fan", "pump", "heat") and not go and not inner:
+        if stage in ("duty", "fan", "pump", "heat", "rehearse") and not go and not inner:
             out.append("the word go is missing")
         stale = self.fresh()
         if stale:
@@ -706,7 +774,7 @@ class Session:
                     out.append(f"writes not allowed for {c['id']}")
                 if c is not None and c["mode"] == "active":
                     out.append(f"{c['id']} is in active mode")
-        if stage in ("duty", "fan", "pump", "heat"):
+        if stage in ("duty", "fan", "pump", "heat", "rehearse"):
             cpu, gpu = self.tele.value("cpu_power", 10), self.tele.value("gpu_power", 10)
             foreign = None if cpu is None or gpu is None else cpu + gpu - self.load.own_watts()
             if foreign is None:
@@ -737,20 +805,27 @@ class Session:
         cid = self.cfg["controls"][part["kind"]]
         total = sum(s[1] for s in steps)
         t0 = self.clock.now()
-        self.phase, seen, gone = None, False, 0
+        self.phase, seen, gone, t_seen = None, False, 0, None
         while True:
             self.tick()
             p = self.tele.value("phase", 5)
             if p is not None:
+                if not seen:
+                    t_seen = self.clock.now()
                 seen, gone = True, 0
                 if int(p) != self.phase:
                     self.phase = int(p)
                     w = self.watts_of(steps, self.phase)
                     self.load.set_total(w)
                     d = steps[self.phase - 1][0] if self.phase <= len(steps) else None
-                    self.log(f"phase {self.phase} of {len(steps)} {part['kind']} duty {d} % load {'off' if w is None else f'{w:.0f} W'}")
-                    if self.phase == 1:
+                    n = None
+                    try:
                         n = self.pipe.snapshot().step
+                    except (PipeError, Refused) as e:
+                        self.log(f"status unavailable: {e}")
+                    ov = None if n is None else n.get("overridden")
+                    self.log(f"phase {self.phase} of {len(steps)} {part['kind']} duty {d} % load {'off' if w is None else f'{w:.0f} W'} overridden {ov}")
+                    if self.phase == 1 and n is not None:
                         if n is None or n.get("phases") != len(steps) or n.get("id") != cid:
                             self.abort.fire(f"daemon step plan {n} differs from the table ({len(steps)} phases)")
                             raise Aborted(self.abort.fired)
@@ -765,7 +840,12 @@ class Session:
                 self.abort.fire("step test ran longer than its plan")
                 raise Aborted(self.abort.fired)
         self.load.set_total(None)
-        self.log(f"{part['kind']} test finished, load off")
+        ran = self.clock.now() - t_seen - gone
+        if ran < total - self.cfg["early_tol_s"]:
+            self.log(f"{part['kind']} test ended early: {ran:.0f} s of {total} s")
+            self.abort.fire(f"{part['kind']} test ended early after {ran:.0f} s of {total} s")
+            raise Aborted(self.abort.fired)
+        self.log(f"{part['kind']} test finished after {ran:.0f} s, load off")
 
     def wait(self, secs, text):
         self.log(f"{text} {secs:.0f} s, load off")
@@ -789,7 +869,7 @@ class Session:
                 bad = self.refusals(stage, True, inner=True)
                 if bad:
                     self.log("refused to continue: " + "; ".join(bad))
-                    return
+                    return 2
             self.abort.tested = [cid]
             self.log(f"stage {stage}: starting {cid}, {len(part['steps'])} phases")
             self.start_test(cid)
@@ -798,6 +878,19 @@ class Session:
             if part["rest"] and (i < len(parts) - 1 or stage == "fan"):
                 self.wait(part["rest"], "rest")
         self.abort.tested = []
+        return 0
+
+    def run_rehearse(self):
+        r = self.cfg["rehearse"]
+        self.log(f"rehearse: {r['watts']:.0f} W for {r['secs']} s, no step test, no D5 command")
+        self.load.set_total(r["watts"])
+        for i in range(r["secs"]):
+            self.tick()
+            if i % r["every_s"] == 0:
+                t = self.tele
+                self.log(f"rehearse {i}s cpu {self.fmt(t.value('cpu_power'), '.0f')} W {self.fmt(t.value('cpu_temp'), '.0f')} C gpu {self.fmt(t.value('gpu_power'), '.0f')} W {self.fmt(t.value('gpu_temp'), '.0f')} C {self.load.report()}")
+        self.load.halt()
+        self.log("rehearse done, load off")
 
     def run_heat(self, value):
         target = value or self.cfg["heat"]["target_c"]
@@ -851,7 +944,9 @@ class Session:
         self.dog.start()
         try:
             if stage in self.cfg["stages"]:
-                self.run_parts(stage)
+                return self.run_parts(stage)
+            elif stage == "rehearse":
+                self.run_rehearse()
             elif stage == "heat":
                 self.run_heat(value)
             elif stage == "cool":
@@ -859,7 +954,6 @@ class Session:
         except Aborted:
             return 1
         except KeyboardInterrupt:
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
             self.abort.fire("ctrl-c")
             return 1
         except BaseException as e:
@@ -869,14 +963,17 @@ class Session:
             self.dog.stopped.set()
             self.load.halt()
             if self.abort.fired:
-                self.abort.done.wait()
+                try:
+                    self.abort.done.wait(self.cfg["release_wait_s"] + self.cfg["abort_timeout_s"] + 30)
+                except KeyboardInterrupt:
+                    self.log("second Ctrl-C: not waiting for the abort verdict")
         return 0
 
 
 def wait_fresh(tele, cfg, clock, secs=30):
     end = clock.now() + secs
     while clock.now() < end:
-        if all(tele.age(k) <= cfg["limits"]["stale_s"] for k in cfg["safety_channels"]):
+        if not stale_keys(cfg, tele):
             return True
         clock.sleep(0.5)
     return False
@@ -888,7 +985,7 @@ def interrupt(*args):
 
 def main(argv):
     if not argv:
-        print("usage: steprun.py duty|fan|pump|cool|heat|status [go] [heat target C]")
+        print("usage: steprun.py duty|fan|pump|cool|heat|rehearse|status [go] [heat target C]")
         return 2
     stage, words = argv[0], argv[1:]
     value = next((float(w) for w in words if w.replace(".", "", 1).isdigit()), None)
@@ -905,6 +1002,7 @@ def main(argv):
     finally:
         load.halt()
         tele.stop.set()
+        log.flush()
 
 
 if __name__ == "__main__":

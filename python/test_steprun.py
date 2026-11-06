@@ -99,6 +99,9 @@ class FakeLoad:
     def own_watts(self):
         return 0.0
 
+    def report(self):
+        return "duty fake"
+
     def halt(self):
         self.total = None
         self.events.append("load.halt")
@@ -132,7 +135,7 @@ def warm(rig, secs=3):
 
 LIMIT_CASES = [
     ("water", {"water": 44.0}),
-    ("cpu", {"cpu_temp": 95.0}),
+    ("cpu", {"cpu_temp": 100.0}),
     ("gpu", {"gpu_temp": 80.0}),
     ("pump", {"pump_rpm": 1499.0}),
 ]
@@ -166,8 +169,31 @@ def test_stale_telemetry_fires_after_ten_seconds():
     assert rig.session.dog.step() == []
     rig.clock.t += 2.0
     hits = rig.session.dog.step()
-    assert hits and "older than 10" in hits[0]
+    assert hits and "stale" in hits[0] and "water" in hits[0]
     assert rig.events[0] == "load.halt"
+
+
+def test_cpu_95_needs_ten_seconds_and_lhm_staleness_is_fifteen():
+    rig = Rig({"cpu_temp": 96.0})
+    for _ in range(8):
+        rig.clock.sleep(1.0)
+    assert not rig.session.abort.fired
+    for _ in range(4):
+        rig.clock.sleep(1.0)
+    assert rig.session.abort.fired and "CPU package" in rig.session.abort.fired
+    rig = Rig({"cpu_temp": 94.0})
+    warm(rig)
+    rig.feed.vals["cpu_temp"] = None
+    rig.clock.t += 14.0
+    rig.feed.vals.update(water=30.5)
+    rig.tele.push(rig.clock.now(), rig.cfg["channels"]["water"][0], 30.5)
+    for k in ("gpu_temp", "pump_rpm"):
+        rig.tele.push(rig.clock.now(), rig.cfg["channels"][k][0], 40.0 if k == "gpu_temp" else 2570.0)
+    assert rig.session.dog.check() == []
+    rig.clock.t += 2.0
+    for k, v in (("water", 30.5), ("gpu_temp", 40.0), ("pump_rpm", 2570.0)):
+        rig.tele.push(rig.clock.now(), rig.cfg["channels"][k][0], v)
+    assert any("cpu_temp" in h for h in rig.session.dog.check())
 
 
 def test_missing_channel_counts_as_stale():
@@ -511,3 +537,104 @@ def test_load_children_die_with_the_parent(job):
         assert not alive(pids[0])
     finally:
         parent.kill()
+
+
+def test_abort_survives_failing_steps_and_always_signals_done():
+    rig = Rig({"water": 45.0})
+    rig.pipe.command = lambda cmd: (_ for _ in ()).throw(RuntimeError("boom"))
+    rig.load.halt = lambda: (_ for _ in ()).throw(RuntimeError("halt boom"))
+    rig.session.abort.runner = lambda: (_ for _ in ()).throw(RuntimeError("runner boom"))
+    rig.session.abort.log = lambda t: (_ for _ in ()).throw(OSError("console"))
+    rig.session.dog.step()
+    assert rig.session.abort.done.is_set()
+
+
+def test_a_failing_log_never_stops_the_abort():
+    rig = Rig({"water": 45.0})
+    rig.session.abort.log = lambda t: (_ for _ in ()).throw(OSError("console"))
+    rig.session.dog.step()
+    assert rig.events[:2] == ["load.halt", "pipe.stop"] and rig.session.abort.done.is_set()
+
+
+def test_log_writes_the_file_even_when_the_console_fails(tmp_path, monkeypatch):
+    log = S.Log(str(tmp_path), S.Clock())
+    monkeypatch.setattr("builtins.print", lambda *a, **k: (_ for _ in ()).throw(OSError("blocked")))
+    log("hello")
+    log.flush()
+    assert "hello" in open(log.path, encoding="utf-8").read()
+
+
+def test_halted_load_does_not_respawn():
+    cfg = copy.deepcopy(S.CFG)
+    cfg["load"]["job"] = False
+    tele = S.Telemetry(cfg, S.Clock())
+    load = S.Load(cfg, tele)
+    load.halt()
+    load.set_total(100.0)
+    load.regulate()
+    assert load.total is None and load.pids() == [] and load.halted
+
+
+def test_early_end_is_not_success_and_duty_does_not_go_on_with_the_pump():
+    rig = Rig()
+    warm(rig)
+
+    def hook():
+        if not rig.pipe.commands or rig.pipe.started_at is None:
+            return
+        e = rig.clock.now() - rig.pipe.started_at - 3
+        if 0 <= e < 30:
+            rig.feed.phase = 1.0
+            rig.pipe.step = {"phases": 1, "id": "d5.fan"}
+        else:
+            rig.feed.phase = None
+            rig.pipe.step = None
+
+    rig.clock.hooks.insert(0, hook)
+    assert rig.session.run("duty", True) == 1
+    assert [c["id"] for c in rig.pipe.commands if c["cmd"] == "start_step_test"] == ["d5.fan"]
+    assert "ended early" in rig.session.abort.fired and "pipe.stop" in rig.events and "load.halt" in rig.events
+
+
+def test_phase_lines_log_the_overridden_flag():
+    rig = Rig()
+    warm(rig)
+    fan_part_feed(rig)
+    rig.session.run("fan", True)
+    assert any("overridden" in l and l.startswith("phase 2") for l in rig.logs)
+
+
+def test_rehearse_runs_250_w_for_120_s_without_water_band_or_commands():
+    rig = Rig({"water": 35.0})
+    warm(rig)
+    t0 = rig.clock.now()
+    assert rig.session.run("rehearse", True) == 0
+    assert rig.load.calls[0][1] == 250.0 and rig.events[-1] == "load.halt"
+    assert 120 <= rig.clock.now() - t0 <= 130 and rig.pipe.commands == []
+    assert sum(1 for l in rig.logs if l.startswith("rehearse") and "s cpu" in l) >= 24
+    assert S.Session(rig.cfg, rig.tele, rig.pipe, rig.load, rig.runner, rig.logs.append, rig.clock).run("rehearse", False) == 2
+
+
+def test_pipe_ids_are_local_and_busy_open_error_is_recognised(monkeypatch):
+    pipe = S.Pipe(copy.deepcopy(S.CFG))
+
+    def exchange(req):
+        pipe.n += 5
+        return {"v": 2, "id": req["id"], "body": {"type": "ack"}}
+
+    pipe.exchange = exchange
+    pipe.command({"cmd": "stop_step_test"})
+    calls = []
+
+    def fake_open(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise OSError(22, "Invalid argument")
+        raise FileNotFoundError(2, "gone")
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(S.time, "sleep", lambda s: None)
+    pipe2 = S.Pipe(copy.deepcopy(S.CFG))
+    with pytest.raises(FileNotFoundError):
+        pipe2.exchange({"v": 2, "id": 1, "body": {}})
+    assert len(calls) == 3
