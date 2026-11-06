@@ -17,18 +17,21 @@ if (q.get('fault')) {
 }
 const still = q.get('still') === '1';
 const water = parseFloat(q.get('water'));
+const speed = parseFloat(q.get('speed')) || 1;
+const ramp = parseFloat(q.get('ramp')) || 0;
+const t00 = Date.now();
 const wave = (i, t, p) => Math.sin(t / p + i * 1.7);
 
 function snapshot() {
   const t = Date.now() / 1000;
   const s = JSON.parse(JSON.stringify(state));
-  s.ts_ms = Date.now();
   s.seq = ++seq;
+  s.ts_ms = speed === 1 ? Date.now() : t00 + seq * 1000;
   s.channels.forEach((c, i) => {
     const b = base.channels[i].value;
     if (b != null) c.value = b * (1 + (c.kind === 'temperature' || c.kind === 'power' || c.kind === 'fan' ? 0.04 : 0.01) * (0.6 * wave(i, t, 9) + 0.4 * wave(i, t, 41)));
     if (still && /^d5next\/fan\/(rpm|duty|power|current)$/.test(c.id)) c.value = 0;
-    if (c.id === 'd5next/water/temp' && isFinite(water)) c.value = water;
+    if (c.id === 'd5next/water/temp' && (isFinite(water) || ramp)) c.value = (isFinite(water) ? water : b) + (ramp * seq) / 60;
     if (stale.has(c.id)) Object.assign(c, { stale: true, age_ms: 42000, value: b });
   });
   s.alarms = [];
@@ -48,7 +51,7 @@ function snapshot() {
 }
 
 const emit = (name, payload) => (listeners[name] || []).forEach((cb) => cb({ payload }));
-setInterval(() => !down && emit('snapshot', snapshot()), 1000);
+setInterval(() => !down && emit('snapshot', snapshot()), 1000 / speed);
 
 function history(qy) {
   const s = snapshot();
