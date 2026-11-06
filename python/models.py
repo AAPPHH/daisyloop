@@ -4,7 +4,7 @@ import math
 import os
 import time
 import numpy as np
-from features import FeatureFrame, Ops, PhysSpec, Spec, CONFIG as FCFG
+from features import FeatureFrame, Ops, PHYS, PhysSpec, Spec, CONFIG as FCFG
 from rawstore import RawStore
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,10 +52,23 @@ class Dataset:
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"]) }
         ff = FeatureFrame(dict(FCFG, cache_dir=sd)) if sd else FeatureFrame()
         if cfg.get("phys"):
-            names, F, _ = ff.compute(PhysSpec(Spec.load(FCFG["spec_path"])).build(), X, ix, meta["k0"])
+            ps = PhysSpec(Spec.load(FCFG["spec_path"]), dict(PHYS, **cfg.get("phys_cfg", {})))
+            spec = ps.build()
+            if cfg.get("phys_only"):
+                spec = spec.subset(set(ps.names()))
+            names, F, _ = ff.compute(spec, X, ix, meta["k0"])
         else:
             names, F = ff.load()
         T = F.shape[0]
+        extra = {}
+        if cfg.get("future_fan"):
+            pc = dict(PHYS, **cfg.get("phys_cfg", {}))
+            fan = Ops.ffill(np.asarray(X[:, ix["d5next/fan/rpm"]], dtype=np.float64), FCFG["ffill_s"], False)
+            wma = np.asarray(F[:, names.index("water_minus_amb")], dtype=np.float64)
+            for k in cfg["future_fan"]:
+                fut = np.full(T, np.nan)
+                fut[: T - k] = fan[k:]
+                extra[f"ph.fxf{k}"] = (pc["gn_frac"] + (1 - pc["gn_frac"]) * (fut / pc["rpm_full"]) ** pc["m"]) * wma
         ser = {k: Ops.ffill(np.asarray(X[:, ix[ch]], dtype=np.float64), FCFG["ffill_s"], False) for k, ch in cfg["series"].items()}
         rows = np.arange(0, T, cfg["stride"])
         Y, tn = [], []
@@ -70,7 +83,11 @@ class Dataset:
         for b, spans in enumerate(cfg["blocks"].values()):
             for a, z in spans:
                 block[max(0, local_idx(meta, a)): local_idx(meta, z)] = b
-        np.savez(cfg["cache"], F=np.asarray(F[rows]), Y=np.array(Y).T.astype(np.float32), t=rows, block=block[rows], names=np.array(names),
+        names = list(names) + list(extra)
+        Fs = np.asarray(F[rows])
+        if extra:
+            Fs = np.hstack([Fs, np.column_stack([v[rows] for v in extra.values()]).astype(np.float32)])
+        np.savez(cfg["cache"], F=Fs, Y=np.array(Y).T.astype(np.float32), t=rows, block=block[rows], names=np.array(names),
                  tnames=np.array(tn), bnames=np.array(bn), k0=meta["k0"], raw=np.array([ser[k][rows] for k in cfg["series"]]).T.astype(np.float32))
 
     def load(self):
@@ -274,3 +291,130 @@ FRESH.update({
                    fresh2=[("2026-11-05 08:45", "2026-11-05 18:40")]),
     "runs_log": os.path.join(HERE, "..", "models", "runs_linear.jsonl"),
 })
+
+
+LIN = {
+    "ridge": {"alpha": [0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]},
+    "svr": {"C": [0.001, 0.01, 0.1], "epsilon": [0.005, 0.01, 0.02]},
+    "huber": {"alpha": [1.0, 100.0, 3000.0], "epsilon": [1.35]},
+}
+LIN_TARGETS = ["water_30", "water_60", "water_90", "water_120", "cpu_30", "cpu_120", "gpu_30", "gpu_120"]
+LIN_SETS = ["a44", "phys", "rich"]
+LIN_CLIP = 5.0
+
+
+class Prep:
+    def __init__(self, cols):
+        self.cols = list(cols)
+
+    def fit(self, F, rows):
+        X = F[rows][:, self.cols].astype(np.float64)
+        ok = np.isfinite(X)
+        n = np.maximum(ok.sum(0), 1)
+        self.mean = np.where(ok, X, 0.0).sum(0) / n
+        self.std = np.sqrt(np.where(ok, (X - self.mean) ** 2, 0.0).sum(0) / n)
+        self.std = np.where(self.std < 1e-9, 1.0, self.std)
+        return self
+
+    def z(self, X, clip=None):
+        Z = np.nan_to_num((X - self.mean) / self.std, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.clip(Z, -clip, clip) if clip else Z
+
+    def transform(self, F, rows, clip=None):
+        return self.z(F[rows][:, self.cols].astype(np.float64), clip)
+
+
+class LinearFit:
+    def __init__(self, family, params):
+        self.family, self.params = family, params
+
+    def make(self):
+        from sklearn.linear_model import HuberRegressor, Ridge
+        from sklearn.svm import LinearSVR
+        p = self.params
+        if self.family == "ridge":
+            return Ridge(alpha=p["alpha"])
+        if self.family == "svr":
+            return LinearSVR(C=p["C"], epsilon=p["epsilon"], loss="epsilon_insensitive", dual=True, tol=1e-3, max_iter=1000, random_state=0)
+        return HuberRegressor(epsilon=p["epsilon"], alpha=p["alpha"], max_iter=200)
+
+    @staticmethod
+    def grid(family):
+        g = LIN[family]
+        keys = list(g)
+        out = [{}]
+        for k in keys:
+            out = [dict(o, **{k: v}) for o in out for v in g[k]]
+        return out
+
+    def fit(self, Z, y):
+        import warnings
+        warnings.simplefilter("ignore")
+        m = self.make().fit(Z, y)
+        self.w, self.b = np.asarray(m.coef_, dtype=np.float64), float(np.ravel(m.intercept_)[0])
+        return self
+
+    def predict(self, Z):
+        return Z @ self.w + self.b
+
+
+def lin_rows(D, blocks, tg):
+    return np.concatenate([D.sel(b, tg) for b in blocks]) if blocks else np.zeros(0, dtype=np.int64)
+
+
+def linear_task(job):
+    cfg = job["cfg"]
+    D = Dataset(cfg).load()
+    feats = list(job["feats"])
+    if job.get("drop_lhm"):
+        lhm = set(D.lhm_cols())
+        feats = [n for n in feats if n not in lhm and not n.startswith("mask_lhm")]
+    cols = [D.col[n] for n in feats]
+    clip = job.get("clip", LIN_CLIP)
+    out = {"feats": feats, "clip": clip, "targets": {}}
+    for tg in job["targets"]:
+        fit_rows = lin_rows(D, job["fit"], tg)
+        prep = Prep(cols).fit(D.F, fit_rows)
+        Ztr, ytr = prep.transform(D.F, fit_rows, clip), D.Y[fit_rows, D.tnames.index(tg)].astype(np.float64)
+        if job.get("val"):
+            vr = lin_rows(D, job["val"], tg)
+            Zv, yv = prep.transform(D.F, vr, clip), D.Y[vr, D.tnames.index(tg)].astype(np.float64)
+            res = []
+            for p in LinearFit.grid(job["family"]):
+                f = LinearFit(job["family"], p).fit(Ztr, ytr)
+                res.append((float(np.sqrt(np.mean((f.predict(Zv) - yv) ** 2))), p))
+            best = min(res, key=lambda r: r[0])[1]
+        else:
+            res, best = [], job["params"][tg]
+        f = LinearFit(job["family"], best).fit(Ztr, ytr)
+        r = {"params": best, "grid": res, "preds": {}, "mean": prep.mean, "std": prep.std, "w": f.w, "b": f.b}
+        for b in D.bnames:
+            ix = D.sel(b, tg)
+            r["preds"][b] = f.predict(prep.transform(D.F, ix, clip)) if len(ix) else np.zeros(0)
+        out["targets"][tg] = r
+    return {"tag": job["tag"], "res": out}
+
+
+def xgb_fit_task(job):
+    import xgboost as xgb
+    cfg = job["cfg"]
+    D = Dataset(cfg).load()
+    feats = job["feats"]
+    out = {}
+    for tg in job["targets"]:
+        tr = lin_rows(D, job["fit"], tg)
+        p = dict(cfg["xgb"], **job["params"])
+        p.pop("rounds"), p.pop("early")
+        p["seed"] = 0
+        ti = D.tnames.index(tg)
+        Xtr, ytr = augment(D, D.X(tr, feats), D.Y[tr, ti], feats, job["lhm_aug"], 0)
+        m = xgb.train(p, xgb.DMatrix(Xtr, ytr), job["rounds"][tg])
+        out[tg] = {"preds": {b: m.predict(xgb.DMatrix(D.X(D.sel(b, tg), feats))) if len(D.sel(b, tg)) else np.zeros(0) for b in D.bnames}}
+        if job.get("save"):
+            m.save_model(os.path.join(cfg["out_dir"], f"{job['tag']}_{tg}.json"))
+    return {"tag": job["tag"], "res": out}
+
+
+VARIANTS = {"m07": {"m": 0.7}, "m25": {"m": 2.5}, "gn20": {"gn_frac": 0.2}, "ff": {}}
+for _k, _v in VARIANTS.items():
+    VARIANTS[_k] = dict(FRESH, cache=os.path.join(LOCAL, "cache_fresh", f"D5f_{_k}.npz"), phys_cfg=_v, phys_only=True, future_fan=[15, 30] if _k == "ff" else None)
