@@ -18,7 +18,7 @@ const SEALED: &str = "sealed";
 const OPEN: &str = "arrows";
 const SYNC: &str = "sync";
 const TAIL: &str = "tail";
-const TAIL_KEEP: usize = 3;
+const TAIL_KEEP: usize = 6;
 const PARKED: [&str; 2] = ["bad", "partial"];
 const MARK: usize = 16;
 const MAX_FILE: u64 = 4 << 30;
@@ -936,7 +936,7 @@ mod tests {
         let d = dir("hot-tail");
         let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
         let base = crate::now_micros() / 1_000_000 - 100;
-        for round in 0..5 {
+        for round in 0..(TAIL_KEEP as i64 + 2) {
             for ts in 0..3 {
                 let rows = vec![Row::new("d5next", "d5next/water/temp", "Water", "temperature", "degC", (round * 10 + ts) as f64)];
                 hot.append(&Tick { ts: (base + round * 10 + ts) * 1_000_000, rows, raw: None }).unwrap();
@@ -950,9 +950,10 @@ mod tests {
         assert_eq!(HotStore::list_in(&d.join("hot").join(TAIL), SEALED).len(), TAIL_KEEP);
         let all = HotStore::recent(&d, &|c| c == "d5next/water/temp", 1000);
         assert_eq!(all.len(), 3 * TAIL_KEEP);
-        assert_eq!(all.last().unwrap().1["d5next/water/temp"], 42.0);
+        let last = ((TAIL_KEEP as i64 + 1) * 10 + 2) as f64;
+        assert_eq!(all.last().unwrap().1["d5next/water/temp"], last);
         assert!(HotStore::recent(&d, &|c| c == "other", 1000).is_empty());
         let few = HotStore::recent(&d, &|_| true, 2);
-        assert_eq!(few.iter().map(|f| f.1["d5next/water/temp"]).collect::<Vec<_>>(), vec![40.0, 41.0, 42.0]);
+        assert_eq!(few.iter().map(|f| f.1["d5next/water/temp"]).collect::<Vec<_>>(), vec![last - 2.0, last - 1.0, last]);
     }
 }
