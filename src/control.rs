@@ -776,6 +776,7 @@ impl Control {
         for k in self.foreign.clone() {
             let ch = self.chans.iter().find(|c| c.spec.kind == k).unwrap().rpm_channel();
             let msg = match (self.writes, k) {
+                (false, _) if self.owned.contains(&k) => "Kanal steht im Duty-Modus aus einem früheren daisyloop-Lauf und könnte bei 0 % stehen (Schreiben deaktiviert, daisyloop schreibt nichts): sofort d5_abort.exe ausführen",
                 (true, _) => "Kanal steht im Duty-Modus, nicht von daisyloop gesetzt, bleibt unberührt",
                 (false, ControlKind::Fan) => "Lüfter steht im Duty-Modus und könnte bei 0 % stehen (Schreiben deaktiviert): daisyloop ändert nichts und schützt ihn nicht, bitte Firmware-PID in aquasuite setzen",
                 (false, ControlKind::Pump) => "Pumpe steht im Duty-Modus (Schreiben deaktiviert), daisyloop ändert nichts",
