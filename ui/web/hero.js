@@ -1,5 +1,6 @@
 import { $, Tween, heat, heatRGB, norm, WATER, COMPONENT, clamp, num, motion, fmt, ageText, h } from './ui.js';
 import { S, KEYS, value, trend, isStale, ageMs } from './state.js';
+import { Heat } from './heat.js';
 
 const TAU = Math.PI * 2;
 const smooth = (a, b, x) => {
@@ -27,6 +28,7 @@ export class Hero {
     };
     this.m = { water: 30, cpuP: 0, gpuP: 0, pumpRpm: 0, fanRpm: 0 };
     this.sm = { ...this.m };
+    this.heat = new Heat();
     this.phase = 0;
     this.pumpAng = 0;
     this.fanAng = 0;
@@ -128,6 +130,7 @@ export class Hero {
     this.agePills();
     this.forecast(live);
     this.limits(live);
+    this.heat.update(live);
     const pill = $('#alarm-pill');
     const alarms = S.snap?.alarms ?? [];
     if (live && alarms.length) {
