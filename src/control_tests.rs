@@ -133,6 +133,7 @@ fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
     let dir = std::env::temp_dir().join(format!("daisyloop-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
     let mut cfg = Config { writes_enabled: true, data_dir: dir, ..Config::default() };
     cfg.control.decision_secs = 30.0;
+    cfg.control.plan_secs = 30.0;
     tweak(&mut cfg);
     cfg
 }

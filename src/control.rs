@@ -171,6 +171,7 @@ pub struct ControlConfig {
     pub fan: ChannelOverride,
     pub pump: ChannelOverride,
     pub step_test: StepTestConfig,
+    pub plan_secs: f64,
     pub decision_secs: f64,
     pub horizon_secs: u32,
     pub rollout_secs: u32,
@@ -214,6 +215,7 @@ impl Default for ControlConfig {
             fan: ChannelOverride::default(),
             pump: ChannelOverride::default(),
             step_test: StepTestConfig::default(),
+            plan_secs: 5.0,
             decision_secs: 30.0,
             horizon_secs: 120,
             rollout_secs: 120,
@@ -260,8 +262,8 @@ impl ControlConfig {
         water.is_some_and(|w| w < if stopped { self.fan_start_water } else { self.fan_stop_water })
     }
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.bound_drop_k, self.bound_hold_secs, self.bound_raise_step, self.follow_settle_secs, self.follow_secs];
-        if nums.iter().any(|v| !v.is_finite() || *v < 0.0) || self.decision_secs < 5.0 || self.stale_secs < 2.0 {
+        let nums = [self.plan_secs, self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.bound_drop_k, self.bound_hold_secs, self.bound_raise_step, self.follow_settle_secs, self.follow_secs];
+        if nums.iter().any(|v| !v.is_finite() || *v < 0.0) || self.plan_secs < 1.0 || self.plan_secs > self.decision_secs || self.decision_secs < 5.0 || self.stale_secs < 2.0 {
             return Err("timing or limit value out of range".into());
         }
         if !(0.0..=1.0).contains(&self.weight) || self.horizon_secs == 0 || self.rollout_secs == 0 || self.fan_candidates < 2 || self.pump_candidates < 2 || self.fan_candidates > 16 || self.pump_candidates > 16 {
@@ -472,6 +474,7 @@ impl Control {
     const FROZEN_BAND_K: f64 = 0.01 + 1e-9;
     const FROZEN_RELEASE_K: f64 = 0.05;
     const BOUND_GAP_MS: i64 = 5000;
+    const RATE_REF_MS: f64 = 30_000.0;
     const RAISE_WINDOW_MS: i64 = 3_600_000;
     const HEAT_MIN_MS: i64 = 90_000;
     const HEAT_DELAY_MS: i64 = 31_000;
@@ -974,11 +977,11 @@ impl Control {
     }
 
     fn decide(&mut self, now: i64) {
-        let interval = (self.cfg.decision_secs * 1000.0) as i64;
+        let interval = (self.cfg.plan_secs * 1000.0) as i64;
         let fan = &self.chans[0];
         let restart = fan.mode == Mode::Active && fan.duty_cmd == Some(0.0) && self.temps(now).water.is_some_and(|w| !self.cfg.fan_may_stop(Some(w), true));
-        let due = restart || std::mem::take(&mut self.restarted) || self.last_decision.is_none_or(|t| now - t >= interval) && now - self.last_write >= interval;
-        if !due || self.chans.iter().all(|c| c.mode == Mode::Off) {
+        let forced = restart || std::mem::take(&mut self.restarted);
+        if !(forced || self.last_decision.is_none_or(|t| now - t >= interval)) || self.chans.iter().all(|c| c.mode == Mode::Off) {
             return;
         }
         self.last_decision = Some(now);
@@ -986,7 +989,8 @@ impl Control {
         self.shown = None;
         let outlook = self.outlook(now);
         if !matches!(outlook, Outlook::Failed) {
-            self.apply(now, outlook);
+            let open = forced || now - self.last_write >= (self.cfg.decision_secs * 1000.0) as i64;
+            self.apply(now, outlook, open);
         }
     }
 
@@ -1034,7 +1038,7 @@ impl Control {
         Outlook::Ready(Wants { fits, zero_ok, bases: [fb, pb], warm })
     }
 
-    fn apply(&mut self, now: i64, outlook: Outlook) {
+    fn apply(&mut self, now: i64, outlook: Outlook, open: bool) {
         let mut set = Vec::new();
         let mut exempt = Vec::new();
         for i in 0..self.chans.len() {
@@ -1078,8 +1082,9 @@ impl Control {
                 continue;
             }
             let from = c.duty_cmd.filter(|_| c.driving()).map_or(w.bases[i].rpm, |d| c.cal.rpm(d));
-            let down = c.cfg.step_down_rpm.max(from - c.cal.rpm((c.cal.duty(from) - c.cfg.down_step_duty).max(0.0)));
-            let mut new = if want > from { want.min(from + c.cfg.step_up_rpm) } else { want.max(from - down) }.clamp(lo, hi).max(bound_rpm);
+            let pace = if c.duty_cmd.is_some() && c.driving() { ((now - c.wrote_ms) as f64 / Self::RATE_REF_MS).min(1.0) } else { 1.0 };
+            let down = (c.cfg.step_down_rpm * pace).max(from - c.cal.rpm((c.cal.duty(from) - c.cfg.down_step_duty).max(0.0)));
+            let mut new = if want > from { want.min(from + c.cfg.step_up_rpm * pace) } else { want.max(from - down) }.clamp(lo, hi).max(bound_rpm);
             if i == 0 && w.zero_ok && want <= 0.0 && c.cfg.start_duty > 0.0 && c.cal.duty(new) < c.cfg.start_duty {
                 new = 0.0;
             }
@@ -1089,7 +1094,7 @@ impl Control {
             let duty = c.cfg.commandable(c.cal.duty(new), i == 0 && w.zero_ok);
             c.target = Some(c.cal.rpm(duty));
             c.note = None;
-            if c.duty_cmd.is_none_or(|d| (d - duty).abs() >= c.cfg.deadband_duty) || c.drive == Drive::Firmware {
+            if open && (c.duty_cmd.is_none_or(|d| (d - duty).abs() >= c.cfg.deadband_duty) || c.drive == Drive::Firmware) {
                 set.push((c.spec.kind, Setting::Duty(duty)));
                 if bound > 0.0 && duty <= bound + 1e-9 && c.duty_cmd.is_none_or(|d| duty > d) && Self::raise_open(c, now, self.cfg.bound_raise_cap) {
                     exempt.push(c.spec.kind);

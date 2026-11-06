@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::Forecast;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 struct Blind;
@@ -18,11 +19,15 @@ impl Model for Blind {
 }
 
 fn blind_rig(tweak: impl Fn(&mut Config)) -> Rig {
+    rig_with(Box::new(Blind), tweak)
+}
+
+fn rig_with(model: Box<dyn Model>, tweak: impl Fn(&mut Config)) -> Rig {
     let cfg = base_cfg(tweak);
     let sim = Sim::new();
     let s = sim.clone();
     let factory: Factory = Box::new(move || Ok(Box::new(s.clone()) as Box<dyn D5Control>));
-    let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(Blind)));
+    let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(model));
     Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail: Rc::new(Cell::new(false)), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(0.0)), extra: vec![], live: false, dir: cfg.state_dir() }
 }
 
@@ -259,6 +264,7 @@ impl PlantSpec {
     const NAMED: [(&'static str, PlantSpec); 2] = [("measured", Self::MEASURED), ("alternative", Self::ALTERNATIVE)];
 }
 
+#[derive(Clone)]
 struct Plant {
     spec: PlantSpec,
     t1: f64,
@@ -274,6 +280,13 @@ impl Plant {
 
     fn new(spec: PlantSpec) -> Plant {
         Plant { spec, t1: 30.0, t2: 30.0, seen: VecDeque::from(vec![30.0]) }
+    }
+    fn retarget(&mut self, t: f64) {
+        (self.t1, self.t2) = (t, t);
+        self.seen = VecDeque::from(vec![t]);
+    }
+    fn reading(&self) -> f64 {
+        self.seen[0]
     }
     fn step(&mut self, power: f64, fan_rpm: f64) -> f64 {
         let g = self.spec.g_stop + (self.spec.g_full - self.spec.g_stop) * (fan_rpm / 1470.0).powf(self.spec.exponent);
@@ -295,21 +308,27 @@ enum Profile {
     Sine(f64),
     Golden,
     Once(f64, usize, f64),
+    Step(f64, f64, usize),
 }
 
 impl Profile {
     const SECS: usize = 86_400;
+    const STEP_TAIL: usize = 1800;
     fn power(&self, t: usize) -> f64 {
         match *self {
             Profile::Constant(w) => w,
             Profile::Square(lo, hi, on, off) => if t % (on + off) >= off { hi } else { lo },
             Profile::Once(hi, secs, lo) => if t < secs { hi } else { lo },
+            Profile::Step(lo, hi, at) => if t < at { lo } else { hi },
             Profile::Sine(_) => 100.0,
             Profile::Golden => 0.0,
         }
     }
     fn closed(&self) -> bool {
-        matches!(self, Profile::Constant(_) | Profile::Square(..))
+        matches!(self, Profile::Constant(_) | Profile::Square(..) | Profile::Step(..))
+    }
+    fn secs(&self) -> usize {
+        if let Profile::Step(_, _, at) = *self { at + Self::STEP_TAIL } else { Self::SECS }
     }
     const IDLE_W: f64 = 20.0;
     fn load_end(&self) -> usize {
@@ -338,6 +357,7 @@ impl Profile {
             Profile::Sine(c) => format!("sine {c:.1} C"),
             Profile::Golden => "golden".into(),
             Profile::Once(hi, secs, lo) => format!("once {hi:.0} W {} min then {lo:.0} W", secs / 60),
+            Profile::Step(lo, hi, at) => format!("step {lo:.0} to {hi:.0} W after {} min", at / 60),
         }
     }
 }
@@ -399,6 +419,9 @@ struct Outcome {
     fallback: bool,
     frozen: bool,
     swings: usize,
+    short_cycles: usize,
+    rise: Option<usize>,
+    pre: (f64, f64),
 }
 
 const CPU_POWER: &str = "/intelcpu/0/power/0";
@@ -412,23 +435,35 @@ fn simulate(profile: Profile, spec: PlantSpec, tweak: impl Fn(&mut Config)) -> O
 }
 
 fn simulate_noisy(profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(&mut Config)) -> Outcome {
+    simulate_with(plan::Kind::Blind, profile, spec, noise, tweak)
+}
+
+fn simulate_with(kind: plan::Kind, profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(&mut Config)) -> Outcome {
     let mut rng = Noise(88172645463325252);
-    let mut rig = blind_rig(tweak);
-    let mut plant = Plant::new(spec);
+    let plant = Rc::new(RefCell::new(Plant::new(spec)));
+    let feed = Rc::new(Cell::new((0.0, 0.0)));
+    let (mut rig, mut world) = plan::rig(kind, &plant, &feed, tweak);
     let trace = matches!(profile, Profile::Golden).then(Trace::golden);
-    rig.water = plant.t1;
-    rig.run(5);
+    plant.borrow_mut().retarget(world.as_ref().map_or(30.0, |w| w.start));
+    rig.water = plant.borrow().t1;
+    for _ in 0..5 {
+        plan::advance(&mut rig, &mut world, 0.0);
+    }
     rig.active("d5.fan");
     rig.active("d5.pump");
     let fan_cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
     let mut out = Outcome::default();
     let (mut pump_hi, mut fan_hi, mut fan_cold, mut high) = (0usize, 0usize, 0usize, false);
-    for t in 0..Profile::SECS {
+    let (mut fan_on, mut fan_since, mut before) = (None::<bool>, 0usize, (0.0, 0.0));
+    let secs = profile.secs();
+    for t in 0..secs {
         let r = rig.sim.report();
         let rpm = |s: Spec, cal: &Calibration| cal.rpm(if r[s.mode()] == 0 { be16(&r, s.preset()) as f64 / 100.0 } else { 90.0 });
         let power = profile.power(t);
-        let reading = plant.step(power, rpm(Spec::FAN, &fan_cal));
-        out.peak = out.peak.max(plant.t1);
+        let fan_rpm = rpm(Spec::FAN, &fan_cal);
+        feed.set((power, fan_rpm));
+        let reading = plant.borrow_mut().step(power, fan_rpm);
+        out.peak = out.peak.max(plant.borrow().t1);
         rig.extra = vec![(CPU_POWER, power), (GPU_POWER, 0.0), (PUMP_POWER, 5.0)];
         rig.water = match (&profile, &trace) {
             (_, Some(g)) => {
@@ -443,7 +478,7 @@ fn simulate_noisy(profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(
         if trace.is_none() {
             rig.cpu = rig.water + 15.0 + 0.1 * power;
         }
-        rig.tick();
+        plan::advance(&mut rig, &mut world, fan_rpm);
         out.frozen |= rig.c.frozen_hit(rig.now).is_some();
         let d = |i: usize| rig.c.chans[i].duty_cmd;
         pump_hi += d(1).is_some_and(|x| x >= 90.0) as usize;
@@ -457,14 +492,30 @@ fn simulate_noisy(profile: Profile, spec: PlantSpec, noise: f64, tweak: impl Fn(
         }
         fan_cold += (d(0).is_some_and(|x| x > 0.0) && rig.water < 33.0) as usize;
         out.budget |= rig.c.chans.iter().any(|c| c.over);
+        let on = d(0).is_some_and(|x| x > 0.0);
+        if fan_on.is_some_and(|was| was != on) {
+            out.short_cycles += (t - fan_since < ChannelConfig::defaults(ControlKind::Fan).min_run_secs as usize) as usize;
+        }
+        if fan_on != Some(on) {
+            (fan_on, fan_since) = (Some(on), t);
+        }
+        if let Profile::Step(_, _, at) = profile {
+            let level = (d(0).unwrap_or(0.0), d(1).unwrap_or(0.0));
+            if t + 1 == at {
+                before = level;
+                out.pre = level;
+            } else if t >= at && out.rise.is_none() && level.0 > before.0 + 2.0 {
+                out.rise = Some(t - at);
+            }
+        }
     }
-    out.fan_cold = fan_cold as f64 / Profile::SECS as f64;
+    out.fan_cold = fan_cold as f64 / secs as f64;
     let sets = rig.sim.duty_sets();
     let fan: Vec<u16> = sets.iter().map(|(_, r)| be16(r, Spec::FAN.preset())).collect();
     out.stops = fan.windows(2).filter(|w| w[0] != 0 && w[1] == 0).count();
     out.writes = sets.len();
-    out.pump_hi = pump_hi as f64 / Profile::SECS as f64;
-    out.fan_hi = fan_hi as f64 / Profile::SECS as f64;
+    out.pump_hi = pump_hi as f64 / secs as f64;
+    out.fan_hi = fan_hi as f64 / secs as f64;
     out.fallback = rig.c.chans.iter().any(|c| c.fallback.is_some());
     out
 }
@@ -806,7 +857,7 @@ fn sweep(cases: &[(PlantSpec, Profile)], tweak: &(dyn Fn(&mut Config) + Sync)) -
     let next = std::sync::atomic::AtomicUsize::new(0);
     let done = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for _ in 0..std::thread::available_parallelism().map_or(4, |n| n.get().min(20)) {
+        for _ in 0..std::env::var("DL_SIM_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(2usize) {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let Some((spec, p)) = cases.get(i) else { break };
@@ -885,3 +936,6 @@ fn r26_hold_and_coarse_down_step_table() {
     eprintln!("{table}");
 }
 
+
+#[path = "plan_tests.rs"]
+mod plan;
