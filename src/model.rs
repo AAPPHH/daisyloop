@@ -435,24 +435,55 @@ mod tests {
         out
     }
 
-    #[test]
-    fn exported_step_model_is_identified_and_its_forecast_follows_the_fan_rpm() {
+    fn step_model_at_200_w() -> (XgbModel, f64) {
         let g = Golden::load();
         let mut m = XgbModel::load(&[Golden::dir().join("fixtures").join("steptrain")], "feature_spec_deploy.json", "model_deploy.json").unwrap();
+        let mut water = f64::NAN;
         for t in 3000..g.rows.len() {
-            m.observe(&g.row(t), g.k0 + t as i64);
+            let mut row = g.row(t);
+            for (c, w) in [("/intelcpu/0/power/0", 110.0), ("nvml/0/power", 90.0), ("/gpu-nvidia/0/power/0", 90.0)] {
+                if row.contains_key(c) {
+                    row.insert(c.to_string(), w);
+                }
+            }
+            water = row.get("d5next/water/temp").copied().unwrap_or(water);
+            m.observe(&row, g.k0 + t as i64);
         }
-        assert_eq!(m.identified(), (true, true));
+        (m, water)
+    }
+
+    fn forecast_at(m: &XgbModel, fan_rpm: f64, horizon: u32) -> f64 {
+        let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
+        let (fcal, pcal) = (fc.calibration(), pc.calibration());
+        let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
+        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
+        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: false, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
+        let mut hold = HashMap::new();
+        fan.hold(fan_rpm, &mut hold);
+        pump.hold(pump.base.rpm, &mut hold);
+        m.forecast(&hold, ControlConfig::default().rollout_secs, horizon).unwrap().water
+    }
+
+    #[test]
+    fn exported_step_model_is_identified_and_its_forecast_follows_the_fan_rpm() {
+        let (m, water) = step_model_at_200_w();
+        assert_eq!(m.identified(), (true, false));
         assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
         let curve = fan_spread(&m);
         let old = fan_spread(&real());
         println!("step model {curve:?}
 deployed   {old:?}");
-        let (lo, hi) = (curve.first().unwrap(), curve.last().unwrap());
         assert!(curve.windows(2).all(|w| w[0].1 >= w[1].1 - 0.02), "forecast must not rise with fan rpm: {curve:?}");
-        assert!(lo.1 - hi.1 > 0.2, "slow fan must forecast warmer water than full fan: {curve:?}");
-        let spread = |c: &[(f64, f64)]| c.first().unwrap().1 - c.last().unwrap().1;
-        assert!(spread(&curve) > 3.0 * spread(&old).abs(), "{curve:?} against {old:?}");
+        let (stopped, slow, h) = (forecast_at(&m, 0.0, 120), forecast_at(&m, 735.0, 120), 120.0);
+        let dead = 31.0 - 20.0 * (3400.0 - 2570.0) / (4800.0 - 2570.0);
+        let plant = 23.8 * (735.0f64 / 1460.0).powf(1.61) * (1.0 + 0.03 * (3400.0 / 4800.0 - 1.0)) * (water - 25.0) * (h - dead) / 7100.0;
+        let spread = stopped - slow;
+        println!("water {water:.2} stopped {stopped:.3} 735 rpm {slow:.3} spread {spread:.3} plant {plant:.3}");
+        assert!(spread / plant > 1.0 / 1.5 && spread / plant < 1.5, "spread {spread} plant {plant}");
+        let per_min = stopped / ((h - dead) / 60.0);
+        assert!(per_min > 1.4 / 1.5 && per_min < 1.4 * 1.5, "{per_min} K/min");
+        let old_spread = old.first().unwrap().1 - old.last().unwrap().1;
+        assert!(spread > 3.0 * old_spread.abs());
     }
 
     fn restart(g: &Golden, upto: usize, gap: usize, seed_secs: i64, name: &str) -> (XgbModel, i64) {
