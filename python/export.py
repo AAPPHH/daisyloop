@@ -174,17 +174,29 @@ class LinearExporter:
         return out
 
     @staticmethod
+    def term(model, x, tg):
+        r = model.get("response")
+        series, h = tg.split("_")
+        if not r or series not in r["gain"]:
+            return 0.0
+        f = model["features"]
+        u = min(max((x[f.index(r["pump_feat"])] - r["pump"][0]) / (r["pump"][1] - r["pump"][0]), 0.0), 1.0)
+        dead = r["dead"][0] + (r["dead"][1] - r["dead"][0]) * u
+        return r["gain"][series] * r["k"] * max(float(h) - dead, 0.0) * x[f.index(r["feat"])]
+
+    @staticmethod
     def predict(model, x):
         x = np.asarray(x, dtype=np.float64)
-        def dot(t, v, clip):
+        free = np.array([n in model.get("free", []) for n in model["features"]])
+        def dot(t, v, clip, fr):
             z = np.where(np.isfinite(v), (v - np.array(t["lin"]["mean"])) / np.array(t["lin"]["std"]), 0.0)
-            return float(t["base"] + np.array(t["lin"]["w"]) @ np.clip(z, -clip, clip))
+            return float(t["base"] + np.array(t["lin"]["w"]) @ np.where(fr, z, np.clip(z, -clip, clip)))
         primary = all(w == 0.0 or np.isfinite(x[j]) for t in model["targets"].values() for j, w in enumerate(t["lin"]["w"]))
         if primary or not model.get("fallback"):
-            return {tg: dot(t, x, model["clip"]) for tg, t in model["targets"].items()}
+            return {tg: dot(t, x, model["clip"], free) - LinearExporter.term(model, x, tg) for tg, t in model["targets"].items()}
         idx = [model["features"].index(n) if n in model["features"] else -1 for n in model["fallback"]["features"]]
         v = np.array([x[i] if i >= 0 else np.nan for i in idx])
-        return {tg: dot(t, v, model["clip"]) for tg, t in model["fallback"]["targets"].items()}
+        return {tg: dot(t, v, model["clip"], free[idx]) - LinearExporter.term(model, x, tg) for tg, t in model["fallback"]["targets"].items()}
 
     def golden(self, spec, model):
         meta, X = RawStore().load()
