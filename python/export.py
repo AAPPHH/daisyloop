@@ -6,7 +6,7 @@ import numpy as np
 from experiments import Stage2
 from features import BatchEngine, PHYS, PhysSpec, Spec, StreamEngine, CONFIG as FCFG
 from models import CONFIG, FRESH, LIN_TARGETS, Dataset, local_idx
-from rawstore import RawStore
+from rawstore import CONFIG as RawCFG, RawStore
 
 CFG = {
     "tag": "x44aug",
@@ -199,7 +199,7 @@ class LinearExporter:
         return {tg: dot(t, v, model["clip"], free[idx]) - LinearExporter.term(model, x, tg) for tg, t in model["fallback"]["targets"].items()}
 
     def golden(self, spec, model):
-        meta, X = RawStore().load()
+        meta, X = RawStore(self.cfg.get("store", RawCFG)).load()
         a, b = (local_idx(meta, s) for s in self.cfg["golden_span"])
         chans = spec.raw_channels()
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
@@ -215,7 +215,7 @@ class LinearExporter:
                 x = [v[n] for n in model["features"]]
                 ticks.append(t)
                 feats.append([None if math.isnan(y) else y for y in x])
-                preds.append(self.predict(model, x))
+                preds.append({k: (v if math.isfinite(v) else None) for k, v in self.predict(model, x).items()})
                 fb += not all(math.isfinite(y) for y in x)
         g = {"channels": chans, "k0": k0, "rows": rows, "ticks": ticks, "features": model["features"], "expected_features": feats, "expected_predictions": preds}
         with open(self.cfg["golden_out"], "w") as f:
