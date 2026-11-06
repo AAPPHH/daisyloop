@@ -358,6 +358,48 @@ mod tests {
         assert!(plan.fan_rpm >= fan.rpm_range().0 && plan.fan_rpm <= fan.rpm_range().1 && plan.pump_rpm >= pump.rpm_range().0);
     }
 
+    fn fan_spread(m: &XgbModel) -> Vec<(f64, f64)> {
+        let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
+        let (fcal, pcal) = (fc.calibration(), pc.calibration());
+        let cfg = ControlConfig::default();
+        let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
+        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
+        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: false, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
+        let out: Vec<(f64, f64)> = fan
+            .candidates(cfg.fan_candidates)
+            .into_iter()
+            .map(|rpm| {
+                let mut hold = HashMap::new();
+                fan.hold(rpm, &mut hold);
+                pump.hold(pump.base.rpm, &mut hold);
+                (rpm, m.forecast(&hold, cfg.rollout_secs, cfg.horizon_secs).unwrap().water)
+            })
+            .collect();
+        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
+        assert!(plan.water.is_some_and(f64::is_finite));
+        out
+    }
+
+    #[test]
+    fn exported_step_model_is_identified_and_its_forecast_follows_the_fan_rpm() {
+        let g = Golden::load();
+        let mut m = XgbModel::load(&[Golden::dir().join("fixtures").join("steptrain")], "feature_spec_deploy.json", "model_deploy.json").unwrap();
+        for t in 3000..g.rows.len() {
+            m.observe(&g.row(t), g.k0 + t as i64);
+        }
+        assert_eq!(m.identified(), (true, true));
+        assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
+        let curve = fan_spread(&m);
+        let old = fan_spread(&real());
+        println!("step model {curve:?}
+deployed   {old:?}");
+        let (lo, hi) = (curve.first().unwrap(), curve.last().unwrap());
+        assert!(curve.windows(2).all(|w| w[0].1 >= w[1].1 - 0.02), "forecast must not rise with fan rpm: {curve:?}");
+        assert!(lo.1 - hi.1 > 0.2, "slow fan must forecast warmer water than full fan: {curve:?}");
+        let spread = |c: &[(f64, f64)]| c.first().unwrap().1 - c.last().unwrap().1;
+        assert!(spread(&curve) > 3.0 * spread(&old).abs(), "{curve:?} against {old:?}");
+    }
+
     fn restart(g: &Golden, upto: usize, gap: usize, seed_secs: i64, name: &str) -> (XgbModel, i64) {
         use crate::hot::HotStore;
         use crate::lake::Tick;
