@@ -55,7 +55,7 @@ impl XgbModel {
 
     pub fn from_text(spec: &str, model: &str) -> Result<XgbModel, String> {
         let p = Predictor::load(spec, model)?;
-        let channels = p.engine.raw_channels.clone();
+        let channels: Vec<String> = p.engine.raw_channels.to_vec();
         if !channels.iter().any(|c| c == Self::KEY_CHANNEL) {
             return Err("feature spec has no water channel".into());
         }
