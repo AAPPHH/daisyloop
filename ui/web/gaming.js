@@ -116,7 +116,7 @@ class Metric {
     }
   }
   reset() {
-    this.min = this.max = this.raw;
+    this.ema = this.min = this.max = this.raw;
     this.dirty = true;
   }
 }

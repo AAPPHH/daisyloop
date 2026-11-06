@@ -424,7 +424,7 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
 body.stale .tile .v b, body.stale .gm-row .v b { color: var(--stale) !important; }
 body.stale #history .spark path, .tile.stale .spark path, .gm-row.stale .spark path { stroke: var(--stale); }
 body.stale .gm-row .mm, body.stale .tile .tmm, .gm-row.stale .mm, .tile.stale .tmm { color: var(--stale); }
-.lane-panel { position: absolute; z-index: 5; left: 0; right: 0; top: calc(3.1rem + var(--alarm-h, 0px)); bottom: 0; padding: 1em clamp(1rem, 2vw, 3rem) 1em; background: var(--bg); overflow: auto; font-size: 1rem; }
+.lane-panel { position: absolute; z-index: 5; left: 0; right: 0; top: calc(3.1rem + var(--alarm-h, 0px)); bottom: 0; padding: 1em clamp(1rem, 2vw, 3rem) 1em; background: var(--bg); overflow: auto; overscroll-behavior: contain; font-size: 1rem; }
 .lane-panel[hidden] { display: none; }
 .lane-panel .lane { height: 11rem; }
 @media (max-width: 1500px) {

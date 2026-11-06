@@ -93,7 +93,13 @@ function paintSection(id) {
   else if (id === 'sensors') sensors.render();
 }
 
+let primed = false;
+
 function paintPage() {
+  if (!primed) {
+    primed = true;
+    ['hero', 'history', 'controls', 'sensors'].forEach((id) => vis.has(id) || paintSection(id));
+  }
   vis.forEach(paintSection);
   motion.kick();
 }
@@ -151,6 +157,7 @@ addEventListener('wheel', unpin, { passive: true });
 addEventListener('touchstart', unpin, { passive: true });
 addEventListener('keydown', unpin);
 addEventListener('pointerdown', (e) => e.target === document.documentElement && unpin());
+document.querySelector('.cue').addEventListener('click', unpin);
 links.forEach((a) => a.addEventListener('click', () => ((pin = a.getAttribute('href').slice(1)), highlight(pin))));
 
 const spy = new IntersectionObserver((entries) => {
@@ -165,7 +172,7 @@ const spy = new IntersectionObserver((entries) => {
   if (S.snap && S.visible) fresh.forEach(paintSection);
   motion.kick();
   queueLocate();
-});
+}, { rootMargin: '-2px 0px' });
 sections.forEach((s) => spy.observe(s));
 
 setInterval(() => {
@@ -180,4 +187,6 @@ const first = await tauri.core.invoke('last_snapshot');
 if (first) {
   ingest(first);
   render();
+  const target = location.hash && document.querySelector(location.hash);
+  if (target) target.scrollIntoView({ behavior: 'instant' });
 } else setLive(false);
