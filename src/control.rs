@@ -215,7 +215,7 @@ impl Default for ControlConfig {
             fan: ChannelOverride::default(),
             pump: ChannelOverride::default(),
             step_test: StepTestConfig::default(),
-            plan_secs: 5.0,
+            plan_secs: 30.0,
             decision_secs: 30.0,
             horizon_secs: 120,
             rollout_secs: 120,
@@ -981,7 +981,8 @@ impl Control {
         let fan = &self.chans[0];
         let restart = fan.mode == Mode::Active && fan.duty_cmd == Some(0.0) && self.temps(now).water.is_some_and(|w| !self.cfg.fan_may_stop(Some(w), true));
         let forced = restart || std::mem::take(&mut self.restarted);
-        if !(forced || self.last_decision.is_none_or(|t| now - t >= interval)) || self.chans.iter().all(|c| c.mode == Mode::Off) {
+        let gate = self.last_write.saturating_add((self.cfg.decision_secs * 1000.0) as i64);
+        if !(forced || self.last_decision.is_none_or(|t| now - t >= interval || now >= gate && t < gate)) || self.chans.iter().all(|c| c.mode == Mode::Off) {
             return;
         }
         self.last_decision = Some(now);
@@ -989,7 +990,7 @@ impl Control {
         self.shown = None;
         let outlook = self.outlook(now);
         if !matches!(outlook, Outlook::Failed) {
-            let open = forced || now - self.last_write >= (self.cfg.decision_secs * 1000.0) as i64;
+            let open = forced || now >= gate;
             self.apply(now, outlook, open);
         }
     }
@@ -1082,7 +1083,7 @@ impl Control {
                 continue;
             }
             let from = c.duty_cmd.filter(|_| c.driving()).map_or(w.bases[i].rpm, |d| c.cal.rpm(d));
-            let pace = if c.duty_cmd.is_some() && c.driving() { ((now - c.wrote_ms) as f64 / Self::RATE_REF_MS).min(1.0) } else { 1.0 };
+            let pace = if c.duty_cmd.is_some() && c.driving() { ((now - self.last_write) as f64 / Self::RATE_REF_MS).min(1.0) } else { 1.0 };
             let down = (c.cfg.step_down_rpm * pace).max(from - c.cal.rpm((c.cal.duty(from) - c.cfg.down_step_duty).max(0.0)));
             let mut new = if want > from { want.min(from + c.cfg.step_up_rpm * pace) } else { want.max(from - down) }.clamp(lo, hi).max(bound_rpm);
             if i == 0 && w.zero_ok && want <= 0.0 && c.cfg.start_duty > 0.0 && c.cal.duty(new) < c.cfg.start_duty {

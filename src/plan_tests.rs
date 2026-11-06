@@ -188,9 +188,11 @@ fn r39_rate_limits_are_per_30_s_of_elapsed_time_not_per_write() {
 }
 
 #[test]
-fn r40_a_load_step_raises_the_duty_within_the_dead_time_plus_5_s_with_an_informed_model() {
+fn r40_the_rise_after_a_load_step_and_the_peak_do_not_depend_on_the_plan_interval_with_an_informed_model() {
     for (name, spec) in PlantSpec::NAMED {
-        let o = simulate_with(Kind::Informed, Profile::Step(60.0, 260.0, 3600), spec, SENSOR_NOISE, |c| c.control.plan_secs = 5.0);
-        assert!(o.rise.is_some_and(|r| r <= Plant::DELAY + 5) && !o.fallback && !o.frozen, "{name} {o:?}");
+        let run = |plan: f64| simulate_with(Kind::Informed, Profile::Step(60.0, 260.0, 3600), spec, SENSOR_NOISE, move |c| c.control.plan_secs = plan);
+        let (fast, slow) = (run(1.0), run(30.0));
+        let (a, b) = (fast.rise.unwrap(), slow.rise.unwrap());
+        assert!(a.abs_diff(b) <= 15 && (fast.peak - slow.peak).abs() <= 0.5 && !fast.fallback && !fast.frozen, "{name} {fast:?} {slow:?}");
     }
 }

@@ -39,6 +39,10 @@ if __name__ == "__main__":
     ray.init(address="auto", logging_level="ERROR")
     todo = cases(sys.argv[1:] or ["informed", "xgb"])
     todo.sort(key=lambda c: (not c.startswith("xgb"), int(c.split(";")[3])))
+    seen = set()
+    if os.path.exists(CONFIG["out"]):
+        seen = {l.split("R36 ")[1].split(" | ")[0] for l in open(CONFIG["out"]) if "R36 " in l}
+    todo = [c for c in todo if c not in seen]
     pending, done = [], 0
     with open(CONFIG["out"], "a") as f:
         while todo or pending:
