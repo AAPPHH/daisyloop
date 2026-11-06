@@ -230,6 +230,13 @@ def test_conductance_check_uses_the_lowest_held_running_level_and_can_fail():
         assert ("conductance drop at the lowest level too small" in why) == (not passes), (m, why)
 
 
+def test_rmse_limits_are_the_dry_run_noise_band_times_the_margin():
+    g = S.CFG["gate"]["grey"]
+    assert g["fit_rmse_max"] == round(g["band"]["margin"] * g["band"]["fit_max"], 3) and g["hold_rmse_max"] == round(g["band"]["margin"] * g["band"]["hold_max"], 3)
+    res = [{"case": "fan_30.0", "fit_rmse": 0.04, "hold": {"rmse_full": 0.05}}, {"case": "fan_30.5", "fit_rmse": 0.05, "hold": {"rmse_full": 0.06}}, {"case": "alt_fan_30.5", "fit_rmse": 0.2, "hold": {"rmse_full": 0.9}}]
+    assert S.DryRun.band(res) == {"fit_max": 0.05, "hold_max": 0.06, "runs": 2}
+
+
 if __name__ == "__main__":
     for f in (test_prep_fits_on_the_given_rows_and_exempts_free_columns, test_plant_bound_lifts_a_low_fan_duty_and_rpm_is_never_negative, test_grey_box_recovers_the_fan_exponent_and_rejects_none,
               test_response_term_matches_between_trainer_and_exporter, test_gate_ships_with_a_fan_response_refuses_without_and_repeats):
