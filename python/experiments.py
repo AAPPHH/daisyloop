@@ -36,7 +36,10 @@ class Cluster:
     def __init__(self, cfg=CONFIG):
         import ray
         self.ray = ray
-        ray.init(address="auto", logging_level=40, runtime_env={"env_vars": cfg["ray_env"]})
+        try:
+            ray.init(address="auto", logging_level=40, runtime_env={"env_vars": cfg["ray_env"]})
+        except Exception:
+            ray.init(address="local", num_cpus=cfg.get("local_cpus", 8), object_store_memory=int(1e9), include_dashboard=False, logging_level=40, runtime_env={"env_vars": cfg["ray_env"]})
         self.cfg = cfg
 
     def submit(self, fn, arg, **res):
