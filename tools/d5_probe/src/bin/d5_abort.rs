@@ -1,4 +1,4 @@
-use d5_probe::{Abort, AbortConfig, Hid};
+use d5_probe::{AbortConfig, Hid, Reopening};
 use hidapi::{HidApi, HidDevice};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -47,24 +47,12 @@ impl Hid for Device {
 
 fn main() {
     let cfg = Config { vid: 0x0C70, pid: 0xF00E, usage_page: 0xFF00 };
-    let stop = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("daisyloop").join("stop"));
+    let program = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")).join("daisyloop").join("config.toml");
+    let stop = AbortConfig::stop_path(&program, std::env::var_os("DAISYLOOP_DATA_DIR").map(PathBuf::from), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
     let abort_cfg = AbortConfig::d5_next(stop);
-    let mut result = Err("device not opened".to_string());
-    for i in 0..abort_cfg.attempts {
-        match Device::open(&cfg, abort_cfg.len, abort_cfg.id) {
-            Ok(dev) => {
-                let mut abort = Abort::new(Box::new(dev), abort_cfg.clone());
-                result = abort.run();
-                abort.log.iter().for_each(|l| println!("{l}"));
-                break;
-            }
-            Err(e) => {
-                println!("open attempt {} failed: {e}", i + 1);
-                result = Err(e);
-                std::thread::sleep(Duration::from_millis(abort_cfg.retry_ms));
-            }
-        }
-    }
+    let mut open = || Device::open(&cfg, abort_cfg.len, abort_cfg.id).map(|d| Box::new(d) as Box<dyn Hid>);
+    let (result, log) = Reopening::run(&abort_cfg, &mut open, &mut |ms| std::thread::sleep(Duration::from_millis(ms)));
+    log.iter().for_each(|l| println!("{l}"));
     match result {
         Ok(()) => println!("OK fan and pump are on the firmware PID"),
         Err(e) => {
