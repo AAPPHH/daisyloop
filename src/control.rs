@@ -391,6 +391,7 @@ struct Frozen {
     water: f64,
     lo: f64,
     hi: f64,
+    same_since: i64,
     heat_k: f64,
     last: i64,
     latched: bool,
@@ -398,8 +399,7 @@ struct Frozen {
 
 impl Frozen {
     fn tripped(&self, now: i64) -> bool {
-        let held = now - self.since;
-        held >= Control::FROZEN_MS || held >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
+        now - self.same_since >= Control::FROZEN_MS || now - self.since >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
     }
     fn spread(&self, w: f64) -> f64 {
         w.max(self.hi) - w.min(self.lo)
@@ -673,13 +673,16 @@ impl Control {
         match self.frozen.as_mut().filter(|f| f.spread(w) <= Self::FROZEN_BAND_K + if f.latched { Self::FROZEN_RELEASE_K } else { 0.0 }) {
             Some(f) => {
                 if f.spread(w) <= Self::FROZEN_BAND_K {
+                    if w != f.water {
+                        f.same_since = now;
+                    }
                     (f.water, f.lo, f.hi) = (w, f.lo.min(w), f.hi.max(w));
                 }
                 f.heat_k = (f.heat_k + step).max(Self::HEAT_FLOOR_K);
                 f.last = now;
                 f.latched |= f.tripped(now);
             }
-            None => self.frozen = Some(Frozen { since: now, water: w, lo: w, hi: w, heat_k: 0.0, last: now, latched: false }),
+            None => self.frozen = Some(Frozen { since: now, water: w, lo: w, hi: w, same_since: now, heat_k: 0.0, last: now, latched: false }),
         }
     }
 
