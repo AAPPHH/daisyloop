@@ -978,7 +978,7 @@ fn scan_case() {
     let base = if scan_env("SC_ALT", 0.0) > 0.0 { PlantSpec::ALTERNATIVE } else { PlantSpec::MEASURED };
     let spec = PlantSpec { ambient: scan_env("SC_AMB", base.ambient), c_scale, g_stop: scan_env("SC_GSTOP", base.g_stop), ..base };
     let profile = if std::env::var("SC_REC").is_ok() { Profile::recurring() } else if std::env::var("SC_SQ").is_ok() { Profile::Square(60.0, 300.0, 600, 600) } else if let Ok(v) = std::env::var("SC_STEP_FROM") { Profile::Step(v.parse().unwrap(), scan_env("SC_STEP_TO", 260.0), 3600) } else { Profile::Constant(scan_env("SC_W", 70.0)) };
-    let (lift, hold, drop) = (scan_env("SC_LIFT", 8.0), scan_env("SC_HOLD", 900.0), scan_env("SC_DROP", 1.0));
+    let (lift, hold, drop) = (scan_env("SC_LIFT", ControlConfig::default().bound_raise_step), scan_env("SC_HOLD", 900.0), scan_env("SC_DROP", 1.0));
     let o = simulate(profile, spec, |c| {
         c.control.bound_raise_step = lift;
         c.control.bound_hold_secs = hold;
@@ -988,7 +988,7 @@ fn scan_case() {
 }
 
 #[test]
-fn r36_the_pump_limit_cycle_stays_gone_across_ambient_and_heat_capacity() {
+fn r41_the_pump_limit_cycle_stays_gone_across_ambient_and_heat_capacity() {
     for (ambient, c_scale, power) in [(20.0, 0.5, 85.0), (20.0, 0.5, 75.0), (21.0, 0.5, 70.0), (22.0, 0.5, 50.0), (22.0, 1.0, 50.0), (23.0, 1.0, 70.0), (24.0, 1.0, 60.0)] {
         let o = simulate(Profile::Constant(power), PlantSpec { ambient, c_scale, ..PlantSpec::MEASURED }, |_| {});
         assert!(o.swings <= 2 && o.writes <= 250 && !o.budget && !o.fallback && !o.frozen, "ambient {ambient} c_scale {c_scale} {power} W swings {} writes {}", o.swings, o.writes);
@@ -997,7 +997,7 @@ fn r36_the_pump_limit_cycle_stays_gone_across_ambient_and_heat_capacity() {
 
 #[test]
 #[ignore]
-fn r37_ambient_scan_swings_and_writes_per_24_h() {
+fn r42_ambient_scan_swings_and_writes_per_24_h() {
     let mut table = String::from("ambient C | c_scale | load W | swings | writes | peak C
 ");
     let (mut worst_swings, mut worst_writes) = (0, 0);
