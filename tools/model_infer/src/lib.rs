@@ -273,6 +273,37 @@ struct Target {
     lin: Option<Lin>,
 }
 
+#[derive(Deserialize, Clone)]
+struct RawResponse {
+    feat: String,
+    pump_feat: String,
+    k: f64,
+    pump: [f64; 2],
+    dead: [f64; 2],
+    #[serde(default)]
+    gain: std::collections::BTreeMap<String, f64>,
+}
+
+struct Response {
+    feat: usize,
+    pump: usize,
+    k: f64,
+    rpm: [f64; 2],
+    dead: [f64; 2],
+    gain: std::collections::BTreeMap<String, f64>,
+}
+
+impl Response {
+    fn term(&self, target: &str, x: &[f64]) -> f64 {
+        let Some((series, h)) = target.split_once('_') else { return 0.0 };
+        let (Some(g), Ok(h)) = (self.gain.get(series), h.parse::<f64>()) else { return 0.0 };
+        let (r, f) = (x[self.pump], x[self.feat]);
+        let u = ((r - self.rpm[0]) / (self.rpm[1] - self.rpm[0])).clamp(0.0, 1.0);
+        let dead = self.dead[0] + (self.dead[1] - self.dead[0]) * u;
+        g * self.k * (h - dead).max(0.0) * f
+    }
+}
+
 #[derive(Deserialize)]
 struct Fallback {
     features: Vec<String>,
@@ -295,6 +326,10 @@ struct RawModel {
     fallback: Option<Fallback>,
     #[serde(default)]
     clip: Option<f64>,
+    #[serde(default)]
+    free: Vec<String>,
+    #[serde(default)]
+    response: Option<RawResponse>,
 }
 
 pub struct Model {
@@ -303,23 +338,29 @@ pub struct Model {
     targets: Vec<(String, Target)>,
     fallback: Option<(Vec<usize>, Vec<(String, Target)>)>,
     clip: Option<f64>,
+    free: Vec<bool>,
+    response: Option<Response>,
 }
 
 impl Model {
     pub fn from_json(text: &str) -> Model {
         let m: RawModel = serde_json::from_str(text).unwrap();
+        let at = |n: &str| m.features.iter().position(|x| x == n).unwrap();
+        let free = m.features.iter().map(|f| m.free.contains(f)).collect();
+        let response = m.response.as_ref().map(|r| Response { feat: at(&r.feat), pump: at(&r.pump_feat), k: r.k, rpm: r.pump, dead: r.dead, gain: r.gain.clone() });
         let fallback = m.fallback.map(|f| {
             let idx = f.features.iter().map(|n| m.features.iter().position(|x| x == n).unwrap_or(usize::MAX)).collect();
             (idx, f.targets.into_iter().collect())
         });
-        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect(), fallback, clip: m.clip }
+        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect(), fallback, clip: m.clip, free, response }
     }
 
     pub fn is_linear(&self) -> bool {
         self.targets.iter().all(|t| t.1.lin.is_some())
     }
 
-    fn dot(t: &Target, x: &[f64], pick: Option<&[usize]>, clip: Option<f64>) -> f64 {
+    fn dot(&self, t: &Target, x: &[f64], pick: Option<&[usize]>) -> f64 {
+        let clip = self.clip;
         let l = t.lin.as_ref().unwrap();
         let mut s = t.base;
         for (j, w) in l.w.iter().enumerate() {
@@ -328,16 +369,24 @@ impl Model {
                 None => x[j],
             };
             let z = if v.is_finite() { (v - l.mean[j]) / l.std[j] } else { 0.0 };
-            s += w * clip.map_or(z, |c| z.clamp(-c, c));
+            let free = match pick {
+                Some(p) => p[j] != usize::MAX && self.free[p[j]],
+                None => self.free[j],
+            };
+            s += w * if free { z } else { clip.map_or(z, |c| z.clamp(-c, c)) };
         }
         s
+    }
+
+    fn term(&self, target: &str, x: &[f64]) -> f64 {
+        self.response.as_ref().map_or(0.0, |r| r.term(target, x))
     }
 
     fn predict_linear(&self, x: &[f64]) -> Vec<(String, f64)> {
         let primary = self.targets.iter().all(|(_, t)| t.lin.as_ref().unwrap().w.iter().enumerate().all(|(j, w)| *w == 0.0 || x[j].is_finite()));
         match (&self.fallback, primary) {
-            (Some((idx, ts)), false) => ts.iter().map(|(n, t)| (n.clone(), Self::dot(t, x, Some(idx), self.clip))).collect(),
-            _ => self.targets.iter().map(|(n, t)| (n.clone(), Self::dot(t, x, None, self.clip))).collect(),
+            (Some((idx, ts)), false) => ts.iter().map(|(n, t)| (n.clone(), self.dot(t, x, Some(idx)) - self.term(n, x))).collect(),
+            _ => self.targets.iter().map(|(n, t)| (n.clone(), self.dot(t, x, None) - self.term(n, x))).collect(),
         }
     }
 

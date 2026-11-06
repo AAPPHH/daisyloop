@@ -6,7 +6,7 @@ import numpy as np
 from experiments import Stage2
 from features import BatchEngine, PHYS, PhysSpec, Spec, StreamEngine, CONFIG as FCFG
 from models import CONFIG, FRESH, LIN_TARGETS, Dataset, local_idx
-from rawstore import RawStore
+from rawstore import CONFIG as RawCFG, RawStore
 
 CFG = {
     "tag": "x44aug",
@@ -174,20 +174,32 @@ class LinearExporter:
         return out
 
     @staticmethod
+    def term(model, x, tg):
+        r = model.get("response")
+        series, h = tg.split("_")
+        if not r or series not in r["gain"]:
+            return 0.0
+        f = model["features"]
+        u = min(max((x[f.index(r["pump_feat"])] - r["pump"][0]) / (r["pump"][1] - r["pump"][0]), 0.0), 1.0)
+        dead = r["dead"][0] + (r["dead"][1] - r["dead"][0]) * u
+        return r["gain"][series] * r["k"] * max(float(h) - dead, 0.0) * x[f.index(r["feat"])]
+
+    @staticmethod
     def predict(model, x):
         x = np.asarray(x, dtype=np.float64)
-        def dot(t, v, clip):
+        free = np.array([n in model.get("free", []) for n in model["features"]])
+        def dot(t, v, clip, fr):
             z = np.where(np.isfinite(v), (v - np.array(t["lin"]["mean"])) / np.array(t["lin"]["std"]), 0.0)
-            return float(t["base"] + np.array(t["lin"]["w"]) @ np.clip(z, -clip, clip))
+            return float(t["base"] + np.array(t["lin"]["w"]) @ np.where(fr, z, np.clip(z, -clip, clip)))
         primary = all(w == 0.0 or np.isfinite(x[j]) for t in model["targets"].values() for j, w in enumerate(t["lin"]["w"]))
         if primary or not model.get("fallback"):
-            return {tg: dot(t, x, model["clip"]) for tg, t in model["targets"].items()}
+            return {tg: dot(t, x, model["clip"], free) - LinearExporter.term(model, x, tg) for tg, t in model["targets"].items()}
         idx = [model["features"].index(n) if n in model["features"] else -1 for n in model["fallback"]["features"]]
         v = np.array([x[i] if i >= 0 else np.nan for i in idx])
-        return {tg: dot(t, v, model["clip"]) for tg, t in model["fallback"]["targets"].items()}
+        return {tg: dot(t, v, model["clip"], free[idx]) - LinearExporter.term(model, x, tg) for tg, t in model["fallback"]["targets"].items()}
 
     def golden(self, spec, model):
-        meta, X = RawStore().load()
+        meta, X = RawStore(self.cfg.get("store", RawCFG)).load()
         a, b = (local_idx(meta, s) for s in self.cfg["golden_span"])
         chans = spec.raw_channels()
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
@@ -203,7 +215,7 @@ class LinearExporter:
                 x = [v[n] for n in model["features"]]
                 ticks.append(t)
                 feats.append([None if math.isnan(y) else y for y in x])
-                preds.append(self.predict(model, x))
+                preds.append({k: (v if math.isfinite(v) else None) for k, v in self.predict(model, x).items()})
                 fb += not all(math.isfinite(y) for y in x)
         g = {"channels": chans, "k0": k0, "rows": rows, "ticks": ticks, "features": model["features"], "expected_features": feats, "expected_predictions": preds}
         with open(self.cfg["golden_out"], "w") as f:

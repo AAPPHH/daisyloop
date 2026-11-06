@@ -71,7 +71,11 @@ fn check(golden: &str, spec: &str, model: &str, tol: f64) {
             }
             for (name, v) in &preds {
                 let e = num(&ep[next][name]);
-                worst_p = worst_p.max((e - v).abs());
+                if e.is_nan() || v.is_nan() {
+                    assert!(e.is_nan() && v.is_nan(), "tick {t} {name}: expected {e} got {v}");
+                } else {
+                    worst_p = worst_p.max((e - v).abs());
+                }
             }
             next += 1;
         }
@@ -90,4 +94,11 @@ fn shipped_model_is_not_identified_and_bad_files_are_errors() {
     let bare = models("model_deploy.json").replace("\"identified\":{\"fan\":false,\"pump\":false},", "");
     assert!(!Predictor::load(&models("feature_spec_deploy.json"), &bare).unwrap().model.identified.fan);
     assert!(Predictor::load("{}", &models("model_deploy.json")).is_err());
+}
+
+#[test]
+fn step_model_with_response_term_matches_python_golden() {
+    check("fixtures/steptrain/golden_deploy.json", "fixtures/steptrain/feature_spec_deploy.json", "fixtures/steptrain/model_deploy.json", 1e-9);
+    let p = Predictor::load(&models("fixtures/steptrain/feature_spec_deploy.json"), &models("fixtures/steptrain/model_deploy.json")).unwrap();
+    assert!(p.model.is_linear() && p.model.identified.fan && !p.model.identified.pump);
 }

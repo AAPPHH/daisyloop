@@ -301,7 +301,7 @@ LIN = {
     "svr+": {"C": [0.00003, 0.0001, 0.0003, 0.001, 0.003], "epsilon": [0.01]},
     "huber+": {"alpha": [3000.0, 10000.0, 30000.0, 100000.0, 300000.0], "epsilon": [1.35]},
 }
-LIN_TARGETS = ["water_30", "water_60", "water_90", "water_120", "cpu_30", "cpu_120", "gpu_30", "gpu_120"]
+LIN_TARGETS = ["water_30", "water_60", "water_90", "water_120", "cpu_30", "cpu_60", "cpu_120", "gpu_30", "gpu_60", "gpu_120"]
 LIN_SETS = ["a44", "phys", "rich"]
 LIN_CLIP = 5.0
 
@@ -319,12 +319,21 @@ class Prep:
         self.std = np.where(self.std < 1e-9, 1.0, self.std)
         return self
 
-    def z(self, X, clip=None):
+    def z(self, X, clip=None, free=None):
         Z = np.nan_to_num((X - self.mean) / self.std, nan=0.0, posinf=0.0, neginf=0.0)
-        return np.clip(Z, -clip, clip) if clip else Z
+        if not clip:
+            return Z
+        C = np.clip(Z, -clip, clip)
+        return C if free is None else np.where(free, Z, C)
 
-    def transform(self, F, rows, clip=None):
-        return self.z(F[rows][:, self.cols].astype(np.float64), clip)
+    def transform(self, F, rows, clip=None, free=None):
+        return self.z(F[rows][:, self.cols].astype(np.float64), clip, free)
+
+    def clipped(self, F, rows, clip, free=None):
+        X = F[rows][:, self.cols].astype(np.float64)
+        Z = np.nan_to_num((X - self.mean) / self.std, nan=0.0, posinf=0.0, neginf=0.0)
+        hit = np.abs(Z) > clip
+        return float(hit.any(1).mean()) if free is None else float(hit[:, ~free].any(1).mean())
 
 
 class LinearFit:
@@ -412,15 +421,16 @@ def linear_task(job):
             res, best = [], job["params"][tg]
         rows_fit = fit_rows
         if job.get("refit_val"):
-            Ztr, ytr = np.vstack([Ztr, Zv]), np.concatenate([ytr, yv])
             rows_fit = np.concatenate([fit_rows, vr])
+            prep = Prep(cols).fit(D.F, rows_fit)
+            Ztr, ytr = prep.transform(D.F, rows_fit, clip), np.concatenate([ytr, yv])
         f = LinearFit(job["family"], best).fit(Ztr, ytr, sw_of(rows_fit))
         mdl = None
         if job.get("resid"):
             import xgboost as xgb
             rc = [D.col[n] for n in job["resid"]["feats"]]
             mdl = xgb.train(dict(job["resid"]["params"], seed=0, nthread=2), xgb.DMatrix(D.F[rows_fit][:, rc], ytr - f.predict(Ztr)), job["resid"]["rounds"])
-        r = {"params": best, "grid": res, "preds": {}, "mean": prep.mean, "std": prep.std, "w": f.w, "b": f.b}
+        r = {"params": best, "grid": res, "preds": {}, "mean": prep.mean, "std": prep.std, "w": f.w, "b": f.b, "clipped": {b: prep.clipped(D.F, D.sel(b, tg), clip) for b in D.bnames if len(D.sel(b, tg))}}
         for b in D.bnames:
             ix = D.sel(b, tg)
             if len(ix):

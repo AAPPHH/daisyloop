@@ -8,9 +8,11 @@ Goal: one evening with the owner at the computer, then the model knows how the f
 
 ## Cold start requirement
 
-The session starts cold: the computer has been idle for at least 30 min (or off for 30 min and then booted and left idle for 10 min), water at or below 31 C, fan and pump on the firmware PID, LibreHardwareMonitor sidecar running (the UI shows CPU and GPU power and temperature; the training needs them).
+The session starts cold: the computer has been idle for at least 30 min (or off for 30 min and then booted and left idle for 10 min), water between 30.0 and 31.0 C when step 3 starts, fan and pump on the firmware PID, LibreHardwareMonitor sidecar running (the UI shows CPU and GPU power and temperature; the training needs them).
 
-Why: the safety minimum curve of the fan (`min_curve` 35 C 20 %, 38 C 54.4 %, 42 C 100 %) overrides any step duty below it (`step_duty` takes the maximum of the step and the bound). A step of 27 % is only honoured while the water is below 35.6 C, 40 % below 36.7 C, 55 % below 38.1 C, 75 % below 39.9 C. The design water temperature of 36.6 C in `docs/thermal.md` 4.4 would therefore force the low levels up. The machine never makes less than about 70 W CPU plus GPU (5th percentile 69.7 W) plus 4 W pump, so the low levels cannot be held by lowering the load. They are held by starting cold and by ordering the loads so that the water stays between about 31 and 35 C (hand calculation with the two-lump plant of `docs/thermal.md` 4.4 and the safety curve, ambient 25 C, start at 31 C); starting warm leaves no room. The fan stop duty test also needs the water below 33 C to be meaningful.
+Start band 30.0 to 31.0 C: the dry run (section 9) was run for start waters of 30, 30.5 and 31 C and the criteria were met there only. How to get there: below 30.0 C, run a light load (CPU stress at about 100 W, fan and pump on the firmware PID) until the reading is 30.0 C or more and stop it the moment it is, then start step 3 within 2 min; above 31.0 C leave the machine idle with the fan on the firmware PID until the reading is 31.0 C or less. Do not start the session outside the band: wait or heat, the band costs a few minutes.
+
+Why: the safety minimum curve of the fan (`min_curve` 35 C 20 %, 38 C 54.4 %, 42 C 100 %) overrides any step duty below it (`step_duty` takes the maximum of the step and the bound). A step of 27 % is only honoured while the water is below 35.6 C, 40 % below 36.7 C, 55 % below 38.1 C, 75 % below 39.9 C. The design water temperature of 36.6 C in `docs/thermal.md` 4.4 would therefore force the low levels up. The machine never makes less than about 70 W CPU plus GPU (5th percentile 69.7 W) plus 4 W pump, so the low levels cannot be held by lowering the load. They are held by starting cold and by ordering the loads so that the water stays between about 28 and 35.6 C (two-lump plant of `docs/thermal.md` 4.4 with the safety curve, ambient 25 C, the dry run of section 9); starting warm leaves no room. The fan stop duty test also needs the water below 33 C to be meaningful.
 
 ## 0. Abort command, independent of the daemon
 
@@ -23,7 +25,7 @@ Source: `tools\d5_probe\src\bin\d5_abort.rs`, built once during preparation with
 
 ## 1. Preparation without any write (15 min)
 
-- Rehearse the retraining once on the dry run: `python python\steptrain.py dryrun` (section 9). It needs the Python environment with numpy, scipy, xgboost, duckdb, pyarrow, pytz and ray, and a running Ray cluster that this Python can join (`ray status` must work; the ray version of the environment must equal the cluster's). The job declares 4 cores and 6 GB.
+- Rehearse the retraining once on the dry run: `python python\steptrain.py dryrun` (section 9; arguments `dryrun [directory] [case,case] [seeds]`). It needs the Python environment with numpy, scipy, xgboost, duckdb, pyarrow and pytz. It runs as separate worker processes of one core each (5 by default, `workers` in the `CFG` dict), no Ray; one case takes about 20 s.
 - Check the model and the data path: UI shows model loaded, `warm`; the lake has the LHM channels of the last hour.
 - Build the abort command of section 0 and run `cargo test` in `tools\d5_probe` (no device access); keep a PowerShell window open at the build directory for the whole session.
 - Decide the load generator: a GPU burn with adjustable power and a CPU stress with adjustable threads, both stoppable in one click. Heat at the water is about 0.96 x CPU package power + GPU power + 4 to 18 W pump.
@@ -71,19 +73,21 @@ The step test is per channel: the fan plan and the pump plan are two separate st
 
 ### 4a. Fan test, 47 min
 
-Start: UI fan card, `Stufentest starten ...`, `Ja, starten`. Phases of the plan and the load the owner sets by hand (the daemon does not control the load; targets for a water temperature of about 34.5 C with the pump at its floor, G from `docs/thermal.md` 4.4, adjust to what the thermometer says):
+Start: UI fan card, `Stufentest starten ...`, `Ja, starten`. Phases of the plan and the load the owner sets by hand (the daemon does not control the load; the loads are the ones of the dry run, `SIM["inject"]["protocols"]["runbook"]` in `python/stepsim.py`, and a test compares this table with it; adjust to what the thermometer says):
 
 | Phase | Fan duty | Time | Load (CPU + GPU power) |
 |---|---|---|---|
-| 1 lead | 100 % | 5 min | about 120 W (a light load; the water stays near 31 C) |
-| 2 | 75 % | 8 min | about 100 W |
-| 3 | 55 % | 8 min | about 75 W |
-| 4 | 40 % | 8 min | idle machine, nothing running (about 70 W, the lowest load there is) |
-| 5 | 27 % | 8 min | idle machine, nothing running |
-| 6 | 100 % | 5 min | about 250 W |
-| 7 | 100 % | 5 min | half of that, about 125 W (separates sink temperature from load scale) |
+| 1 lead | 100 % | 5 min | 250 W (full load, CPU stress plus GPU burn) |
+| 2 | 75 % | 8 min | 100 W (a light load) |
+| 3 | 55 % | 8 min | 75 W (lighter still) |
+| 4 | 40 % | 8 min | 70 W (idle machine, nothing running, the lowest load there is) |
+| 5 | 27 % | 8 min | 70 W (idle machine, nothing running) |
+| 6 | 100 % | 5 min | 250 W (full load) |
+| 7 | 100 % | 5 min | 125 W (half of that, separates sink temperature from load scale) |
 
-The plant model gives these water temperatures at the end of phases 1 to 5 with these loads: 30.6, 31.2, 31.9, 33.2 and 35.3 C. At 27 % the safety curve lifts the duty at 35.6 C and the water rises at about 0.004 K/s there, so phase 5 holds for the full 8 min only if the idle heat is at most about 76 W in total (CPU plus GPU about 72 W) and the phase starts below 33.5 C. At 80 W it crosses after about 7 min: the duty is then overridden for the last minute and recorded as such, the fit loses that minute of excitation, nothing unsafe happens. The load cannot be lowered below idle, so there is nothing to do in phase 5 except watch; if the water is above 34.5 C when phase 5 starts, accept the override.
+Why a 250 W lead: phases 6 and 7 are held out of the fit and predicted by it (section 6). With a 120 W lead the held-out 250 W of phase 6 lay far outside the loads in the fit (70 to 120 W) and the check was a load extrapolation: in the dry run (4 seeds each, hold-out limit 0.15 K at the time) 4 of 4 shipped at a start of 30 C, 1 of 4 at 30.5 C and 0 of 4 at 31 C (hold-out RMSE 0.07 to 0.29 K against the limit); with a restart gap 4 of 4 at 30.5 C. With the lead the fit contains 250 W and 4 of 4 shipped at every start, with and without the gap (hold-out RMSE 0.05 to 0.06 K).
+
+The plant model gives these water temperatures at the end of phases 1 to 5 with these loads: 31.8, 31.7, 32.3, 33.6 and 35.6 C (about 28.4 C at the start of phase 1 after the idle wait). At 27 % the safety curve lifts the duty at 35.6 C and the water rises at about 0.004 K/s there, so phase 5 holds for the full 8 min only if the idle heat is at most about 76 W in total (CPU plus GPU about 72 W). At 80 W it crosses after about 7 min: the duty is then overridden for the last minute and recorded as such, the fit loses that minute of excitation, nothing unsafe happens. The load cannot be lowered below idle, so there is nothing to do in phase 5 except watch; if the water is above 34.5 C when phase 5 starts, accept the override.
 
 The loads are held at constant values inside a phase, changed within 30 s of the phase change (the UI line `Stufe n von 7 ... noch s s` is the clock). Steady state is not needed; the fit uses the whole curve with the dead time. If the water crosses 35.5 C in phases 2 to 4 the commanded duty is overridden by the safety curve and recorded as such (the fit uses the recorded rpm). Once the bound has lifted the duty it holds it for a while (latch), so reducing the load does not bring the level back within the phase; reduce the load anyway and do not chase exact numbers.
 
@@ -94,7 +98,7 @@ The loads are held at constant values inside a phase, changed within 30 s of the
 
 ### 4b. Pump test, 17 min
 
-Start: UI pump card. Fan stays on the firmware PID at full speed. Load about 250 W constant for the whole test (full load). Phases: 5 min at the pump floor 15 % (lead), then 100 %, floor, 100 %, floor for 3 min each. Watch pump rpm (about 1835 at 15 %, 4800 at 100 %), `pump_low` alarm, water. Abort limits as in 4a, plus pump rpm below 1500. Abort action: stop the load, `Abbrechen` in the pump card.
+Start: UI pump card. Fan stays on the firmware PID at full speed. Load 200 W constant for the whole test. Phases: 5 min at the pump floor 15 % (lead), then 100 %, floor, 100 %, floor for 3 min each. Watch pump rpm (about 1835 at 15 %, 4800 at 100 %), `pump_low` alarm, water. Abort limits as in 4a, plus pump rpm below 1500. Abort action: stop the load, `Abbrechen` in the pump card.
 
 ### 4c. Cool-down, 15 min
 
@@ -117,12 +121,14 @@ python -c "from rawstore import RawStore; RawStore().build(force=True)"
 python steptrain.py
 ```
 
-`rawstore` rebuilds the 1 Hz matrix in `%LOCALAPPDATA%\daisyloop-ml\cache` from the copy. `steptrain.py` finds the windows from the phase channel (or `windows` in its config dict), trains, runs the identification and the gate through the Ray cluster (4 cores declared) and writes `models\steptrain\`:
+`rawstore` rebuilds the 1 Hz matrix in `%LOCALAPPDATA%\daisyloop-ml\cache` from the copy. `steptrain.py` finds the windows from the phase channel (or `windows` in its config dict), trains, runs the identification and the gate in one process (single thread, a few minutes, no Ray) and writes `models\steptrain\`:
 
-- `model_deploy.json` and `feature_spec_deploy.json` if the gate passes, `candidate_model_deploy.json` and `candidate_feature_spec_deploy.json` if not;
-- `report.json` with the gate verdict, the reasons, the identification of fan and pump (excitation, fitted plant, counterfactual curves with intervals), the holdout comparison against persistence and against the deployed model, and the weights of the step rows.
+- `model_deploy.json` and `feature_spec_deploy.json` if the gate passes, `candidate_model_deploy.json` and `candidate_feature_spec_deploy.json` if not. The two files of a run are always written together, and files of earlier runs in the directory are deleted first, so a spec never belongs to another run's model;
+- `report.json` with the gate verdict and the reasons, the identification (fitted plant, excitation, fit and hold-out RMSE, fan effect at the held-out states), the comparison with persistence and with the deployed model on the final fold, and `hold_rows` and `overlap_rows` (the latter is 0: the held-out rows are neither in the fit nor in the response term).
 
-The gate (also written in the `criteria` field of the report): ship only if fan and pump are identified with the physically right sign and the water 2 min RMSE on the old test block is not worse than the deployed model's. A refusal is not a failure of the session: read `reasons`, deploy nothing, and the deployed model keeps running exactly as before.
+Rows with a missing water, rpm or power value are not used in the fit, and a gap of 10 s or more (a daemon restart) ends a segment; the next segment starts at the first complete row after it. A restart shortly before the fan test therefore costs the context before the gap, nothing else.
+
+The gate (also written in the `criteria` field of the report): ship only if (1) the fan was held at three or more duty levels for 2 min each over a span of 40 points, (2) the grey-box fit RMSE is at most `grey.fit_rmse_max`, (3) the fan exponent is positive with a one-sided 95 % likelihood-ratio bound against the model without fan response but with ambient drift, and the conductance at the lowest held running duty level is at least 25 % below full fan, (4) fan phases 6 and 7 (not used in the fit or in the response term) are predicted with RMSE at most `grey.hold_rmse_max` and 1.5 times better than by the no-fan model refit on the same rows, (5) the water 30 s and 120 s RMSE on the final fold is not worse than the deployed model's beyond the bootstrap noise band, and on the held-out step rows the 120 s water, CPU and GPU forecasts are not worse than persistence beyond the same band. The two RMSE limits are 1.25 times the largest RMSE the correct plant produced in the dry run (section 9), so they follow the noise of the data instead of a hand value. The pump is not part of the gate: `identified.pump` is always `false`, the pump stays on the firmware PID and the planner does not use the model for it. A refusal is not a failure of the session: read `reasons`, deploy nothing, and the deployed model keeps running exactly as before.
 
 ## 7. Deploy the model (5 min, needs UAC)
 
@@ -132,7 +138,7 @@ Start-Process powershell -Verb RunAs -ArgumentList "-Command Copy-Item C:\clones
 New-Item C:\Users\user\AppData\Local\daisyloop\stop -ItemType File
 ```
 
-After the relaunch the UI shows the model loaded and warm (seeded) and `fan identified` / `pump identified` as in the artifact. Active mode still needs `writes_enabled = true`, which stays false until the owner decides.
+The two files exist only when the gate passed; after a refusal the directory holds `candidate_*` files and nothing is copied. After the relaunch the UI shows the model loaded and warm (seeded) and `fan identified` (`pump identified` is always off). Active mode still needs `writes_enabled = true`, which stays false until the owner decides.
 Restore: copy the previous `model_deploy.json` and `feature_spec_deploy.json` from git (`git show HEAD:models/model_deploy.json`) the same way.
 
 ## 8. Writes back to false
@@ -147,4 +153,19 @@ Restore: copy the previous `model_deploy.json` and `feature_spec_deploy.json` fr
 
 ## 9. Dry run on synthetic data (what was verified)
 
-`python python\steptrain.py dryrun` injects a step window generated from the plant of `docs/thermal.md` (two-lump heat capacity, fan exponent m, pump coefficient gamma, dead time 31 s at the pump floor and 11 s at 100 %, fan spool 4.5 s, sensor noise 5 mK, load noise 8 W) into a copy of the real lake matrix (4 days from 2026-11-01), with the fan test protocol of section 4a (`matched`) and the rejected constant-load protocol (`constant`), each with and without a fan response (m set to 0). Results are written to a temp directory. The numbers of the last run are in `docs/model.md` ("Step test retraining").
+`python python\steptrain.py dryrun [directory] [case,case] [seeds]` injects a step window generated from the plant of `docs/thermal.md` (two-lump heat capacity, fan exponent m, pump coefficient gamma, dead time 31 s at the pump floor and 11 s at 100 %, fan spool 4.5 s, sensor noise 5 mK, load noise 8 W, the safety curve of section 3 emulated) into a copy of the real lake matrix (4 days from 2026-11-01), following the protocol of sections 3 and 4 as one table (`SIM["inject"]["protocols"]["runbook"]`; `test_steptrain.py` compares the table of 4a and the plans of steps 2 and 4 with it). Each run goes through the same `StepTrainer.run` as the real retraining and writes its output directory under the temp directory. Cases, 10 seeds each: fan response at start water 30, 30.5 and 31 C, each without and with a restart gap (all channels missing for 120 s, ending 30 s before the fan test), no fan response, linear drift of the sink temperature of 5.5 K over the run, bump-shaped drift of 5.5 K (sine), each at 30.5 C without and with the gap, and one structurally different plant (`alt_fan`: m 1.2, A 30 W/K, C1 8.5 kJ/K, K 15 W/K, gamma 0.1, sink 22 C, spool 8 s) with and without the gap. Result of the last full run (`ship` = the gate shipped, `ok` = shipped with the fan effect within a factor of 1.5 of the plant's):
+
+| Case | Seeds | Ship | Ship and ok | Fit RMSE K | Hold-out RMSE K | Effect / plant |
+|---|---|---|---|---|---|---|
+| fan, start 30 / 30.5 / 31 C, no gap | 30 | 30 | 30 | 0.038 to 0.051 | 0.043 to 0.068 | 0.97 to 1.02 |
+| same with restart gap | 30 | 30 | 30 | 0.039 to 0.051 | 0.041 to 0.088 | 0.98 to 1.03 |
+| no fan response, with and without gap | 20 | 0 | 0 | 0.055 to 0.074 | 0.088 to 0.129 | |
+| linear drift 5.5 K, no fan response | 20 | 0 | 0 | 0.047 to 0.065 | 0.051 to 0.109 | |
+| bump drift 5.5 K, no fan response | 20 | 0 | 0 | 0.122 to 0.147 | 0.140 to 0.206 | |
+| alt_fan | 20 | 0 | 0 | 0.045 to 0.055 | 0.061 to 0.164 | 0.86 to 0.96 (refused) |
+| alt_fan without fan response (alt_nofan) | 20 | 0 | 0 | 0.042 to 0.055 | 0.028 to 0.044 | |
+
+The alt_fan plant is refused in 20 of 20 runs (the hold-out RMSE of the grey-box fit is above its limit, or the final-fold 120 s RMSE is worse than the deployed model's); the fan effect it would have shipped is within a factor of 1.5 of the plant's in all 20, so nothing wrong was shipped. Seeds 10 to 14, not used for the limits, gave 30 of 30 shipped and ok for the six fan variants (hold-out RMSE 0.038 to 0.064 K), and starts of 28.5, 29 and 29.5 C (5 seeds each, no gap) shipped 15 of 15 with the 250 W lead (hold-out RMSE up to 0.100 K against 0.110), so the 30 to 31 C band is the owner's decision and not something the dry run needs. Reproducibility: with one BLAS thread and six the model files are byte-identical. The two RMSE limits of the gate come from the fan rows of this table (section 6).
+
+What this does not show: nothing here ran on the real machine, so structure error of the real plant against the grey-box model is untested; the Python plant holds the firmware fan at 100 % below its set-point and has no bound latch, while the real firmware regulates to its set-point and the daemon has the latch; a start below 30.0 C was not part of the criteria; `d5_abort`, the UI and the daemon were not involved.
+
