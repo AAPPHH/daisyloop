@@ -49,6 +49,7 @@ fn replay(hysteresis: f64) -> (Stats, (f64, f64), (f64, f64)) {
         c.writes_enabled = false;
         c.control.plan_hysteresis_k = hysteresis;
     });
+    let _clean = TempDir(cfg.state_dir());
     let sim = Sim::new();
     let s = sim.clone();
     let factory: Factory = Box::new(move || {

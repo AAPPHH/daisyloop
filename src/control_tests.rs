@@ -128,6 +128,21 @@ struct Rig {
     dir: std::path::PathBuf,
 }
 
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        drop(TempDir(self.dir.clone()));
+    }
+}
+
 fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!("daisyloop-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
