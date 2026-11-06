@@ -297,6 +297,9 @@ LIN = {
     "ridge": {"alpha": [0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]},
     "svr": {"C": [0.001, 0.01, 0.1], "epsilon": [0.005, 0.01, 0.02]},
     "huber": {"alpha": [1.0, 100.0, 3000.0], "epsilon": [1.35]},
+    "ridge+": {"alpha": [100.0, 1000.0, 10000.0, 30000.0, 100000.0, 300000.0]},
+    "svr+": {"C": [0.00003, 0.0001, 0.0003, 0.001, 0.003], "epsilon": [0.01]},
+    "huber+": {"alpha": [3000.0, 10000.0, 30000.0, 100000.0, 300000.0], "epsilon": [1.35]},
 }
 LIN_TARGETS = ["water_30", "water_60", "water_90", "water_120", "cpu_30", "cpu_120", "gpu_30", "gpu_120"]
 LIN_SETS = ["a44", "phys", "rich"]
@@ -326,7 +329,7 @@ class Prep:
 
 class LinearFit:
     def __init__(self, family, params):
-        self.family, self.params = family, params
+        self.family, self.params = family.rstrip("+"), params
 
     def make(self):
         from sklearn.linear_model import HuberRegressor, Ridge
@@ -347,10 +350,10 @@ class LinearFit:
             out = [dict(o, **{k: v}) for o in out for v in g[k]]
         return out
 
-    def fit(self, Z, y):
+    def fit(self, Z, y, sw=None):
         import warnings
         warnings.simplefilter("ignore")
-        m = self.make().fit(Z, y)
+        m = self.make().fit(Z, y, sample_weight=sw)
         self.w, self.b = np.asarray(m.coef_, dtype=np.float64), float(np.ravel(m.intercept_)[0])
         return self
 
@@ -371,26 +374,60 @@ def linear_task(job):
         feats = [n for n in feats if n not in lhm and not n.startswith("mask_lhm")]
     cols = [D.col[n] for n in feats]
     clip = job.get("clip", LIN_CLIP)
-    out = {"feats": feats, "clip": clip, "targets": {}}
+    off = job.get("offset")
+    out = {"feats": feats, "clip": clip, "offset": off, "targets": {}}
+
+    def offv(rows, tg):
+        if not off:
+            return np.zeros(len(rows))
+        h = int(tg.split("_")[1])
+        td = np.where(D.F[rows, D.col["pump_rpm"]] > off["pump_rpm"], off["dead_hi"], off["dead_lo"])
+        return off["scale"] * off["k"] * np.maximum(0.0, h - td) * D.F[rows, D.col[off["feat"]]].astype(np.float64)
+
+    wt = job.get("weight")
+
+    def sw_of(rows):
+        if not wt:
+            return None
+        v = np.abs(D.F[rows, D.col[wt["feat"]]])
+        return np.where(np.isfinite(v) & (v > wt["above"]), wt["w"], 1.0)
+
     for tg in job["targets"]:
         fit_rows = lin_rows(D, job["fit"], tg)
+        if off:
+            fit_rows = fit_rows[np.isfinite(offv(fit_rows, tg))]
         prep = Prep(cols).fit(D.F, fit_rows)
-        Ztr, ytr = prep.transform(D.F, fit_rows, clip), D.Y[fit_rows, D.tnames.index(tg)].astype(np.float64)
+        Ztr, ytr = prep.transform(D.F, fit_rows, clip), D.Y[fit_rows, D.tnames.index(tg)].astype(np.float64) + offv(fit_rows, tg)
         if job.get("val"):
             vr = lin_rows(D, job["val"], tg)
-            Zv, yv = prep.transform(D.F, vr, clip), D.Y[vr, D.tnames.index(tg)].astype(np.float64)
+            if off:
+                vr = vr[np.isfinite(offv(vr, tg))]
+            Zv, yv = prep.transform(D.F, vr, clip), D.Y[vr, D.tnames.index(tg)].astype(np.float64) + offv(vr, tg)
             res = []
             for p in LinearFit.grid(job["family"]):
-                f = LinearFit(job["family"], p).fit(Ztr, ytr)
+                f = LinearFit(job["family"], p).fit(Ztr, ytr, sw_of(fit_rows))
                 res.append((float(np.sqrt(np.mean((f.predict(Zv) - yv) ** 2))), p))
             best = min(res, key=lambda r: r[0])[1]
         else:
             res, best = [], job["params"][tg]
-        f = LinearFit(job["family"], best).fit(Ztr, ytr)
+        rows_fit = fit_rows
+        if job.get("refit_val"):
+            Ztr, ytr = np.vstack([Ztr, Zv]), np.concatenate([ytr, yv])
+            rows_fit = np.concatenate([fit_rows, vr])
+        f = LinearFit(job["family"], best).fit(Ztr, ytr, sw_of(rows_fit))
+        mdl = None
+        if job.get("resid"):
+            import xgboost as xgb
+            rc = [D.col[n] for n in job["resid"]["feats"]]
+            mdl = xgb.train(dict(job["resid"]["params"], seed=0, nthread=2), xgb.DMatrix(D.F[rows_fit][:, rc], ytr - f.predict(Ztr)), job["resid"]["rounds"])
         r = {"params": best, "grid": res, "preds": {}, "mean": prep.mean, "std": prep.std, "w": f.w, "b": f.b}
         for b in D.bnames:
             ix = D.sel(b, tg)
-            r["preds"][b] = f.predict(prep.transform(D.F, ix, clip)) if len(ix) else np.zeros(0)
+            if len(ix):
+                p = f.predict(prep.transform(D.F, ix, clip)) - offv(ix, tg)
+                r["preds"][b] = p + mdl.predict(xgb.DMatrix(D.F[ix][:, rc])) if mdl is not None else p
+            else:
+                r["preds"][b] = np.zeros(0)
         out["targets"][tg] = r
     return {"tag": job["tag"], "res": out}
 
@@ -415,6 +452,7 @@ def xgb_fit_task(job):
     return {"tag": job["tag"], "res": out}
 
 
-VARIANTS = {"m07": {"m": 0.7}, "m25": {"m": 2.5}, "gn20": {"gn_frac": 0.2}, "ff": {}}
+PINT = PHYS["pint_names"]
+VARIANTS = {"m07": {"m": 0.7}, "m25": {"m": 2.5}, "gn20": {"gn_frac": 0.2}, "ff": {}, "pint": {"pint": True}}
 for _k, _v in VARIANTS.items():
     VARIANTS[_k] = dict(FRESH, cache=os.path.join(LOCAL, "cache_fresh", f"D5f_{_k}.npz"), phys_cfg=_v, phys_only=True, future_fan=[15, 30] if _k == "ff" else None)

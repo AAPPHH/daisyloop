@@ -5,9 +5,9 @@ import sys
 import time
 import numpy as np
 from rawstore import RawStore
-from models import CONFIG, FRESH, VARIANTS, LIN, LIN_SETS, LIN_TARGETS, Dataset, Metrics, RunLog, build_task, linear_task, physics_task, xgb_fit_task, xgb_task
+from models import CONFIG, FRESH, PINT, VARIANTS, LIN, LIN_SETS, LIN_TARGETS, Dataset, Metrics, RunLog, build_task, linear_task, physics_task, xgb_fit_task, xgb_task
 from nets import nn_task
-from features import PhysSpec, Spec, CONFIG as FCFG
+from features import PHYS, PhysSpec, Spec, CONFIG as FCFG
 
 CRITERIA = {
     "stage3": {
@@ -312,7 +312,7 @@ class LinearStage:
 
 
 CF = {
-    "levels": {"idle": [30.0, 100.0], "w200": [170.0, 240.0], "w400": [350.0, 450.0]},
+    "levels": {"idle": [30.0, 100.0], "w200": [170.0, 240.0], "w300": [280.0, 400.0]},
     "blocks": ["test", "fresh0", "fresh1", "fresh2"],
     "per_level": 36,
     "spacing_s": 300,
@@ -323,8 +323,16 @@ CF = {
     "fill_s": 10,
     "targets": ["water_30", "water_60", "water_90", "water_120"],
     "ref_k_per_min_per_100w": 0.70,
+    "models": {
+        "svr_phys_old": "svr|phys|lhm", "svr_phys_new": "svr|phys@new", "huber_phys_new": "huber+|phys@new", "svr_pint_new": "svr+|pint@new", "huber_pint_new": "huber+|pint@new",
+        "huber_nofan_G05": "huber|nofan+G0.5@new", "huber_nofan_G1": "huber|nofan+G1.0@new", "huber_nofan_G2": "huber|nofan+G2.0@new",
+        "huber_m07": "huber+|phys~m07@new", "huber_m25": "huber+|phys~m25@new", "huber_gn20": "huber+|phys~gn20@new",
+    },
     "g_full": 23.8, "m": 1.61, "ta": 25.0, "c_j_per_k": 11700.0,
 }
+
+
+OFFSET = {"feat": "ph.fx", "k": 23.8 / 11700.0, "pump_rpm": 3500.0, "dead_hi": 11.0, "dead_lo": 33.0, "scale": 1.0}
 
 
 def lin_apply(r, x, clip=None):
@@ -339,9 +347,13 @@ def cf_task(job):
     D = Dataset(cfg).load()
     meta, X = RawStore({"cache_dir": cfg["store_dir"]}).load()
     ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
-    full = PhysSpec(Spec.load(FCFG["spec_path"])).build()
     need = set(job["a44"]) | set(job["phys"]) | {"ph.q"}
-    spec = full.subset(need)
+    rich = Spec.load(FCFG["spec_path"])
+    specs = {}
+    for m in job["lin"].values():
+        key = json.dumps(m.get("phys_cfg") or {}, sort_keys=True)
+        if key not in specs:
+            specs[key] = PhysSpec(rich, dict(PHYS, **json.loads(key))).build().subset(need)
     col = {n: i for i, n in enumerate(D.names)}
     lo, hi = cf["levels"][job["level"]]
     pw = D.F[:, col["p_total.ewm30"]]
@@ -398,14 +410,29 @@ def cf_task(job):
             row[chs["power"]] = op[axis]["power"] * sc ** 3
             row[chs["current"]] = op[axis]["current"] * sc ** 2
             Xs = np.vstack([base, np.tile(row, (ro, 1))]).astype(np.float32)
-            v = BatchEngine(spec).run(Xs, ix, meta["k0"] + w0)
-            f = {n: float(v[n][-1]) for n in need}
-            rec = {"ph.q": f["ph.q"]}
+            fs = {}
+            for key, sp in specs.items():
+                v = BatchEngine(sp).run(Xs, ix, meta["k0"] + w0)
+                fs[key] = {n: float(v[n][-1]) for n in need}
+            pump_now = rpm if axis == "pump" else op["pump"]["rpm"]
+            pl = 1.0 if pump_now < 3500.0 else 0.0
+            rec = {"ph.q": fs[json.dumps({}, sort_keys=True)]["ph.q"] if json.dumps({}, sort_keys=True) in fs else 0.0}
             for name, m in job["lin"].items():
+                f = dict(fs[json.dumps(m.get("phys_cfg") or {}, sort_keys=True)])
+                f["ph.pl"] = pl
+                for n in m["feats"]:
+                    if n.endswith("*pl"):
+                        f[n] = f[n[:-3]] * pl
                 x = np.array([f[n] for n in m["feats"]])
                 for tg in cf["targets"]:
-                    rec[f"{name}|{tg}"] = lin_apply(m["targets"][tg], x, m.get("clip"))
-            xa = np.array([[f[n] for n in job["a44"]]], dtype=np.float32)
+                    v0 = lin_apply(m["targets"][tg], x, m.get("clip"))
+                    o = m.get("offset")
+                    if o:
+                        td = o["dead_hi"] if pump_now > o["pump_rpm"] else o["dead_lo"]
+                        v0 -= o["scale"] * o["k"] * max(0.0, int(tg.split("_")[1]) - td) * f[o["feat"]]
+                    rec[f"{name}|{tg}"] = v0
+            f0 = fs[json.dumps({}, sort_keys=True)]
+            xa = np.array([[f0[n] for n in job["a44"]]], dtype=np.float32)
             for tg in cf["targets"]:
                 rec[f"xgb|{tg}"] = float(boosters[tg].predict(xgb.DMatrix(xa))[0])
             out["pred"].setdefault(f"{axis}|{int(rpm)}|{ro}", []).append(rec)
@@ -473,6 +500,80 @@ class LinReport:
              "cpu_30": r["cpu_30"] <= p["cpu_30"], "cpu_120": r["cpu_120"] <= p["cpu_120"], "gpu_30": r["gpu_30"] <= p["gpu_30"], "gpu_120": r["gpu_120"] <= p["gpu_120"]}
         return c
 
+    def h2(self):
+        out = {}
+        tags = self.lin_tags() + self.lin_tags(True) + ["lx44"]
+        for name, bl in EVALS.items():
+            out[name] = {"rmse": self.rmse_table(self.old, tags, bl)}
+            if name in ("test", "fresh_old"):
+                for sub in ("load", "idle"):
+                    out[name][sub] = self.rmse_table(self.old, tags, bl, sub)
+            tab = out[name]["rmse"]
+            if all(t in tab.get("lx44", {}) for t in LIN_TARGETS):
+                out[name]["verdict"] = {t: self.verdict(tab, t) for t in self.lin_tags()}
+        if self.fresh:
+            tf = [t for t in self.fresh if t != "lx44f"] + ["lx44f"]
+            src = {k: v for k, v in self.fresh.items()}
+            for name, bl in (("fresh12_trained_through_fresh0", ["fresh1", "fresh2"]),):
+                tab = self.rmse_table(src, tf, bl, "all")
+                out[name] = {"rmse": tab}
+                for sub in ("load", "idle"):
+                    out[name][sub] = self.rmse_table(src, tf, bl, sub)
+                out[name]["verdict"] = {t: self.verdict_f(tab, t) for t in tf if "|" in t}
+        return out
+
+    @staticmethod
+    def verdict_f(tab, tag):
+        r, x, p = tab[tag], tab["lx44f"], tab["persist"]
+        return {"water_120": r["water_120"] <= 1.05 * x["water_120"], "water_30": r["water_30"] <= 1.10 * x["water_30"],
+                "cpu_30": r["cpu_30"] <= p["cpu_30"], "cpu_120": r["cpu_120"] <= p["cpu_120"], "gpu_30": r["gpu_30"] <= p["gpu_30"], "gpu_120": r["gpu_120"] <= p["gpu_120"]}
+
+    def h5(self, models, src=None, ref="lx44"):
+        src = src or self.old
+        out = {}
+        for name, bl in (("test", ["test"]), ("fresh_old", ["fresh0", "fresh1", "fresh2"]), ("fresh12", ["fresh1", "fresh2"])):
+            for sub in ("load", "idle"):
+                for tg in ("water_30", "water_60", "water_90", "water_120"):
+                    r = self.cmp(src, models, tg, bl, sub)
+                    if r:
+                        out[f"{name}|{sub}|{tg}"] = {"n": r["n"], "persist": r["rmse"]["persist"], **{m: {"rmse": r["rmse"][m], "skill": r["skill_vs_persist"][m], "rmse_ci": r["rmse_ci"][m]} for m in models}}
+        return out
+
+    def h4(self, models, src=None, blocks=("val", "test", "oor_pump20", "fresh0", "fresh1", "fresh2"), nolhm=None):
+        src = src or self.old
+        D = self.D
+        col = D.col
+        conds = {
+            "load_step": lambda i: np.abs(D.F[i, col["p_total.ewm5.d30"]]) > 100.0,
+            "water_gt_38": lambda i: D.F[i, col["water"]] > 38.0,
+            "water_gt_40": lambda i: D.F[i, col["water"]] > 40.0,
+            "gpu_heavy": lambda i: D.F[i, col["gpu_w.ewm5"]] > 150.0,
+            "cpu_heavy": lambda i: D.F[i, col["cpu_pkg_w.ewm5"]] > 150.0,
+            "water_hot_load": lambda i: (D.F[i, col["water"]] > 36.0) & (D.F[i, col["p_total.ewm5"]] > 200.0),
+        }
+        out = {}
+        for tg in ("water_30", "water_120", "gpu_120", "cpu_120"):
+            for cname, cf in conds.items():
+                ix = self.idx(tg, list(blocks))
+                P = {m: self.get(src, m, tg, list(blocks)) for m in models}
+                keep = cf(ix) & np.all([np.isfinite(v) for v in P.values()], axis=0)
+                if keep.sum() < 30:
+                    out[f"{tg}|{cname}"] = {"n": int(keep.sum())}
+                    continue
+                y = D.Y[ix[keep], D.tnames.index(tg)].astype(np.float64)
+                rec = {"n": int(keep.sum()), "persist": float(np.sqrt(np.mean(y ** 2))), "max_abs_y": float(np.abs(y).max())}
+                for m, v in P.items():
+                    e = v[keep] - y
+                    rec[m] = {"rmse": float(np.sqrt(np.mean(e ** 2))), "max_abs_pred": float(np.abs(v[keep]).max()), "max_abs_err": float(np.abs(e).max()), "bias": float(e.mean())}
+                out[f"{tg}|{cname}"] = rec
+        if nolhm:
+            for tg in ("water_30", "water_120"):
+                P = {m: self.get(src, m, tg, ["lhm_missing"]) for m in nolhm}
+                y = D.Y[self.idx(tg, ["lhm_missing"]), D.tnames.index(tg)].astype(np.float64)
+                ok = np.all([np.isfinite(v) for v in P.values()], axis=0)
+                out[f"{tg}|lhm_missing"] = {"n": int(ok.sum()), "persist": float(np.sqrt(np.mean(y[ok] ** 2))), **{m: {"rmse": float(np.sqrt(np.mean((v[ok] - y[ok]) ** 2))), "max_abs_pred": float(np.abs(v[ok]).max())} for m, v in P.items()}}
+        return out
+
     def best_by_val(self, tg="water_120"):
         out = {}
         for t in self.lin_tags():
@@ -481,6 +582,131 @@ class LinReport:
             if st not in out or r[1] < out[st][1]:
                 out[st] = (t, r[1])
         return {k: v[0] for k, v in out.items()}
+
+
+class V2Stage(LinearStage):
+    NOFAN = ("ph.fx", "ph.fx.e30", "ph.fx.e120", "ph.fxl", "ph.fxd", "ph.px", "ph.gf.l22", "ph.gf.d30")
+
+    def jobs(self):
+        fresh_fit, fresh_val = ["train", "val", "test", "oor_pump20"], ["fresh0"]
+        nofan = [n for n in self.phys if n not in self.NOFAN]
+        pint = self.phys + ["ph.pl"] + [f"{n}*pl" for n in PINT]
+        resid = {"feats": self.a44 + [n for n in self.phys if n not in self.a44], "params": dict(self.shallow, max_depth=2, eta=0.05, min_child_weight=100), "rounds": 60}
+        spec = []
+        for fam in ("ridge", "svr", "huber"):
+            spec.append((f"{fam}|phys", fam, self.cfg, self.phys, {}))
+            spec.append((f"{fam}|pint", fam, VARIANTS["pint"], pint, {}))
+        spec.append(("huber|phys+resid", "huber", self.cfg, self.phys, {"resid": resid}))
+        spec.append(("svr|phys+resid", "svr", self.cfg, self.phys, {"resid": resid}))
+        for sc in (0.5, 1.0, 2.0):
+            for fam in (("svr", "huber") if sc == 1.0 else ("huber",)):
+                spec.append((f"{fam}|nofan+G{sc}", fam, self.cfg, nofan, {"offset": dict(OFFSET, scale=sc)}))
+        j = []
+        for tag, fam, cfg, feats, kw in spec:
+            j.append({"tag": tag + "@old", "family": fam, "feats": feats, "targets": LIN_TARGETS, "fit": ["train"], "val": ["val"], "cfg": cfg, **kw})
+            j.append({"tag": tag + "@new", "family": fam, "feats": feats, "targets": LIN_TARGETS, "fit": fresh_fit, "val": fresh_val, "refit_val": True, "cfg": cfg, **kw})
+        return j
+
+    def run(self, which="v2"):
+        cl = Cluster(self.cfg)
+        self.log.write(event="start", run="linear_v2", resources={"cpus": 8, "memory_gb": 12}, criteria=LCRIT)
+        done, pend = [], [cl.submit(linear_task, j, num_cpus=2, memory=2e9) for j in self.jobs()]
+        while pend:
+            rd, pend = cl.ray.wait(pend, num_returns=1)
+            done += cl.ray.get(rd)
+            pickle.dump(done, open(os.path.join(self.dir, "lin_v2.pkl"), "wb"))
+        self.log.write(event="stop", run="linear_v2", status="ok")
+
+
+class V3Stage(V2Stage):
+    def jobs(self):
+        fresh_fit, fresh_val = ["train", "val", "test", "oor_pump20"], ["fresh0"]
+        pint = self.phys + ["ph.pl"] + [f"{n}*pl" for n in PINT]
+        wt = {"feat": "ph.gf.d30", "above": 0.01, "w": 5.0}
+        j = []
+        for fam in ("ridge+", "svr+", "huber+"):
+            for st, cfg, feats in (("phys", self.cfg, self.phys), ("pint", VARIANTS["pint"], pint)):
+                for wn, kw in (("", {}), ("w5", {"weight": wt})):
+                    tag = f"{fam}|{st}{wn}"
+                    j.append({"tag": tag + "@old", "family": fam, "feats": feats, "targets": LIN_TARGETS, "fit": ["train"], "val": ["val"], "cfg": cfg, **kw})
+                    j.append({"tag": tag + "@new", "family": fam, "feats": feats, "targets": LIN_TARGETS, "fit": fresh_fit, "val": fresh_val, "refit_val": True, "cfg": cfg, **kw})
+        return j
+
+    def run(self, which="v3"):
+        cl = Cluster(self.cfg)
+        done, pend = [], [cl.submit(linear_task, j, num_cpus=2, memory=2e9) for j in self.jobs()]
+        while pend:
+            rd, pend = cl.ray.wait(pend, num_returns=1)
+            done += cl.ray.get(rd)
+            pickle.dump(done, open(os.path.join(self.dir, "lin_v3.pkl"), "wb"))
+
+
+class V4Stage(V2Stage):
+    def jobs(self):
+        fresh_fit, fresh_val = ["train", "val", "test", "oor_pump20"], ["fresh0"]
+        j = []
+        for v in ("m07", "m25", "gn20"):
+            for fam in ("huber+", "svr+"):
+                j.append((f"{fam}|phys~{v}", fam, VARIANTS[v], self.phys))
+        for fam in ("huber+", "svr+"):
+            j.append((f"{fam}|ff", fam, VARIANTS["ff"], self.phys + ["ph.fxf15", "ph.fxf30"]))
+        out = []
+        for tag, fam, cfg, feats in j:
+            out.append({"tag": tag + "@old", "family": fam, "feats": feats, "targets": LIN_TARGETS, "fit": ["train"], "val": ["val"], "cfg": cfg})
+            out.append({"tag": tag + "@new", "family": fam, "feats": feats, "targets": LIN_TARGETS, "fit": fresh_fit, "val": fresh_val, "refit_val": True, "cfg": cfg})
+        return out
+
+    def run(self, which="v4"):
+        cl = Cluster(self.cfg)
+        done, pend = [], [cl.submit(linear_task, j, num_cpus=2, memory=2e9) for j in self.jobs()]
+        while pend:
+            rd, pend = cl.ray.wait(pend, num_returns=1)
+            done += cl.ray.get(rd)
+            pickle.dump(done, open(os.path.join(self.dir, "lin_v4.pkl"), "wb"))
+
+
+class V5Stage(V2Stage):
+    def jobs(self):
+        fresh_fit, fresh_val = ["train", "val", "test", "oor_pump20"], ["fresh0"]
+        pint = self.phys + ["ph.pl"] + [f"{n}*pl" for n in PINT]
+        out = []
+        for fam in ("svr+", "huber+"):
+            tag = f"{fam}|pint~nolhm"
+            out.append({"tag": tag + "@old", "family": fam, "feats": pint, "targets": LIN_TARGETS, "fit": ["train"], "val": ["val"], "cfg": VARIANTS["pint"], "drop_lhm": True})
+            out.append({"tag": tag + "@new", "family": fam, "feats": pint, "targets": LIN_TARGETS, "fit": fresh_fit, "val": fresh_val, "refit_val": True, "cfg": VARIANTS["pint"], "drop_lhm": True})
+        return out
+
+    def run(self, which="v5"):
+        cl = Cluster(self.cfg)
+        done, pend = [], [cl.submit(linear_task, j, num_cpus=2, memory=2e9) for j in self.jobs()]
+        while pend:
+            rd, pend = cl.ray.wait(pend, num_returns=1)
+            done += cl.ray.get(rd)
+            pickle.dump(done, open(os.path.join(self.dir, "lin_v5.pkl"), "wb"))
+
+
+class CfStage(LinearStage):
+    CAND = {"xgb_note": None}
+
+    def run(self, which="cf"):
+        cl = Cluster(self.cfg)
+        d = self.dir
+        pool = {}
+        for f in ("lin_clip_old.pkl", "lin_v2.pkl", "lin_v3.pkl", "lin_v4.pkl", "lin_v5.pkl"):
+            if os.path.exists(os.path.join(d, f)):
+                pool.update({r["tag"]: r["res"] for r in pickle.load(open(os.path.join(d, f), "rb"))})
+        picks = {k: v for k, v in CF["models"].items() if v in pool}
+        lin = {}
+        for k, t in picks.items():
+            r = pool[t]
+            v = VARIANTS_BY_TAG.get(t.split("|")[1].split("@")[0].split("~")[-1] if "~" in t else "", {})
+            lin[k] = {"feats": r["feats"], "clip": r["clip"], "offset": r.get("offset"), "phys_cfg": v.get("phys_cfg"), "targets": {tg: {x: r["targets"][tg][x] for x in ("mean", "std", "w", "b")} for tg in CF["targets"]}}
+        jobs = [{"cfg": self.cfg, "cf": CF, "level": lv, "a44": self.a44, "phys": self.phys, "lin": lin, "xgb_paths": os.path.join(CONFIG["out_dir"], "lx44_{tg}.json")} for lv in CF["levels"]]
+        futs = [cl.submit(cf_task, j, num_cpus=2, memory=2.5e9) for j in jobs]
+        pickle.dump({"models": picks, "res": [cl.ray.get(f) for f in futs]}, open(os.path.join(d, "cf.pkl"), "wb"))
+
+
+VARIANTS_BY_TAG = {k: v for k, v in VARIANTS.items()}
 
 
 FIT_FRESH = ["train", "val", "test", "oor_pump20", "fresh0"]
@@ -497,6 +723,16 @@ if __name__ == "__main__":
         cl = Cluster(FRESH)
         for v in VARIANTS.values():
             print(cl.ray.get(cl.submit(build_task, v, num_cpus=2, memory=3e9)))
+    elif mode == "v5":
+        V5Stage().run()
+    elif mode == "v4":
+        V4Stage().run()
+    elif mode == "v3":
+        V3Stage().run()
+    elif mode == "v2":
+        V2Stage().run()
+    elif mode == "cf":
+        CfStage().run()
     elif mode in ("lin_old", "lin_fresh"):
         LinearStage().run(mode.split("_")[1])
     elif mode == "stage1":

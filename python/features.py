@@ -560,6 +560,8 @@ class FeatureFrame:
 PHYS = {
     "m": 1.61, "gn_frac": 0.0, "rpm_full": 1460.0, "pump_full": 4800.0, "eta_cpu": 0.96, "eta_gpu": 1.0,
     "lags": [11, 22, 33], "taus": [5, 30, 120, 600], "slopes": [10, 30, 120], "fan_lag": 22, "fan_slope": 30,
+    "pint": False, "pump_low_rpm": 3500.0,
+    "pint_names": ["ph.q.l11", "ph.q.l22", "ph.q.l33", "ph.q.e5", "ph.q.e30", "ph.q.e120", "ph.q.e600", "ph.fx", "ph.fx.e30", "ph.fx.e120", "water_minus_amb", "water.e5.d10", "water.e5.d30", "water.e5.d120"],
 }
 
 
@@ -613,6 +615,10 @@ class PhysSpec:
         self.add("ph.pgx", "mul", [pg, "water_minus_amb"])
         for s in ("cpu_core_t", "gpu_temp", "cpucore_m_water", "gpu_m_water"):
             self.ewm(s, 5)
+        if c["pint"]:
+            pl = self.add("ph.pl", "gt", ["pump_rpm"], {"c": c["pump_low_rpm"], "inv": True})
+            for n in c["pint_names"]:
+                self.add(f"{n}*pl", "mul", [n, pl])
         return Spec(list(self.rich.nodes) + self.new, dict(self.rich.meta))
 
     def names(self):
