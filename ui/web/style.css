@@ -387,7 +387,7 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
   .water #water-v { font-size: clamp(5rem, 28vw, 8rem); }
 }
 
-#history { position: relative; height: 100vh; padding: 3.1rem clamp(1rem, 2vw, 3rem) 0; display: flex; flex-direction: column; gap: 0.7em; font-size: clamp(11px, min(1.85vh, 1.45vw), 30px); overflow: hidden; }
+#history { position: relative; height: 100vh; padding: calc(3.1rem + var(--alarm-h, 0px)) clamp(1rem, 2vw, 3rem) 0; display: flex; flex-direction: column; gap: 0.7em; font-size: clamp(11px, min(1.85vh, 1vw), 30px); overflow: hidden; }
 .gm-head { display: flex; align-items: center; justify-content: space-between; gap: 1em; padding-top: 0.8em; }
 .gm-head h2 { font-size: 1.5em; font-weight: 600; letter-spacing: -0.02em; }
 .gm-actions { display: flex; gap: 0.6em; }
@@ -401,7 +401,8 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
 .tile .v b { font-size: 2.9em; font-weight: 300; letter-spacing: -0.03em; color: var(--text); }
 .tile .v small { font-size: 0.9em; }
 .tile .tmm { display: flex; gap: 1em; font-size: 0.78em; color: var(--faint); }
-.tile .spark { position: absolute; right: 0.8em; bottom: 0.6em; width: 38%; height: 1.5em; overflow: visible; }
+.tile .tfoot { display: flex; align-items: flex-end; justify-content: space-between; gap: 0.8em; }
+.tile .spark { flex: 0 0 38%; width: 38%; height: 1.5em; overflow: visible; }
 .spark path { fill: none; stroke: var(--accent); stroke-width: 1.4; stroke-linejoin: round; opacity: 0.85; }
 .gm-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7em; flex: 1; min-height: 0; padding-bottom: 1em; }
 .gm-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0.7em 1em 0.6em; border-radius: 1em; background: linear-gradient(180deg, var(--s2), var(--s1)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
@@ -413,7 +414,7 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
 .gm-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .gm-row { flex: 1 1 0; max-height: 3em; min-height: 0; border-top: 1px solid var(--line); }
 .gm-row .nm { font-size: 0.92em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.gm-row .v { text-align: right; white-space: nowrap; }
+.gm-row .v { text-align: right; white-space: nowrap; line-height: 1; }
 .gm-row .v b { font-size: 1.6em; font-weight: 560; letter-spacing: -0.02em; }
 .gm-row .v small { margin-left: 0.25em; font-size: 0.7em; }
 .gm-row .mm, .gm-card > header .mm { text-align: right; color: var(--faint); font-size: 0.8em; }
@@ -421,7 +422,9 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
 .tile.over .v b, .gm-row.over .v b { text-shadow: 0 0 0.5em currentColor; }
 .tile.stale .v b, .gm-row.stale .v b, .tile.stale .nm, .gm-row.stale .nm { color: var(--stale) !important; }
 body.stale .tile .v b, body.stale .gm-row .v b { color: var(--stale) !important; }
-.lane-panel { position: absolute; z-index: 5; left: 0; right: 0; top: 3.1rem; bottom: 0; padding: 1em clamp(1rem, 2vw, 3rem) 1em; background: var(--bg); overflow: auto; font-size: 1rem; }
+body.stale #history .spark path, .tile.stale .spark path, .gm-row.stale .spark path { stroke: var(--stale); }
+body.stale .gm-row .mm, body.stale .tile .tmm, .gm-row.stale .mm, .tile.stale .tmm { color: var(--stale); }
+.lane-panel { position: absolute; z-index: 5; left: 0; right: 0; top: calc(3.1rem + var(--alarm-h, 0px)); bottom: 0; padding: 1em clamp(1rem, 2vw, 3rem) 1em; background: var(--bg); overflow: auto; font-size: 1rem; }
 .lane-panel[hidden] { display: none; }
 .lane-panel .lane { height: 11rem; }
 @media (max-width: 1500px) {
@@ -433,4 +436,5 @@ body.stale .tile .v b, body.stale .gm-row .v b { color: var(--stale) !important;
   .gm-card > header, .gm-row { grid-template-columns: minmax(0, 1fr) 5.6em 3.4em 3.4em; }
   .gm-row .spark, .gm-card > header > span:last-child { display: none; }
   .tile .spark { display: none; }
+  .tile .v b { font-size: 2.5em; }
 }
