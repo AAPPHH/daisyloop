@@ -175,7 +175,7 @@ const spy = new IntersectionObserver((entries) => {
   if (S.snap && S.visible) fresh.forEach(paintSection);
   motion.kick();
   queueLocate();
-}, { rootMargin: '-2px 0px' });
+}, { rootMargin: '-10% 0px' });
 sections.forEach((s) => spy.observe(s));
 
 setInterval(() => {
@@ -190,6 +190,6 @@ const first = await tauri.core.invoke('last_snapshot');
 if (first) {
   ingest(first);
   render();
-  const target = location.hash && document.querySelector(location.hash);
+  const target = location.hash && document.getElementById(location.hash.slice(1));
   if (target) target.scrollIntoView({ behavior: 'instant' });
 } else setLive(false);

@@ -140,7 +140,7 @@ export class Heat {
   paint(c, water, note = '') {
     const { r, el } = this;
     const txt = (n, t) => n.textContent !== t && (n.textContent = t);
-    const limit = S.snap?.limits.find((l) => l.channel === KEYS.water)?.plan ?? HEAT.limit;
+    const limit = S.snap?.predicted?.water_limit ?? S.snap?.limits.find((l) => l.channel === KEYS.water)?.plan ?? HEAT.limit;
     let state = 'off';
     if (c?.building) state = 'building';
     else if (c) state = c.dir;
