@@ -9,7 +9,7 @@ const ID = { cpu: '/intelcpu/0/', gpu: '/gpu-nvidia/0/', board: '/lpc/nct6687dr/
 
 const re = (r) => (ix) => ix.ids.filter((i) => r.test(i));
 const one = (...ids) => (ix) => ids.filter((i) => ix.has(i));
-const cores = (kind, type) => (ix) => ix.ids.filter((i) => ix.coreIndex(i, kind, type));
+const cores = (kind, type) => (ix) => ix.ids.map((i) => ix.coreId(i, kind, type)).filter(Boolean);
 const copies = (ix) => [8, 9, 10, 11, 12, 13].map((n) => ID.gpu + 'load/' + n).filter((i) => ix.has(i));
 
 const TOP = [
@@ -36,9 +36,10 @@ const COLS = [
     { label: 'Hot Spot', ids: one(ID.gpu + 'temperature/2'), unit: '°C', dec: 0, heat: 'hot' },
     { label: 'Speichertemp.', ids: one(ID.gpu + 'temperature/3'), unit: '°C', dec: 0, heat: 'hot' },
     { label: 'Leistung', ids: one(ID.gpu + 'power/0'), unit: 'W', dec: 1 },
+    { label: 'Power Limit', ids: one('nvml/0/power_limit'), unit: 'W', dec: 0 },
     { label: 'Auslastung', ids: one(ID.gpu + 'load/0'), unit: '%', dec: 0 },
-    { label: 'Speicherlast', ids: one(ID.gpu + 'load/1'), unit: '%', dec: 0 },
-    { label: 'Frame Buffer', ids: one(ID.gpu + 'load/3'), unit: '%', dec: 0 },
+    { label: 'Speicherlast', ids: one(ID.gpu + 'load/3'), unit: '%', dec: 0 },
+    { label: 'Frame Buffer', ids: one(ID.gpu + 'load/1'), unit: '%', dec: 0 },
     { label: '3D', ids: one(ID.gpu + 'load/7'), unit: '%', dec: 0 },
     { label: 'Copy', ids: copies, agg: 'max', unit: '%', dec: 0 },
     { label: 'Video Engine', ids: one(ID.gpu + 'load/2'), unit: '%', dec: 0 },
@@ -68,16 +69,18 @@ class Index {
   has(id) {
     return this.map.has(id);
   }
-  coreIndex(id, kind, type) {
+  coreId(id, kind, type) {
     const m = /^\/intelcpu\/0\/temperature\/(\d+)$/.exec(id);
     const c = m && this.map.get(id);
-    if (!c || !new RegExp(`(^|\\s)${kind}-Core #\\d+$`).test(c.label)) return false;
-    return type === 'temperature' || this.map.has(`${ID.cpu}load/${m[1]}`);
+    if (!c || !new RegExp(`(^|\\s)${kind}-Core #\\d+$`).test(c.label)) return null;
+    const out = `${ID.cpu}${type}/${m[1]}`;
+    return this.map.has(out) ? out : null;
   }
 }
 
 class Metric {
-  constructor(spec, ids, label) {
+  constructor(spec, ids, label, key) {
+    this.key = key;
     this.spec = spec;
     this.ids = ids;
     this.label = label;
@@ -97,11 +100,12 @@ class Metric {
     return vals[0];
   }
   stale(ix) {
-    return this.ids.length > 0 && this.ids.every((i) => ix.map.get(i)?.stale);
+    return this.ids.some((i) => ix.map.get(i)?.stale);
   }
   ingest(ix, alpha, tick) {
     const v = this.read(ix);
     this.raw = v;
+    this.dirty = true;
     if (v == null) return;
     this.min = this.min == null ? v : Math.min(this.min, v);
     this.max = this.max == null ? v : Math.max(this.max, v);
@@ -110,7 +114,6 @@ class Metric {
       this.trail.push(this.ema);
       if (this.trail.length > SPARK_POINTS) this.trail.shift();
     }
-    this.dirty = true;
   }
   reset() {
     this.min = this.max = this.raw;
@@ -133,9 +136,10 @@ class View {
     svg.append(this.path);
     const unit = h('small', {}, metric.spec.unit);
     const val = h('span', { class: 'v' }, this.v, unit);
+    const nm = h('span', { class: 'nm', title: metric.label }, metric.label);
     this.el = tile
-      ? h('div', { class: 'tile' }, h('span', { class: 'nm' }, metric.label), val, h('span', { class: 'tmm' }, h('span', {}, 'Min ', this.mn), h('span', {}, 'Max ', this.mx)), svg)
-      : h('div', { class: 'gm-row' }, h('span', { class: 'nm' }, metric.label), val, this.mn, this.mx, svg);
+      ? h('div', { class: 'tile' }, nm, val, h('div', { class: 'tfoot' }, h('span', { class: 'tmm' }, h('span', {}, 'Min ', this.mn), h('span', {}, 'Max ', this.mx)), svg))
+      : h('div', { class: 'gm-row' }, nm, val, this.mn, this.mx, svg);
   }
   set(key, fn, value) {
     if (this.cache[key] !== value) {
@@ -185,28 +189,31 @@ export class Gaming {
     });
   }
   build(ix) {
+    const old = new Map(this.metrics.map((m) => [m.key, m]));
     this.metrics = [];
     this.views = [];
     const strip = $('#gm-strip');
     const cols = $('#gm-cols');
     strip.replaceChildren();
     cols.replaceChildren();
-    const make = (spec, host, tile) => {
+    const make = (spec, host, tile, group) => {
       const found = spec.ids(ix);
       const groups = spec.each ? found.map((i) => [[i], `${spec.label} ${/dimm\/(\d+)/.exec(i)[1]}`]) : [[found, spec.label]];
       for (const [ids, label] of groups) {
-        const m = new Metric(spec, ids, label);
+        const m = new Metric(spec, ids, label, group + '|' + label);
+        const o = old.get(m.key);
+        if (o) Object.assign(m, { ema: o.ema, raw: o.raw, min: o.min, max: o.max, trail: o.trail });
         const v = new View(m, tile);
         this.metrics.push(m);
         this.views.push(v);
         host.append(v.el);
       }
     };
-    TOP.forEach((s) => make(s, strip, true));
+    TOP.forEach((s) => make(s, strip, true, 'top'));
     for (const col of COLS) {
       const rows = h('div', { class: 'gm-rows' });
       cols.append(h('section', { class: 'gm-card' }, h('header', {}, h('h3', {}, col.title), h('span', {}, 'Wert'), h('span', { class: 'mm' }, 'Min'), h('span', { class: 'mm' }, 'Max'), h('span')), rows));
-      col.rows.forEach((s) => make(s, rows, false));
+      col.rows.forEach((s) => make(s, rows, false, col.title));
     }
   }
   ingest() {
@@ -220,7 +227,8 @@ export class Gaming {
       this.build(ix);
     }
     const tick = snap.ts_ms !== this.lastTs;
-    const dt = this.lastTs ? Math.min(5, (snap.ts_ms - this.lastTs) / 1000) : 1;
+    const gap = (snap.ts_ms - this.lastTs) / 1000;
+    const dt = this.lastTs && gap > 0 ? Math.min(5, gap) : 1;
     if (!tick) return;
     this.lastTs = snap.ts_ms;
     const alpha = 1 - Math.exp(-dt / GLIDE_TAU_S);
