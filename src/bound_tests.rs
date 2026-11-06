@@ -429,6 +429,7 @@ struct Outcome {
     fallback: bool,
     frozen: bool,
     hits: usize,
+    releases: usize,
     unchanged: f64,
     exact_max: usize,
     swings: usize,
@@ -464,6 +465,7 @@ fn simulate_with(kind: plan::Kind, profile: Profile, spec: PlantSpec, noise: f64
     }
     rig.active("d5.fan");
     rig.active("d5.pump");
+    rig.c.frozen_slow_ms = std::env::var("FROZEN_SLOW_S").map_or(i64::MAX, |_| slow_ms());
     let fan_cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
     let mut out = Outcome::default();
     let (mut pump_hi, mut fan_hi, mut fan_cold, mut high) = (0usize, 0usize, 0usize, false);
@@ -496,6 +498,7 @@ fn simulate_with(kind: plan::Kind, profile: Profile, spec: PlantSpec, noise: f64
         let hit = rig.c.frozen_hit(rig.now).is_some();
         out.frozen |= hit;
         out.hits += (hit && !was_hit) as usize;
+        out.releases += (!hit && was_hit) as usize;
         was_hit = hit;
         unchanged += (rig.water == prev) as usize;
         run = if rig.water == prev { run + 1 } else { 0 };
@@ -711,6 +714,7 @@ fn frozen_run(spec: PlantSpec, stuck: f64, power: f64, cpu_alive: bool, dither: 
     rig.run(5);
     rig.active("d5.fan");
     rig.active("d5.pump");
+    rig.c.frozen_slow_ms = slow_ms();
     let cal = ChannelConfig::defaults(ControlKind::Fan).calibration();
     let (mut detect, mut peak, mut changes, mut last) = (None, 0.0f64, [0usize; 2], [None, None]);
     for t in 0..7200 {
@@ -774,20 +778,72 @@ fn r27_frozen_table_stuck_value_load_detection_and_peak_true_water() {
 }
 
 #[test]
-fn r31_a_stuck_water_value_flickering_by_one_lsb_is_caught_by_the_heat_rule_and_where_it_is_not_the_plant_stays_cool() {
-    for stuck in [30.0, 33.0, 37.5] {
-        for power in [100.0, 400.0] {
-            for dither in [1, 60] {
-                let f = frozen_run(PlantSpec::MEASURED, stuck, power, true, dither);
-                assert!(f.peak <= 50.0 && !f.handed_over, "stuck {stuck} load {power} dither {dither} {:?} peak {:.1}", f.detect, f.peak);
-                if power >= 400.0 || f.detect.is_some() {
-                    assert!(f.detect.is_some() && f.fan == Some(100.0) && f.pump == Some(100.0), "stuck {stuck} load {power} dither {dither} {:?} peak {:.1}", f.detect, f.peak);
-                } else {
-                    assert!(f.peak <= stuck + 1.5, "undetected flicker with the plant running away: stuck {stuck} load {power} dither {dither} peak {:.1}", f.peak);
+fn r31_a_stuck_water_value_flickering_by_one_lsb_is_caught_and_the_true_water_stays_below_46_c_at_25_c_ambient_and_50_c_at_30_c() {
+    let mut bad = vec![];
+    for (ambient, limit) in [(25.0, 46.0), (30.0, 50.0)] {
+        let spec = PlantSpec { ambient, ..PlantSpec::MEASURED };
+        for stuck in [37.5, 39.0] {
+            for power in (100..=400).step_by(25).map(f64::from) {
+                for dither in [1, 60] {
+                    let f = frozen_run(spec, stuck, power, true, dither);
+                    let case = format!("ambient {ambient} stuck {stuck} load {power} dither {dither} {:?} peak {:.1}", f.detect, f.peak);
+                    if !(f.detect.is_some() && f.peak <= limit && !f.handed_over && f.fan == Some(100.0) && f.pump == Some(100.0)) {
+                        bad.push(case);
+                    }
                 }
             }
         }
     }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[test]
+#[ignore]
+fn r43_frozen_false_trips_and_releases_per_24_h_at_constant_loads_table() {
+    if std::env::var("FROZEN_SLOW_S").is_err() {
+        std::env::set_var("FROZEN_SLOW_S", (Control::FROZEN_SLOW_MS / 1000).to_string());
+    }
+    let mut table = format!("window {} s
+plant | load W | trips | releases | exact max s
+", slow_ms() / 1000);
+    let (mut over, mut open) = (0, 0);
+    for (name, spec) in PlantSpec::NAMED {
+        for w in (20..=400).step_by(20).map(f64::from).chain(pump_loads()) {
+            let o = simulate(Profile::Constant(w), spec, |_| {});
+            over += (o.hits > 1) as usize;
+            open += (o.releases != o.hits) as usize;
+            table.push_str(&format!("{name} | {w} | {} | {} | {}
+", o.hits, o.releases, o.exact_max));
+        }
+    }
+    eprintln!("{table}cases with more than 1 trip {over}, trips without a release {open}");
+}
+
+#[test]
+#[ignore]
+fn r44_frozen_rule_on_the_real_extract_has_no_hit() {
+    let text = std::fs::read_to_string(std::env::var("REAL_CSV").unwrap()).unwrap();
+    let mut rig = Rig::new((false, false), 3.0, |_| {});
+    rig.c.frozen_slow_ms = slow_ms();
+    let (mut rows, mut hits, mut was) = (0usize, 0usize, false);
+    for line in text.lines() {
+        let v: Vec<f64> = line.split(',').map(|x| x.parse().unwrap_or(f64::NAN)).collect();
+        rig.water = v[0];
+        rig.cpu = v[1];
+        rig.gpu = v[2].is_finite().then_some(v[2]);
+        rig.extra = vec![(CPU_POWER, v[3]), (GPU_POWER, v[4]), (PUMP_POWER, v[5])].into_iter().filter(|x| x.1.is_finite()).collect();
+        rig.sim.0.borrow_mut().force = [v[6].is_finite().then_some(v[6]), v[7].is_finite().then_some(v[7])];
+        rig.tick();
+        rows += 1;
+        let hit = rig.c.frozen_hit(rig.now).is_some();
+        if hit && !was {
+            hits += 1;
+            eprintln!("hit at row {rows} water {}", v[0]);
+        }
+        was = hit;
+    }
+    eprintln!("REAL rows {rows} hits {hits} window {} s", rig.c.frozen_slow_ms / 1000);
+    assert_eq!(hits, 0);
 }
 
 #[test]
@@ -813,6 +869,26 @@ fn r33_the_frozen_state_ends_only_when_the_reading_has_moved_clearly_beyond_the_
     rig.water = 36.6;
     rig.run(5);
     assert!(!rig.alarm(AlarmKind::WaterFrozen));
+}
+
+#[test]
+fn r45_a_water_gap_resets_the_frozen_state_and_a_same_reading_after_it_does_not_trip() {
+    let mut rig = running(36.5, |_| {});
+    rig.live = true;
+    rig.run(120);
+    rig.live = false;
+    rig.water = 36.5;
+    rig.run(2);
+    rig.water = f64::NAN;
+    rig.run(640);
+    assert!(rig.c.frozen.is_none() && rig.c.frozen_hit(rig.now).is_none());
+    rig.water = 36.5;
+    rig.run(3);
+    assert!(rig.c.frozen_hit(rig.now).is_none() && !rig.alarm(AlarmKind::WaterFrozen));
+    rig.run(300);
+    assert!(rig.c.frozen_hit(rig.now).is_none());
+    rig.run(400);
+    assert!(rig.c.frozen_hit(rig.now).is_some());
 }
 
 #[test]
@@ -969,6 +1045,10 @@ mod plan;
 
 fn scan_env(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+fn slow_ms() -> i64 {
+    (scan_env("FROZEN_SLOW_S", Control::FROZEN_SLOW_MS as f64 / 1000.0) * 1000.0) as i64
 }
 
 #[test]

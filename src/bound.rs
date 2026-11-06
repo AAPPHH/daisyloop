@@ -91,7 +91,7 @@ impl Control {
 
     pub(super) fn frozen_hit(&self, now: i64) -> Option<(f64, i64, &'static str)> {
         let f = self.frozen.as_ref()?;
-        (f.latched || f.tripped(now)).then_some((f.water, f.since, if now - f.since >= Self::FROZEN_MS { "bei jeder Last" } else { "trotz Heizleistung" }))
+        (f.latched || f.tripped(now, self.frozen_slow_ms)).then_some((f.water, f.since, if now - f.since >= Self::FROZEN_MS { "bei jeder Last" } else { "trotz Heizleistung" }))
     }
 
     pub(super) fn frozen_fault(&self, now: i64) -> Option<(String, bool)> {

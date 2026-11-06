@@ -401,8 +401,8 @@ struct Frozen {
 }
 
 impl Frozen {
-    fn tripped(&self, now: i64) -> bool {
-        now - self.same_since >= Control::FROZEN_MS || now - self.since >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
+    fn tripped(&self, now: i64, slow_ms: i64) -> bool {
+        now - self.same_since >= Control::FROZEN_MS || now - self.since >= slow_ms || now - self.since >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
     }
     fn spread(&self, w: f64) -> f64 {
         w.max(self.hi) - w.min(self.lo)
@@ -452,6 +452,7 @@ pub struct Control {
     cpu_avg: Smooth,
     gpu_avg: Smooth,
     frozen: Option<Frozen>,
+    frozen_slow_ms: i64,
     heat: VecDeque<(i64, f64)>,
     start: i64,
     started: bool,
@@ -478,6 +479,7 @@ impl Control {
     const BOOT_RETRY_MS: i64 = 5000;
     const FOREIGN_RECHECK_MS: i64 = 60_000;
     const FROZEN_MS: i64 = 600_000;
+    const FROZEN_SLOW_MS: i64 = 900_000;
     const FROZEN_BAND_K: f64 = 0.01 + 1e-9;
     const FROZEN_RELEASE_K: f64 = 0.05;
     const BOUND_GAP_MS: i64 = 5000;
@@ -509,7 +511,7 @@ impl Control {
         let chans = vec![Chan::new(ControlKind::Fan, &cc.fan), Chan::new(ControlKind::Pump, &cc.pump)];
         let store = Ownership::new(cfg.state_dir());
         let owned = store.read();
-        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
+        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, frozen_slow_ms: Self::FROZEN_SLOW_MS, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
     }
 
     pub fn seed(&mut self, history: &[(i64, HashMap<String, f64>)], now_epoch: i64) -> usize {
@@ -671,6 +673,7 @@ impl Control {
 
     fn track_frozen(&mut self, map: &HashMap<String, f64>, now: i64) {
         let Some(w) = map.get(&self.cfg.water_channel).copied() else { return };
+        let slow = self.frozen_slow_ms;
         let dt = self.frozen.as_ref().map_or(0, |f| (now - f.last).min(5000));
         let step = self.heat_expected_k(w, now, dt);
         match self.frozen.as_mut().filter(|f| f.spread(w) <= Self::FROZEN_BAND_K + if f.latched { Self::FROZEN_RELEASE_K } else { 0.0 }) {
@@ -683,7 +686,7 @@ impl Control {
                 }
                 f.heat_k = (f.heat_k + step).max(Self::HEAT_FLOOR_K);
                 f.last = now;
-                f.latched |= f.tripped(now);
+                f.latched |= f.tripped(now, slow);
             }
             None => self.frozen = Some(Frozen { since: now, water: w, lo: w, hi: w, same_since: now, heat_k: 0.0, last: now, latched: false }),
         }
@@ -691,6 +694,9 @@ impl Control {
 
     fn absorb(&mut self, rows: &[Row], now: i64, epoch: i64) {
         let map: HashMap<String, f64> = rows.iter().filter(|r| self.plausible(&r.channel, r.value)).map(|r| (r.channel.clone(), r.value)).collect();
+        if self.fresh(&self.cfg.water_channel, now).is_none() {
+            self.frozen = None;
+        }
         for w in self.watched() {
             if let Some(v) = map.get(&w) {
                 self.last.insert(w, (now, *v));
