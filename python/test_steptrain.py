@@ -197,6 +197,39 @@ def test_step_train_and_hold_do_not_overlap_and_the_fit_stays_clear_of_the_hold_
     assert segs and not any((s["fit"] & b["step_hold"][s["lo"]:s["hi"]]).any() for s in segs)
 
 
+def plans(text):
+    return [[[float(v) for v in step.split(",")] for step in re.findall(r"\[([\d., ]+)\]", m)] for m in re.findall(r"(?:fan|pump) = (\[\[.*\]\])", text)]
+
+
+def test_runbook_table_and_plans_in_the_doc_equal_the_simulated_protocol():
+    proto = [(b[0], b[1]) for b in SIM["inject"]["protocols"]["runbook"] if b[0] in ("fan", "pump")]
+    duty_fan, duty_pump, main_fan, main_pump = (steps for _, steps in proto)
+    text = doc("steptest.md")
+    table = [(float(d), float(m) * 60.0, float(w)) for d, m, w in re.findall(r"^\| \d[^|]*\| (\d+) % \| (\d+) min \| (\d+) W", text, re.M)]
+    assert table == [tuple(float(v) for v in step) for step in main_fan]
+    step2, step4 = text.split("## 3.")[0].split("## 2.")[1], text.split("## 4.")[1].split("### 4a")[0]
+    assert plans(step2) == [[s[:2] for s in duty_fan], [s[:2] for s in duty_pump]] == [[[0.0, 120.0]], [[15.0, 120.0]]]
+    assert plans(step4) == [[list(map(float, s[:2])) for s in main_fan], [list(map(float, s[:2])) for s in main_pump]]
+    loads = {s[2] for s in main_pump}
+    assert loads == {200} and re.search(r"Load (\d+) W constant", text.split("### 4b")[1]).group(1) == "200"
+
+
+def test_conductance_check_uses_the_lowest_held_running_level_and_can_fail():
+    n = 700
+    seg = {"who": "fan", "phase": np.ones(n), "duty": np.r_[np.zeros(120), np.full(580, 27.0)], "f": np.r_[np.zeros(120), np.full(580, 395.0)], "hold": np.zeros(n, bool)}
+    ident = S.Identifier(S.CFG, None)
+    ident.segs = [seg]
+    ex = ident.excitation("fan")
+    assert ex["levels_held"] == [0.0, 25.0] and abs(ex["level_rpm"]["25.0"] - 395.0) < 1e-9
+    low = min(r for l, r in ex["level_rpm"].items() if float(l) > 0.0) / ident.gb.full
+    for m, passes in ((1.6, True), (0.1, False)):
+        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"rmse_full": None}}
+        th = np.zeros(10)
+        th[2] = m
+        why = ident.fan(o, th, [], ex)["reasons"]
+        assert ("conductance drop at the lowest level too small" in why) == (not passes), (m, why)
+
+
 if __name__ == "__main__":
     for f in (test_prep_fits_on_the_given_rows_and_exempts_free_columns, test_plant_bound_lifts_a_low_fan_duty_and_rpm_is_never_negative, test_grey_box_recovers_the_fan_exponent_and_rejects_none,
               test_response_term_matches_between_trainer_and_exporter, test_gate_ships_with_a_fan_response_refuses_without_and_repeats):

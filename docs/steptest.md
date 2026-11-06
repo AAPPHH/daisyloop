@@ -8,9 +8,11 @@ Goal: one evening with the owner at the computer, then the model knows how the f
 
 ## Cold start requirement
 
-The session starts cold: the computer has been idle for at least 30 min (or off for 30 min and then booted and left idle for 10 min), water at or below 31 C, fan and pump on the firmware PID, LibreHardwareMonitor sidecar running (the UI shows CPU and GPU power and temperature; the training needs them).
+The session starts cold: the computer has been idle for at least 30 min (or off for 30 min and then booted and left idle for 10 min), water between 30.0 and 31.0 C when step 3 starts, fan and pump on the firmware PID, LibreHardwareMonitor sidecar running (the UI shows CPU and GPU power and temperature; the training needs them).
 
-Why: the safety minimum curve of the fan (`min_curve` 35 C 20 %, 38 C 54.4 %, 42 C 100 %) overrides any step duty below it (`step_duty` takes the maximum of the step and the bound). A step of 27 % is only honoured while the water is below 35.6 C, 40 % below 36.7 C, 55 % below 38.1 C, 75 % below 39.9 C. The design water temperature of 36.6 C in `docs/thermal.md` 4.4 would therefore force the low levels up. The machine never makes less than about 70 W CPU plus GPU (5th percentile 69.7 W) plus 4 W pump, so the low levels cannot be held by lowering the load. They are held by starting cold and by ordering the loads so that the water stays between about 31 and 35 C (hand calculation with the two-lump plant of `docs/thermal.md` 4.4 and the safety curve, ambient 25 C, start at 31 C); starting warm leaves no room. The fan stop duty test also needs the water below 33 C to be meaningful.
+Start band 30.0 to 31.0 C: the dry run (section 9) was run for start waters of 30, 30.5 and 31 C and the criteria were met there only. How to get there: below 30.0 C, run a light load (CPU stress at about 100 W, fan and pump on the firmware PID) until the reading is 30.0 C or more and stop it the moment it is, then start step 3 within 2 min; above 31.0 C leave the machine idle with the fan on the firmware PID until the reading is 31.0 C or less. Do not start the session outside the band: wait or heat, the band costs a few minutes.
+
+Why: the safety minimum curve of the fan (`min_curve` 35 C 20 %, 38 C 54.4 %, 42 C 100 %) overrides any step duty below it (`step_duty` takes the maximum of the step and the bound). A step of 27 % is only honoured while the water is below 35.6 C, 40 % below 36.7 C, 55 % below 38.1 C, 75 % below 39.9 C. The design water temperature of 36.6 C in `docs/thermal.md` 4.4 would therefore force the low levels up. The machine never makes less than about 70 W CPU plus GPU (5th percentile 69.7 W) plus 4 W pump, so the low levels cannot be held by lowering the load. They are held by starting cold and by ordering the loads so that the water stays between about 28 and 35.6 C (two-lump plant of `docs/thermal.md` 4.4 with the safety curve, ambient 25 C, the dry run of section 9); starting warm leaves no room. The fan stop duty test also needs the water below 33 C to be meaningful.
 
 ## 0. Abort command, independent of the daemon
 
@@ -23,7 +25,7 @@ Source: `tools\d5_probe\src\bin\d5_abort.rs`, built once during preparation with
 
 ## 1. Preparation without any write (15 min)
 
-- Rehearse the retraining once on the dry run: `python python\steptrain.py dryrun` (section 9). It needs the Python environment with numpy, scipy, xgboost, duckdb, pyarrow, pytz and ray, and a running Ray cluster that this Python can join (`ray status` must work; the ray version of the environment must equal the cluster's). The job declares 4 cores and 6 GB.
+- Rehearse the retraining once on the dry run: `python python\steptrain.py dryrun` (section 9; arguments `dryrun [directory] [case,case] [seeds]`). It needs the Python environment with numpy, scipy, xgboost, duckdb, pyarrow and pytz. It runs as separate worker processes of one core each (5 by default, `workers` in the `CFG` dict), no Ray; one case takes about 20 s.
 - Check the model and the data path: UI shows model loaded, `warm`; the lake has the LHM channels of the last hour.
 - Build the abort command of section 0 and run `cargo test` in `tools\d5_probe` (no device access); keep a PowerShell window open at the build directory for the whole session.
 - Decide the load generator: a GPU burn with adjustable power and a CPU stress with adjustable threads, both stoppable in one click. Heat at the water is about 0.96 x CPU package power + GPU power + 4 to 18 W pump.
@@ -71,19 +73,21 @@ The step test is per channel: the fan plan and the pump plan are two separate st
 
 ### 4a. Fan test, 47 min
 
-Start: UI fan card, `Stufentest starten ...`, `Ja, starten`. Phases of the plan and the load the owner sets by hand (the daemon does not control the load; targets for a water temperature of about 34.5 C with the pump at its floor, G from `docs/thermal.md` 4.4, adjust to what the thermometer says):
+Start: UI fan card, `Stufentest starten ...`, `Ja, starten`. Phases of the plan and the load the owner sets by hand (the daemon does not control the load; the loads are the ones of the dry run, `SIM["inject"]["protocols"]["runbook"]` in `python/stepsim.py`, and a test compares this table with it; adjust to what the thermometer says):
 
 | Phase | Fan duty | Time | Load (CPU + GPU power) |
 |---|---|---|---|
-| 1 lead | 100 % | 5 min | about 120 W (a light load; the water stays near 31 C) |
-| 2 | 75 % | 8 min | about 100 W |
-| 3 | 55 % | 8 min | about 75 W |
-| 4 | 40 % | 8 min | idle machine, nothing running (about 70 W, the lowest load there is) |
-| 5 | 27 % | 8 min | idle machine, nothing running |
-| 6 | 100 % | 5 min | about 250 W |
-| 7 | 100 % | 5 min | half of that, about 125 W (separates sink temperature from load scale) |
+| 1 lead | 100 % | 5 min | 250 W (full load, CPU stress plus GPU burn) |
+| 2 | 75 % | 8 min | 100 W (a light load) |
+| 3 | 55 % | 8 min | 75 W (lighter still) |
+| 4 | 40 % | 8 min | 70 W (idle machine, nothing running, the lowest load there is) |
+| 5 | 27 % | 8 min | 70 W (idle machine, nothing running) |
+| 6 | 100 % | 5 min | 250 W (full load) |
+| 7 | 100 % | 5 min | 125 W (half of that, separates sink temperature from load scale) |
 
-The plant model gives these water temperatures at the end of phases 1 to 5 with these loads: 30.6, 31.2, 31.9, 33.2 and 35.3 C. At 27 % the safety curve lifts the duty at 35.6 C and the water rises at about 0.004 K/s there, so phase 5 holds for the full 8 min only if the idle heat is at most about 76 W in total (CPU plus GPU about 72 W) and the phase starts below 33.5 C. At 80 W it crosses after about 7 min: the duty is then overridden for the last minute and recorded as such, the fit loses that minute of excitation, nothing unsafe happens. The load cannot be lowered below idle, so there is nothing to do in phase 5 except watch; if the water is above 34.5 C when phase 5 starts, accept the override.
+Why a 250 W lead: phases 6 and 7 are held out of the fit and predicted by it (section 6). With a 120 W lead the held-out 250 W of phase 6 lay far outside the loads in the fit (70 to 120 W) and the check was a load extrapolation: in the dry run (4 seeds each, same code) 4 of 4 shipped at a start of 30 C, 1 of 4 at 30.5 C and 0 of 4 at 31 C (hold-out RMSE 0.07 to 0.29 K against the limit); with a restart gap 4 of 4 at 30.5 C. With the lead the fit contains 250 W and 4 of 4 shipped at every start, with and without the gap (hold-out RMSE 0.05 to 0.06 K).
+
+The plant model gives these water temperatures at the end of phases 1 to 5 with these loads: 31.8, 31.7, 32.3, 33.6 and 35.6 C (about 28.4 C at the start of phase 1 after the idle wait). At 27 % the safety curve lifts the duty at 35.6 C and the water rises at about 0.004 K/s there, so phase 5 holds for the full 8 min only if the idle heat is at most about 76 W in total (CPU plus GPU about 72 W). At 80 W it crosses after about 7 min: the duty is then overridden for the last minute and recorded as such, the fit loses that minute of excitation, nothing unsafe happens. The load cannot be lowered below idle, so there is nothing to do in phase 5 except watch; if the water is above 34.5 C when phase 5 starts, accept the override.
 
 The loads are held at constant values inside a phase, changed within 30 s of the phase change (the UI line `Stufe n von 7 ... noch s s` is the clock). Steady state is not needed; the fit uses the whole curve with the dead time. If the water crosses 35.5 C in phases 2 to 4 the commanded duty is overridden by the safety curve and recorded as such (the fit uses the recorded rpm). Once the bound has lifted the duty it holds it for a while (latch), so reducing the load does not bring the level back within the phase; reduce the load anyway and do not chase exact numbers.
 
@@ -94,7 +98,7 @@ The loads are held at constant values inside a phase, changed within 30 s of the
 
 ### 4b. Pump test, 17 min
 
-Start: UI pump card. Fan stays on the firmware PID at full speed. Load about 250 W constant for the whole test (full load). Phases: 5 min at the pump floor 15 % (lead), then 100 %, floor, 100 %, floor for 3 min each. Watch pump rpm (about 1835 at 15 %, 4800 at 100 %), `pump_low` alarm, water. Abort limits as in 4a, plus pump rpm below 1500. Abort action: stop the load, `Abbrechen` in the pump card.
+Start: UI pump card. Fan stays on the firmware PID at full speed. Load 200 W constant for the whole test. Phases: 5 min at the pump floor 15 % (lead), then 100 %, floor, 100 %, floor for 3 min each. Watch pump rpm (about 1835 at 15 %, 4800 at 100 %), `pump_low` alarm, water. Abort limits as in 4a, plus pump rpm below 1500. Abort action: stop the load, `Abbrechen` in the pump card.
 
 ### 4c. Cool-down, 15 min
 

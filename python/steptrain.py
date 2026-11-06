@@ -39,13 +39,13 @@ CFG = {
     "trees": {"targets": ["water_30", "water_60", "water_120"], "rounds": 600, "early": 40, "params": {"eta": 0.03, "max_depth": 3, "min_child_weight": 100, "subsample": 0.7, "colsample_bytree": 0.5, "lambda": 10.0, "tree_method": "hist", "objective": "reg:squarederror"}},
     "die_gain": 1.0,
     "boot": {"block_s": 600, "n": 400},
-    "ray": {"num_cpus": 2, "memory": 3e9},
     "workers": 5,
     "blas_threads": 1,
     "gate": {
-        "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "fit_rmse_max": 0.10, "hold_rmse_max": 0.15, "hold_gain": 1.5, "full_s": 120.0},
+        "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "hold_gain": 1.5, "full_s": 120.0,
+                 "band": {"margin": 1.25, "fit_max": 0.0514, "hold_max": 0.0877, "runs": 60}},
         "fan": {"grid_lo_duty": 27.0, "min_levels": 3, "min_span": 40.0, "min_drop": 0.25, "dwell_s": 120},
-        "pump": {"min_levels": 2, "min_span": 50.0, "min_plant_k": 0.02, "hold_gain": 1.1, "dwell_s": 120},
+        "pump": {"dwell_s": 120, "why": "pump coefficient not identified: the protocol does not separate it from pump heat and dead time (dry run: truth 0 gives a fitted 0.14, flag fired in 2 of 5 runs only at truth 0.6), the pump stays on the firmware PID"},
         "rmse_targets": ["water_30", "water_120"],
         "hold_targets": ["water_120", "cpu_120", "gpu_120"],
         "required": ["fan"],
@@ -53,11 +53,11 @@ CFG = {
         "text": [
             "ship only if all of the following hold, otherwise the artifact is written as candidate_* and not as model_deploy.json",
             "1. fan excitation: enough distinct duty levels held long enough in the step windows",
-            "2. grey-box fit of the thermal.md plant with the dead time as a parameter and a linear ambient drift: fit RMSE at most grey.fit_rmse_max on the fit phases",
-            "3. fan exponent m is positive with a one-sided 95 % likelihood-ratio bound (variance inflated for autocorrelation) against the nested model without fan response but with ambient drift, and the conductance at the lowest honoured level is at least min_drop below full fan",
-            "4. independent check: phases not used in the fit (fan phases 6 and 7, pump phases 4 and 5 and what follows) are predicted with RMSE at most grey.hold_rmse_max and at least hold_gain times better than by the nested no-fan-plus-drift model refitted on the same fit phases",
+            "2. grey-box fit of the thermal.md plant with the dead time as a parameter and a linear ambient drift on the rows that are finite, outside gaps and outside the hold-out spans: fit RMSE at most grey.fit_rmse_max, the largest RMSE of the correct plant over the dry-run seeds (grey.band) times grey.band.margin",
+            "3. fan exponent m is positive with a one-sided 95 % likelihood-ratio bound (variance inflated for autocorrelation) against the nested model without fan response but with ambient drift, and the conductance of the lowest held running duty level (its recorded rpm, not the 0 % test) is at least min_drop below full fan",
+            "4. independent check: phases not used in the fit (fan phases 6 and 7, pump phases 4 and 5 and what follows) are predicted with RMSE at most grey.hold_rmse_max (the same band rule) and at least hold_gain times better than by the nested no-fan-plus-drift model refitted on the same fit phases",
             "5. water 30 s and 120 s RMSE of the model on the final fold (test, fresh2, held-out step rows) is not worse than the deployed model's by more than z times the block-bootstrap standard deviation of the paired difference, and on the held-out step rows the 120 s forecasts of water, cpu and gpu are not worse than persistence by more than the same band",
-            "the pump flag is separate: weak or unidentified pump response does not block shipping, the artifact then carries identified.pump = false",
+            "the pump flag is not part of the gate: identified.pump is always false, the planner then does not use the model for the pump channel",
         ],
     },
     "plant": SIM["plant"],
@@ -65,8 +65,11 @@ CFG = {
     "dry": {"base": {"fan": {"fan": True, "drift": 0.0}, "nofan": {"fan": False, "drift": 0.0}, "drift_nofan": {"fan": False, "drift": 5.5}, "bump_nofan": {"fan": False, "drift": 5.5, "plant": {"drift_shape": "bump"}},
                      "drift_fan": {"fan": True, "drift": 5.5}, "alt_fan": {"fan": True, "drift": 0.0, "plant": ALT}, "alt_nofan": {"fan": False, "drift": 3.0, "plant": ALT}},
             "starts": [30.0, 30.5, 31.0], "restart_gap": [120, 30], "grid": {"fan": "all", "nofan": [30.5], "drift_nofan": [30.5], "bump_nofan": [30.5], "alt_fan": [30.5], "alt_nofan": [30.5]},
-            "seeds": 10, "protocol": "runbook", "factor": 1.5},
+            "seeds": 10, "need": 9, "protocol": "runbook", "factor": 1.5},
 }
+
+for _k in ("fit", "hold"):
+    CFG["gate"]["grey"][f"{_k}_rmse_max"] = round(CFG["gate"]["grey"]["band"]["margin"] * CFG["gate"]["grey"]["band"][f"{_k}_max"], 3)
 
 
 class Forest:
@@ -253,11 +256,13 @@ class Identifier:
 
     def excitation(self, who):
         c = self.g[who]
-        d = np.concatenate([s["duty"][np.isfinite(s["phase"])] for s in self.segs if s["who"] == who] or [np.zeros(0)])
-        d = np.round(d[np.isfinite(d)] / 5.0) * 5.0
+        use = [s for s in self.segs if s["who"] == who]
+        d, r = (np.concatenate([s[k][np.isfinite(s["phase"])] for s in use] or [np.zeros(0)]) for k in ("duty", "f"))
+        keep = np.isfinite(d)
+        d, r = np.round(d[keep] / 5.0) * 5.0, r[keep]
         u, n = np.unique(d, return_counts=True)
         held = u[n >= c["dwell_s"]]
-        return {"levels_held": held.tolist(), "span": float(held.max() - held.min()) if len(held) else 0.0}
+        return {"levels_held": held.tolist(), "span": float(held.max() - held.min()) if len(held) else 0.0, "level_rpm": {str(float(l)): float(np.median(r[d == l])) for l in held}}
 
     def run(self):
         gc = self.g["grey"]
@@ -266,26 +271,22 @@ class Identifier:
         if not segs:
             raise ValueError("no usable step window")
         fan_s = [s for s in segs if s["who"] == "fan"]
-        pump_s = [s for s in segs if s["who"] == "pump"]
         th, sse, n = gb.fit(segs)
         th0, sse0, _ = gb.fit(segs, {"m": 0.0}, th)
-        thg, ssg, _ = gb.fit(segs, {"gamma": 0.0}, th)
         lr = lambda s0: float(n * math.log(max(s0, sse) / sse) / gc["se_inflate"] ** 2)
-        out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "lr_gamma": lr(ssg), "theta_null": dict(zip(gb.NAMES, th0.tolist()))}
-        act = np.concatenate([s["f"][np.isfinite(s["phase"])] for s in fan_s] or [np.zeros(0)])
-        ratio = max(float(np.nanmin(act)) / gb.full, 0.05) if len(act) else 1.0
-        out["lowest_rpm_ratio"] = ratio
-        out["g_ratio_at_lowest"] = float(ratio ** th[2])
-        for who, ss, nulth in (("fan", fan_s, th0), ("pump", pump_s, thg)):
-            hs = [s for s in ss if s["hold"].any()]
-            out[f"hold_{who}"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(nulth, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs))}
-        out.update(fan=self.fan(out, th, fan_s), pump=self.pump(out, th, pump_s))
+        out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "theta_null": dict(zip(gb.NAMES, th0.tolist()))}
+        ex = self.excitation("fan")
+        low = [r for l, r in ex["level_rpm"].items() if float(l) > 0.0]
+        out["lowest_rpm_ratio"] = min(low) / gb.full if low else None
+        out["g_ratio_at_lowest"] = float(out["lowest_rpm_ratio"] ** th[2]) if low else None
+        hs = [s for s in fan_s if s["hold"].any()]
+        out["hold_fan"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(th0, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs))}
+        out.update(fan=self.fan(out, th, fan_s, ex), pump=self.pump())
         out["response"] = self.response(out["theta_fit"])
         return out
 
-    def fan(self, o, th, ss):
+    def fan(self, o, th, ss, ex):
         c, gc = self.g["fan"], self.g["grey"]
-        ex = self.excitation("fan")
         h = o["hold_fan"]
         why = []
         if not (len(ex["levels_held"]) >= c["min_levels"] and ex["span"] >= c["min_span"]):
@@ -294,7 +295,7 @@ class Identifier:
             why.append(f"grey-box fit RMSE {o['fit_rmse_k']:.3f} K above {gc['fit_rmse_max']}")
         if not (th[2] > 0 and o["lr_m"] >= o["lr_threshold"]):
             why.append("fan exponent not significant against no fan response with ambient drift")
-        if not o["g_ratio_at_lowest"] <= 1.0 - c["min_drop"]:
+        if o["g_ratio_at_lowest"] is None or not o["g_ratio_at_lowest"] <= 1.0 - c["min_drop"]:
             why.append("conductance drop at the lowest level too small")
         if h["rmse_full"] is None:
             why.append("no hold-out fan phases")
@@ -313,28 +314,8 @@ class Identifier:
             truth = tr.effect(w, p, c["grid_lo_duty"] * self.cfg["plant"]["fan_per_duty"], self.gb.full, gc["full_s"])
         return {"identified": not why, "reasons": why, "excitation": ex, "effect_k": eff, "truth_k": truth, "m": float(th[2])}
 
-    def pump(self, o, th, ss):
-        c, gc = self.g["pump"], self.g["grey"]
-        ex = self.excitation("pump")
-        h = o["hold_pump"]
-        why = []
-        if not (len(ex["levels_held"]) >= c["min_levels"] and ex["span"] >= c["min_span"]):
-            why.append("pump not excited enough")
-        if not o["fit_rmse_k"] <= gc["fit_rmse_max"]:
-            why.append("grey-box fit RMSE too large")
-        if not (th[3] >= 0 and o["lr_gamma"] >= o["lr_threshold"]):
-            why.append("pump coefficient not significant")
-        if h["rmse_full"] is None or not h["rmse_null"] >= c["hold_gain"] * h["rmse_full"]:
-            why.append("hold-out pump phases not predicted better with the pump coefficient")
-        net = None
-        if ss:
-            w = np.concatenate([s["w"] for s in ss])
-            pw = self.cfg["plant"]["pump_power"]
-            g = lambda r: th[1] * (1.0 + th[3] * (r / self.gb.pump_full - 1.0))
-            net = float(np.mean(pw[-1][1] - pw[1][1] - (g(self.gb.pump_hi) - g(self.gb.pump_lo)) * (w - th[4])) * gc["full_s"] / (th[0] * 1000.0 * th[6]))
-            if abs(net) < c["min_plant_k"]:
-                why.append("net pump effect too small to give a sign")
-        return {"identified": not why, "reasons": why, "excitation": ex, "net_effect_k": net, "gamma": float(th[3])}
+    def pump(self):
+        return {"identified": False, "reasons": [self.g["pump"]["why"]], "excitation": self.excitation("pump")}
 
     def response(self, th):
         gb = self.gb
@@ -718,7 +699,7 @@ def dry_task(job):
     f = rep["identification"]["fan"]
     ratio = f["effect_k"] / f["truth_k"] if f.get("truth_k") else None
     return {"case": case, "seed": seed, "ship": rep["gate"]["ship"], "identified": rep["gate"]["identified"], "reasons": rep["gate"]["reasons"], "fan_effect_k": f["effect_k"], "truth_k": f.get("truth_k"), "ratio": ratio,
-            "m": f["m"], "fit_rmse": rep["identification"]["fit_rmse_k"], "hold": rep["identification"]["hold_fan"], "family": rep["family"], "seconds": rep["seconds"], "water_max": info["water_max"]}
+            "m": f["m"], "gamma": rep["identification"]["theta_fit"]["gamma"], "fit_rmse": rep["identification"]["fit_rmse_k"], "hold": rep["identification"]["hold_fan"], "family": rep["family"], "seconds": rep["seconds"], "water_max": info["water_max"]}
 
 
 class Runner:
@@ -751,12 +732,29 @@ class DryRun:
     @staticmethod
     def summary(res, factor):
         out = {}
-        for r in res:
-            s = out.setdefault(r["case"], {"n": 0, "ship": 0, "fan_id": 0, "ratio_ok": 0})
-            s["n"] += 1
-            s["ship"] += bool(r["ship"])
-            s["fan_id"] += bool(r["identified"]["fan"])
-            s["ratio_ok"] += bool(r["ratio"] is not None and 1.0 / factor <= r["ratio"] <= factor)
+        rng = lambda v: [min(v), max(v)] if v else None
+        for case in dict.fromkeys(r["case"] for r in res):
+            rs = [r for r in res if r["case"] == case]
+            ok = [bool(r["ratio"] is not None and 1.0 / factor <= r["ratio"] <= factor) for r in rs]
+            out[case] = {"n": len(rs), "ship": sum(r["ship"] for r in rs), "ship_ok": sum(bool(r["ship"] and o) for r, o in zip(rs, ok)), "fan_id": sum(r["identified"]["fan"] for r in rs), "ratio_ok": sum(ok),
+                         "fit": rng([r["fit_rmse"] for r in rs]), "hold": rng([r["hold"]["rmse_full"] for r in rs if r["hold"]["rmse_full"] is not None]), "ratio": rng([r["ratio"] for r in rs if r["ratio"]])}
+        return out
+
+    @staticmethod
+    def band(res):
+        fan = [r for r in res if r["case"].startswith("fan_")]
+        return {"fit_max": max(r["fit_rmse"] for r in fan), "hold_max": max(r["hold"]["rmse_full"] for r in fan), "runs": len(fan)} if fan else None
+
+    @staticmethod
+    def verdict(summary, need=9):
+        out = {}
+        for c, s in summary.items():
+            if c.startswith(("nofan", "drift", "bump", "alt_nofan")):
+                out[c] = s["ship"] == 0
+            elif c.startswith("alt_fan"):
+                out[c] = s["ship"] == s["ship_ok"]
+            else:
+                out[c] = s["ship_ok"] >= min(need, s["n"])
         return out
 
 
@@ -765,7 +763,8 @@ def main(argv, cfg=CFG):
         cfg = dict(cfg, store_dir=FRESH["store_dir"])
         cases = argv[2].split(",") if len(argv) > 2 else None
         root, res = DryRun(cfg).run(argv[1] if len(argv) > 1 else None, cases, int(argv[3]) if len(argv) > 3 else None)
-        out = {"root": root, "summary": DryRun.summary(res, cfg["dry"]["factor"])}
+        sm = DryRun.summary(res, cfg["dry"]["factor"])
+        out = {"root": root, "band": DryRun.band(res), "summary": sm, "criteria": DryRun.verdict(sm, cfg["dry"]["need"])}
     else:
         out = train_task(cfg)["gate"]
     print(json.dumps(out, indent=1))
