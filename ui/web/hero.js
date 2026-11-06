@@ -30,6 +30,7 @@ export class Hero {
     this.phase = 0;
     this.pumpAng = 0;
     this.fanAng = 0;
+    this.inView = true;
     new ResizeObserver(() => this.layout()).observe(this.cv);
   }
 
@@ -188,7 +189,7 @@ export class Hero {
   }
 
   animating() {
-    return S.live && S.visible && !motion.reduced;
+    return S.live && S.visible && this.inView && !motion.reduced;
   }
 
   tick(dt) {

@@ -19,7 +19,7 @@ const formats = {};
 export function num(v, d = 1) {
   if (v == null || !isFinite(v)) return '–';
   formats[d] ||= new Intl.NumberFormat('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d, useGrouping: false });
-  return formats[d].format(v);
+  return formats[d].format(v).replace(/^-(?=0(,0+)?$)/, '');
 }
 export const unitLabel = (u) => (u === 'RPM' ? 'U/min' : u);
 export const decimals = (u) => ({ RPM: 0, MHz: 0, ns: 0, V: 3 })[u] ?? (['°C', 'W', '%', 'GB', 'MB', 'L/h', 'MB/s', 'KB/s'].includes(u) ? 1 : 2);
