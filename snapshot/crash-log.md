@@ -48,3 +48,8 @@ Trend from 6008 over 60 days: 29 outages since 2026-09-08. About 11 in the 40 da
 - BIOS 2.A70 dated 2025-07-14.
 - CPU 270 W peaks at 104 C.
 - Power supply.
+
+## RAM test: 6400 MT/s
+
+- 2026-11-06 10:48:46: outage under load, event 41 and 6008. Last sample 10:48:38: CPU 174 W, core max 82 C, load 75 %, water 33.6 C, GPU 11.5 W, fan 72 %, pump 2568 rpm. So not thermal.
+- 2026-11-06 10:58: owner boots at 6400 MT/s, 1.10 V (Win32_PhysicalMemory, both modules). Before: 8200 MT/s, 1.40 V. No outage counted from here on decides the test.
