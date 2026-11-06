@@ -6,8 +6,9 @@ fn read(path: &str) -> String {
 }
 
 #[test]
+#[ignore = "needs STEPTRAIN_OUT, run by python/test_steptrain.py"]
 fn trainer_output_dir_loads_and_the_old_spec_does_not() {
-    let Ok(dir) = std::env::var("STEPTRAIN_OUT") else { return };
+    let dir = std::env::var("STEPTRAIN_OUT").expect("STEPTRAIN_OUT");
     let (spec, model) = (read(&format!("{dir}/feature_spec_deploy.json")), read(&format!("{dir}/model_deploy.json")));
     let p = Predictor::load(&spec, &model).unwrap();
     assert!(p.model.is_linear() && p.model.target_names().contains(&"water_120"));

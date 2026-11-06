@@ -103,7 +103,7 @@ def test_dryrun_entry_point_runs_as_documented_and_writes_the_pair():
         assert {*NAMES, "report.json"} <= set(os.listdir(d))
         assert not (set(os.listdir(d)) & {"golden_deploy.json", "candidate_golden_deploy.json"})
         assert copy_steps(d, os.path.join(root, "models"), os.path.join(root, "install"))
-        cargo = subprocess.run(["cargo", "test", "--manifest-path", os.path.join(ROOT, "tools", "model_infer", "Cargo.toml"), "--test", "load_dir"], env=dict(os.environ, STEPTRAIN_OUT=os.path.join(root, "install")), capture_output=True, text=True, timeout=900)
+        cargo = subprocess.run(["cargo", "test", "--manifest-path", os.path.join(ROOT, "tools", "model_infer", "Cargo.toml"), "--test", "load_dir", "--", "--ignored"], env=dict(os.environ, STEPTRAIN_OUT=os.path.join(root, "install")), capture_output=True, text=True, timeout=900)
         assert cargo.returncode == 0 and "1 passed" in cargo.stdout, cargo.stdout[-2000:] + cargo.stderr[-2000:]
     finally:
         shutil.rmtree(root, ignore_errors=True)
