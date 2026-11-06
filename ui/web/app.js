@@ -13,8 +13,9 @@ const hero = new Hero();
 const history = new History();
 const sensors = new Sensors(history);
 const gaming = new Gaming();
-let page = 'hero';
+const vis = new Set();
 let alarmSig = '';
+let alarmAges = [];
 let raf = 0;
 let last = 0;
 let heroDt = 0;
@@ -36,7 +37,7 @@ function frame(t) {
 }
 
 motion.kick = () => {
-  if (!raf && S.visible && page !== 'history') {
+  if (!raf && S.visible && !(vis.size === 1 && vis.has('history'))) {
     last = performance.now();
     raf = requestAnimationFrame(frame);
   }
@@ -51,20 +52,29 @@ function setLive(live) {
   const a = age();
   st.lastElementChild.textContent = live ? 'Live' : S.snap ? `Daemon nicht erreichbar · letzte Werte vor ${ageText(a)}` : 'Warte auf Daemon …';
   if (was !== live) {
-    if (page === 'hero') hero.update(live);
+    if (vis.has('hero')) hero.update(live);
     motion.kick();
   }
+}
+
+function alarmAge() {
+  for (const [el, a] of alarmAges) el.textContent = ageText((Date.now() - a.since_ms) / 1000);
 }
 
 function alarmBar() {
   const bar = $('#alarm-bar');
   const alarms = S.snap?.alarms ?? [];
   const sig = alarms.map((a) => a.kind + a.channel + a.message).join('|');
-  if (sig === alarmSig) return;
-  alarmSig = sig;
-  bar.hidden = !alarms.length;
-  bar.replaceChildren(...alarms.map((a) => h('div', { class: 'al ' + a.kind }, h('b', {}, a.message), h('span', {}, ageText((Date.now() - a.since_ms) / 1000)))));
+  if (sig !== alarmSig) {
+    alarmSig = sig;
+    bar.hidden = !alarms.length;
+    alarmAges = alarms.map((a) => [h('span'), a]);
+    bar.replaceChildren(...alarms.map((a, i) => h('div', { class: 'al ' + a.kind }, h('b', {}, a.message), alarmAges[i][0])));
+  }
+  alarmAge();
 }
+
+new ResizeObserver(() => document.documentElement.style.setProperty('--alarm-h', ($('#alarm-bar').hidden ? 0 : $('#alarm-bar').getBoundingClientRect().height) + 'px')).observe($('#alarm-bar'));
 
 function render() {
   if (!S.visible) return;
@@ -74,13 +84,17 @@ function render() {
   paintPage();
 }
 
-function paintPage() {
-  if (page === 'hero') hero.update(true);
-  else if (page === 'history') {
+function paintSection(id) {
+  if (id === 'hero') hero.update(S.live);
+  else if (id === 'history') {
     gaming.paint();
     if (history.open) history.fetch();
-  } else if (page === 'controls') updateControls();
-  else if (page === 'sensors') sensors.render();
+  } else if (id === 'controls') updateControls();
+  else if (id === 'sensors') sensors.render();
+}
+
+function paintPage() {
+  vis.forEach(paintSection);
   motion.kick();
 }
 
@@ -112,24 +126,51 @@ document.addEventListener('visibilitychange', () => setVisible(!document.hidden)
 initControls();
 
 const links = [...document.querySelectorAll('.index a')];
+const sections = links.map((a) => document.querySelector(a.getAttribute('href')));
+let pin = null;
+let located = 0;
+
+function highlight(id) {
+  links.forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + id));
+}
+
+function locate() {
+  located = 0;
+  if (pin) return highlight(pin);
+  const atEnd = scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+  let id = sections[0].id;
+  for (const s of sections) if (atEnd || s.getBoundingClientRect().top <= innerHeight * 0.45) id = s.id;
+  highlight(id);
+}
+
+const queueLocate = () => located || (located = requestAnimationFrame(locate));
+const unpin = () => ((pin = null), queueLocate());
+addEventListener('scroll', queueLocate, { passive: true });
+addEventListener('resize', queueLocate);
+addEventListener('wheel', unpin, { passive: true });
+addEventListener('touchstart', unpin, { passive: true });
+addEventListener('keydown', unpin);
+addEventListener('pointerdown', (e) => e.target === document.documentElement && unpin());
+links.forEach((a) => a.addEventListener('click', () => ((pin = a.getAttribute('href').slice(1)), highlight(pin))));
+
 const spy = new IntersectionObserver((entries) => {
+  const fresh = [];
   for (const e of entries) {
-    if (!e.isIntersecting) continue;
-    links.forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + e.target.id));
-    if (page === e.target.id) continue;
-    page = e.target.id;
-    hero.inView = page === 'hero';
-    if (S.snap && S.visible) {
-      if (page === 'history') gaming.paint();
-      else if (page === 'sensors') sensors.render();
-      paintPage();
-    }
+    if (e.isIntersecting) {
+      if (!vis.has(e.target.id)) fresh.push(e.target.id);
+      vis.add(e.target.id);
+    } else vis.delete(e.target.id);
   }
-}, { rootMargin: '-45% 0px -50% 0px' });
-links.forEach((a) => spy.observe(document.querySelector(a.getAttribute('href'))));
+  hero.inView = vis.has('hero');
+  if (S.snap && S.visible) fresh.forEach(paintSection);
+  motion.kick();
+  queueLocate();
+});
+sections.forEach((s) => spy.observe(s));
 
 setInterval(() => {
   if (!S.visible) return;
+  alarmAge();
   const a = age();
   if (S.snap && a > STALE_AFTER) setLive(false);
   else if (!S.live && S.snap && a <= STALE_AFTER) setLive(true);
