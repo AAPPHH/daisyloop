@@ -10,12 +10,22 @@ Goal: one evening with the owner at the computer, then the model knows how the f
 
 The session starts cold: the computer has been idle for at least 30 min (or off for 30 min and then booted and left idle for 10 min), water at or below 31 C, fan and pump on the firmware PID, LibreHardwareMonitor sidecar running (the UI shows CPU and GPU power and temperature; the training needs them).
 
-Why: the safety minimum curve of the fan (`min_curve` 35 C 20 %, 38 C 54.4 %, 42 C 100 %) overrides any step duty below it (`step_duty` takes the maximum of the step and the bound). A step of 27 % is only honoured while the water is below 35.6 C, 40 % below 36.7 C, 55 % below 38.1 C, 75 % below 39.9 C. The design water temperature of 36.6 C in `docs/thermal.md` 4.4 would therefore force the low levels up. The loads below are set for a water temperature of about 34.5 C so that the commanded levels hold; starting warm leaves no room. The fan stop duty test also needs the water below 33 C to be meaningful.
+Why: the safety minimum curve of the fan (`min_curve` 35 C 20 %, 38 C 54.4 %, 42 C 100 %) overrides any step duty below it (`step_duty` takes the maximum of the step and the bound). A step of 27 % is only honoured while the water is below 35.6 C, 40 % below 36.7 C, 55 % below 38.1 C, 75 % below 39.9 C. The design water temperature of 36.6 C in `docs/thermal.md` 4.4 would therefore force the low levels up. The machine never makes less than about 70 W CPU plus GPU (5th percentile 69.7 W) plus 4 W pump, so the low levels cannot be held by lowering the load. They are held by starting cold and by ordering the loads so that the water stays between about 31 and 35 C (hand calculation with the two-lump plant of `docs/thermal.md` 4.4 and the safety curve, ambient 25 C, start at 31 C); starting warm leaves no room. The fan stop duty test also needs the water below 33 C to be meaningful.
+
+## 0. Abort command, independent of the daemon
+
+Source: `tools\d5_probe\src\bin\d5_abort.rs`, built once during preparation with `cd C:\clones\daisyloop\tools\d5_probe; cargo build --release --bins`. Run it with the daemon dead, hung or running: `C:\clones\daisyloop\tools\d5_probe\target\release\d5_abort.exe`. It is the first action on every abort and after every crash.
+
+- It writes the stop file `%LOCALAPPDATA%\daisyloop\stop` and waits 6 s so that a living daemon releases first. It then reads the D5 configuration report 0x03 (809 bytes, CRC checked), sets the mode byte of the fan (0x41) and of the pump (0x96) to 1 (firmware PID, set-point mode), recomputes the CRC, sends it and reads it back after 500 ms. Only those two bytes and the CRC may change; the duty presets and the set-points (fan 0x46, pump 0x9B, normally 30 C and 45 C) are left as they are and printed. Failed reads or writes are retried up to 8 times. It then watches the device for 10 s and overrules a daemon that writes duty mode again.
+- Success is the line `OK fan and pump are on the firmware PID`. Exit code 1 and `FAILED` otherwise: switch the PSU off to stop the heat and set both to PID by hand in aquasuite.
+- Tested only against a fake HID layer (`cargo test` in `tools\d5_probe`): duty mode at 0 % returns to mode 1 on the real report layout, retries, a daemon that rewrites duty, an ignored SET, bad CRC and length refused, nothing sent when already on firmware. It has never been run against the device.
+- Daemon side: the daemon marks every channel it puts in duty mode in `%LOCALAPPDATA%\daisyloop\d5-owned` and clears the mark after the release. On start with `writes_enabled = true` it returns the fan to the firmware PID whenever it finds it in duty mode, and the pump when marked. With `writes_enabled = false` it never writes (that flag is the only gate for any D5 write): a marked channel in duty mode raises the `Foreign` alarm "sofort d5_abort.exe ausführen", an unmarked one tells to set the PID in aquasuite.
 
 ## 1. Preparation without any write (15 min)
 
 - Rehearse the retraining once on the dry run: `python python\steptrain.py dryrun` (section 9). It needs the Python environment with numpy, scipy, xgboost, duckdb, pyarrow, pytz and ray, and a running Ray cluster that this Python can join (`ray status` must work; the ray version of the environment must equal the cluster's). The job declares 4 cores and 6 GB.
 - Check the model and the data path: UI shows model loaded, `warm`; the lake has the LHM channels of the last hour.
+- Build the abort command of section 0 and run `cargo test` in `tools\d5_probe` (no device access); keep a PowerShell window open at the build directory for the whole session.
 - Decide the load generator: a GPU burn with adjustable power and a CPU stress with adjustable threads, both stoppable in one click. Heat at the water is about 0.96 x CPU package power + GPU power + 4 to 18 W pump.
 - Expected duration 15 min. Abort: nothing is written yet, stop at any time.
 
@@ -45,7 +55,7 @@ Purpose: learn what the D5 really does at these two settings before the long tes
 3. UI, pump card, same buttons. The pump goes to 15 % for 120 s. Read `d5next/pump/rpm` after 30, 60 and 120 s. Expected: roughly 1800 to 2000 rpm (calibration says 2432, the measured floor is about 1835). Below 1800 rpm the daemon raises `pump_low` and falls back to the firmware PID by itself; note the value.
 4. Whether the firmware takes over at 48 C: not tested and not testable without risk. It would need water at 48 C, 4 K above the abort limit and 2 K below the coolant limit of the manual (50 C). What exists: the daemon's own takeover at `water_limit` 48 C is covered by the simulation tests (`cargo test safety_tests`, `cargo test fan_stop_tests`), the device-side behaviour is unknown. Do not try.
 5. Whether a SET survives a D5 power cycle: optional, only if all of the following hold, otherwise skip it (the answer is not needed for the model): idle computer, water at or below 31 C, owner present, `writes_enabled = true` stays on for the check, and the owner accepts that for the minutes between boot and the daemon start the fan may stand at 0 %. Procedure: start the fan step (0 %), and during its 120 s hold shut Windows down; switch the PSU off for 15 s (this cuts the pump and the D5), on again, boot. Read the fan duty and rpm in the UI as soon as it is up, before the daemon has been running 2 min. Result A: fan at the firmware PID (the SET did not survive: a daemon crash plus a power cycle is safe). Result B: fan still at 0 % (the duty survives power loss: the daemon restores it on start because the channel is marked as owned and writes are enabled; check that it does within 3 min, otherwise restore by hand as in "If the PC crashes"). Without a power cycle nothing in this item is run.
-- Abort (any): water at or above 38 C at idle, rpm of the pump below 1500, no response of the UI for 10 s. Press `Abbrechen` in the step card (command `stop_step_test`, releases to the firmware PID at once). If the UI does not answer: step 2 restore (stop file).
+- Abort (any): water at or above 38 C at idle, rpm of the pump below 1500, no response of the UI for 10 s. Press `Abbrechen` in the step card (command `stop_step_test`, releases to the firmware PID at once). If the UI does not answer, or a release failed, the first action is the abort command of section 0, before anything else. The old advice (`writes_enabled = false` plus the stop file) is wrong for this case: a daemon relaunched with writes off does not touch a channel left in duty mode, so the fan would stay at 0 %.
 
 ## 4. Step test, 64 min plus 15 min cool-down
 
@@ -65,19 +75,21 @@ Start: UI fan card, `Stufentest starten ...`, `Ja, starten`. Phases of the plan 
 
 | Phase | Fan duty | Time | Load (CPU + GPU power) |
 |---|---|---|---|
-| 1 lead | 100 % | 5 min | start the load, raise to about 250 W, water rises toward 34 C |
-| 2 | 75 % | 8 min | about 150 W |
-| 3 | 55 % | 8 min | about 90 W |
-| 4 | 40 % | 8 min | about 55 W |
-| 5 | 27 % | 8 min | idle load only (about 30 W is below what the idle machine makes) |
-| 6 | 100 % | 5 min | 250 W again |
+| 1 lead | 100 % | 5 min | about 120 W (a light load; the water stays near 31 C) |
+| 2 | 75 % | 8 min | about 100 W |
+| 3 | 55 % | 8 min | about 75 W |
+| 4 | 40 % | 8 min | idle machine, nothing running (about 70 W, the lowest load there is) |
+| 5 | 27 % | 8 min | idle machine, nothing running |
+| 6 | 100 % | 5 min | about 250 W |
 | 7 | 100 % | 5 min | half of that, about 125 W (separates sink temperature from load scale) |
 
-The loads are held at constant values inside a phase, changed within 30 s of the phase change (the UI line `Stufe n von 7 ... noch s s` is the clock). Steady state is not needed; the fit uses the whole curve with the dead time. If the water crosses 35.5 C at phase 2 to 5 the commanded duty is overridden by the safety curve and recorded as such (the fit uses the recorded rpm); reduce the load to bring it back under, do not chase exact numbers.
+The plant model gives these water temperatures at the end of phases 1 to 5 with these loads: 30.6, 31.2, 31.9, 33.2 and 35.3 C. At 27 % the safety curve lifts the duty at 35.6 C and the water rises at about 0.004 K/s there, so phase 5 holds for the full 8 min only if the idle heat is at most about 76 W in total (CPU plus GPU about 72 W) and the phase starts below 33.5 C. At 80 W it crosses after about 7 min: the duty is then overridden for the last minute and recorded as such, the fit loses that minute of excitation, nothing unsafe happens. The load cannot be lowered below idle, so there is nothing to do in phase 5 except watch; if the water is above 34.5 C when phase 5 starts, accept the override.
+
+The loads are held at constant values inside a phase, changed within 30 s of the phase change (the UI line `Stufe n von 7 ... noch s s` is the clock). Steady state is not needed; the fit uses the whole curve with the dead time. If the water crosses 35.5 C in phases 2 to 4 the commanded duty is overridden by the safety curve and recorded as such (the fit uses the recorded rpm). Once the bound has lifted the duty it holds it for a while (latch), so reducing the load does not bring the level back within the phase; reduce the load anyway and do not chase exact numbers.
 
 - Watch: water temperature (limit below), fan rpm following the duty within about 10 s, CPU and GPU die temperatures, `Stufentest` line.
 - Abort limits (any one): water at or above 44 C; water rising faster than 1.5 K/min at a level for more than 2 min; CPU package at or above 95 C or GPU at or above 80 C (these two are my choice for "within 5 K of its limit", the owner adjusts to the cards); no telemetry update for 10 s (UI shows stale); owner leaves.
-- Abort action: stop the load first, then `Abbrechen` in the fan card. The fan returns to the firmware PID, which drives it to 100 % above 30 C. The daemon does the same on its own at `water_limit` 48 C and on sensor faults, but the owner's abort at 44 C comes first.
+- Abort action: stop the load first, then `Abbrechen` in the fan card. The fan returns to the firmware PID, which drives it to 100 % above 30 C. If the UI does not answer or the fan card does not show `firmware`, run the abort command of section 0 immediately; it does not need the daemon. The daemon does the same on its own at `water_limit` 48 C and on sensor faults, but the owner's abort at 44 C comes first.
 - Rest 5 min after phase 7 (load off, fan on firmware), longer if the water is above 33 C. The rest must be at least 3 min, otherwise the two tests merge into one window for the retraining.
 
 ### 4b. Pump test, 17 min
@@ -90,7 +102,7 @@ Load off, both channels on `firmware`, wait until the water is below 31 C. The c
 
 ## 5. Close the session and commit the data (10 min)
 
-1. Check in the UI that both channels show drive `firmware` and the log line `back on the firmware PID` for both (`%LOCALAPPDATA%\daisyloop\collector.log`). Do not continue if a channel is still on `duty` or `test`: set `writes_enabled` only to false after the release, because a daemon started with writes disabled does not release a channel it owns (`start_releases_only_a_channel_marked_as_owned_and_only_with_writes_enabled`).
+1. Check in the UI that both channels show drive `firmware` and the log line `back on the firmware PID` for both (`%LOCALAPPDATA%\daisyloop\collector.log`). Do not continue if a channel is still on `duty` or `test`: run the abort command of section 0 and check for its `OK` line. Set `writes_enabled` to false only after the release, because a daemon started with writes disabled does not release a channel it owns (`start_releases_only_a_channel_marked_as_owned_and_only_with_writes_enabled`); it only raises the `Foreign` alarm that names the abort command (`a_step_test_abort_whose_release_fails_leaves_duty_until_the_abort_command_or_a_writes_on_start`).
 2. Elevated edit: `writes_enabled = false`, remove the `[control.step_test]` block (the defaults of the code are not used for the evening). Clean restart with the stop file. The clean stop commits the hot store to the lake, so the step test rows (`daisyloop/step/phase`, `daisyloop/step/duty`) are in the lake now.
 
 ## 6. Retrain (3 to 10 min)
@@ -129,8 +141,8 @@ Restore: copy the previous `model_deploy.json` and `feature_spec_deploy.json` fr
 
 ## If the PC crashes or hangs mid-test
 
-- The D5 has no known timeout in the direct duty mode (`snapshot/d5-control.md`). A dead daemon leaves the last duty on the device: during a fan test that can be 27 % while the computer is hung. A crash of the daemon alone is relaunched by the watchdog task within about 2 min; on start it releases every channel it owns, but only when `writes_enabled = true`.
-- Owner actions, in this order: (1) stop the heat: stop the load, or if the screen is frozen switch the PSU off (this also stops the pump, nothing produces heat any more); (2) boot; (3) keep `writes_enabled = true` until the UI shows both channels on `firmware` and `collector.log` shows `back on the firmware PID`; (4) only then set `writes_enabled = false` (step 5). If the daemon does not come back, start `C:\Program Files\daisyloop\daisyloop.exe` from the install directory or run the watchdog task once (`Start-ScheduledTask daisyloop-watchdog`).
+- The D5 has no known timeout in the direct duty mode (`snapshot/d5-control.md`). A dead daemon leaves the last duty on the device: during a fan test that can be 27 % (phase 5) or, in the duty test of step 3, 0 % while the computer is hung. A crash of the daemon alone is relaunched by the watchdog task within about 2 min; on start it releases every channel it owns, but only when `writes_enabled = true`.
+- Owner actions, in this order: (0) as soon as the PC answers again, run the abort command of section 0 (it works with the daemon dead, hung or missing); (1) stop the heat: stop the load, or if the screen is frozen switch the PSU off (this also stops the pump, nothing produces heat any more); (2) boot; (3) the abort command prints `OK`; a daemon relaunched with `writes_enabled = true` also releases the fan (any fan in duty mode) and the pump (only when marked as owned in `%LOCALAPPDATA%\daisyloop\d5-owned`), while one with `writes_enabled = false` writes nothing and raises the `Foreign` alarm that names the abort command; (4) only then set `writes_enabled = false` (step 5). If the daemon does not come back, start `C:\Program Files\daisyloop\daisyloop.exe` from the install directory or run the watchdog task once (`Start-ScheduledTask daisyloop-watchdog`).
 - A crashed session produces a partial window in the lake. The retraining then finds a window whose fan span or pump span is too small and the gate refuses ("not identified"); repeat the missing test on another evening.
 
 ## 9. Dry run on synthetic data (what was verified)

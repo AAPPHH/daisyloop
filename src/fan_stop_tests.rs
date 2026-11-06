@@ -366,3 +366,28 @@ fn z17_implausible_water_is_missing_and_a_frozen_value_with_changing_load_alarms
     assert!(frozen.alarm(AlarmKind::WaterFrozen) && !steady.alarm(AlarmKind::WaterFrozen) && !drifting.alarm(AlarmKind::WaterFrozen));
     assert!(frozen.sim.sets() == 0);
 }
+
+#[test]
+fn a_step_test_abort_whose_release_fails_leaves_duty_until_the_abort_command_or_a_writes_on_start() {
+    let mut rig = Rig::new((false, false), 3.0, |c| c.control.step_test.fan = vec![[0.0, 120.0]]);
+    rig.water = 31.0;
+    rig.run(40);
+    rig.c.start_test("d5.fan", true, rig.now).unwrap();
+    rig.run(30);
+    assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.preset(Spec::FAN)), (0, 0));
+    rig.sim.0.borrow_mut().fail_sets = 2;
+    rig.c.shutdown(rig.now);
+    let sim = rig.sim.clone();
+    let sets = sim.sets();
+    assert_eq!((sim.mode(Spec::FAN), sim.preset(Spec::FAN), rig.marker()), (0, 0, vec![ControlKind::Fan]));
+    let mut off = Rig::with_marker(sim.clone(), &[ControlKind::Fan], (false, false), 3.0, |c| c.writes_enabled = false);
+    off.water = 44.0;
+    off.run(3600);
+    assert_eq!((sim.mode(Spec::FAN), sim.sets()), (0, sets));
+    let a = off.status().alarms.into_iter().find(|a| a.kind == AlarmKind::Foreign).unwrap();
+    assert!(a.message.contains("d5_abort") && a.message.contains("0 %"), "{}", a.message);
+    let mut on = Rig::with_marker(sim.clone(), &[ControlKind::Fan], (false, false), 3.0, |_| {});
+    on.water = 44.0;
+    on.run(10);
+    assert_eq!((sim.mode(Spec::FAN), on.marker()), (1, vec![]));
+}

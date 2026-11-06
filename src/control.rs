@@ -217,7 +217,7 @@ impl Default for ControlConfig {
             fan: ChannelOverride::default(),
             pump: ChannelOverride::default(),
             step_test: StepTestConfig::default(),
-            plan_secs: 30.0,
+            plan_secs: 1.0,
             decision_secs: 30.0,
             horizon_secs: 120,
             rollout_secs: 120,
@@ -242,7 +242,7 @@ impl Default for ControlConfig {
             bound_drop_k: 1.0,
             bound_hold_secs: 900.0,
             bound_raise_cap: 120,
-            bound_raise_step: 10.0,
+            bound_raise_step: 8.0,
             cpu_power_channel: "/intelcpu/0/power/0".into(),
             gpu_power_channel: "nvml/0/power".into(),
             follow_settle_secs: 15.0,
@@ -334,6 +334,9 @@ pub(super) struct Chan {
     used: u32,
     over: bool,
     latch: Option<Latch>,
+    released_ms: Option<i64>,
+    chatter_ms: i64,
+    backoff: u32,
     seen: VecDeque<(i64, f64)>,
     raises: VecDeque<i64>,
 }
@@ -345,7 +348,7 @@ impl Chan {
             log::error!("control: invalid {kind:?} channel config ({e}), defaults used");
             ChannelConfig::defaults(kind)
         });
-        Chan { spec: Spec::of(kind), cal: cfg.calibration(), min: cfg.min_calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, shadow_stop: false, run_since: None, day: 0, used: 0, over: false, latch: None, seen: VecDeque::new(), raises: VecDeque::new() }
+        Chan { spec: Spec::of(kind), cal: cfg.calibration(), min: cfg.min_calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, shadow_stop: false, run_since: None, day: 0, used: 0, over: false, latch: None, released_ms: None, chatter_ms: 0, backoff: 0, seen: VecDeque::new(), raises: VecDeque::new() }
     }
     fn rpm_channel(&self) -> String {
         format!("d5next/{}/rpm", self.spec.name)
@@ -391,6 +394,7 @@ struct Frozen {
     water: f64,
     lo: f64,
     hi: f64,
+    same_since: i64,
     heat_k: f64,
     last: i64,
     latched: bool,
@@ -398,8 +402,7 @@ struct Frozen {
 
 impl Frozen {
     fn tripped(&self, now: i64) -> bool {
-        let held = now - self.since;
-        held >= Control::FROZEN_MS || held >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
+        now - self.same_since >= Control::FROZEN_MS || now - self.since >= Control::HEAT_MIN_MS && self.heat_k >= Control::HEAT_MARGIN_K
     }
     fn spread(&self, w: f64) -> f64 {
         w.max(self.hi) - w.min(self.lo)
@@ -673,13 +676,16 @@ impl Control {
         match self.frozen.as_mut().filter(|f| f.spread(w) <= Self::FROZEN_BAND_K + if f.latched { Self::FROZEN_RELEASE_K } else { 0.0 }) {
             Some(f) => {
                 if f.spread(w) <= Self::FROZEN_BAND_K {
+                    if w != f.water {
+                        f.same_since = now;
+                    }
                     (f.water, f.lo, f.hi) = (w, f.lo.min(w), f.hi.max(w));
                 }
                 f.heat_k = (f.heat_k + step).max(Self::HEAT_FLOOR_K);
                 f.last = now;
                 f.latched |= f.tripped(now);
             }
-            None => self.frozen = Some(Frozen { since: now, water: w, lo: w, hi: w, heat_k: 0.0, last: now, latched: false }),
+            None => self.frozen = Some(Frozen { since: now, water: w, lo: w, hi: w, same_since: now, heat_k: 0.0, last: now, latched: false }),
         }
     }
 
@@ -776,6 +782,7 @@ impl Control {
         for k in self.foreign.clone() {
             let ch = self.chans.iter().find(|c| c.spec.kind == k).unwrap().rpm_channel();
             let msg = match (self.writes, k) {
+                (false, _) if self.owned.contains(&k) => "Kanal steht im Duty-Modus aus einem früheren daisyloop-Lauf und könnte bei 0 % stehen (Schreiben deaktiviert, daisyloop schreibt nichts): sofort d5_abort.exe ausführen",
                 (true, _) => "Kanal steht im Duty-Modus, nicht von daisyloop gesetzt, bleibt unberührt",
                 (false, ControlKind::Fan) => "Lüfter steht im Duty-Modus und könnte bei 0 % stehen (Schreiben deaktiviert): daisyloop ändert nichts und schützt ihn nicht, bitte Firmware-PID in aquasuite setzen",
                 (false, ControlKind::Pump) => "Pumpe steht im Duty-Modus (Schreiben deaktiviert), daisyloop ändert nichts",

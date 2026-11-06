@@ -2,6 +2,9 @@ use super::*;
 
 impl Control {
     const LIFT_WINDOW_MS: i64 = 600_000;
+    const CHATTER_MS: i64 = 10_800_000;
+    const BACKOFF_MAX: u32 = 2;
+    const CALM_MS: i64 = 43_200_000;
 
     pub(super) fn curve_bound(&self, i: usize, now: i64) -> Option<f64> {
         let w = self.temps(now).water?;
@@ -35,10 +38,19 @@ impl Control {
             let lifted = |raw: f64, running: bool| if raw > floor && running { (raw + step).min(max) } else { raw };
             c.latch = Some(match c.latch.take() {
                 None => fresh(raw),
-                Some(l) if raw > l.duty => fresh(lifted(raw, l.duty > 0.0)),
+                Some(l) if raw > l.duty => {
+                    if c.released_ms.take().is_some_and(|r| now - r <= Self::CHATTER_MS) {
+                        (c.backoff, c.chatter_ms) = ((c.backoff + 1).min(if c.spec.kind == ControlKind::Pump { Self::BACKOFF_MAX } else { 0 }), now);
+                    }
+                    fresh(lifted(raw, l.duty > 0.0))
+                }
                 Some(l) => {
-                    let low_since = if raw < l.duty && w <= l.water - fall { l.low_since.or(Some(now)) } else { None };
+                    let low_since = if raw < l.duty && w <= l.water - fall * f64::from(1u32 << c.backoff) { l.low_since.or(Some(now)) } else { None };
                     if low_since.is_some_and(|s| now - s >= hold) {
+                        if now - c.chatter_ms > Self::CALM_MS {
+                            c.backoff = 0;
+                        }
+                        c.released_ms = Some(now);
                         let duty = c.seen.iter().fold(raw, |m, x| m.max(x.1));
                         Latch { duty, water: l.water, low_since: (duty > raw).then_some(now) }
                     } else {
