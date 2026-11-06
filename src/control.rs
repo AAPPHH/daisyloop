@@ -217,7 +217,7 @@ impl Default for ControlConfig {
             fan: ChannelOverride::default(),
             pump: ChannelOverride::default(),
             step_test: StepTestConfig::default(),
-            plan_secs: 30.0,
+            plan_secs: 1.0,
             decision_secs: 30.0,
             horizon_secs: 120,
             rollout_secs: 120,
