@@ -180,18 +180,19 @@ def test_restart_gap_before_the_fan_test_still_ships_with_the_right_effect():
 
 def test_step_train_and_hold_do_not_overlap_and_the_fit_stays_clear_of_the_hold_rows():
     T = 6000
-    st = FakeStore(T, [(1000, 2000), (2300, 2500)], fake_cols(T, []))
+    st = FakeStore(T, [(400, 1200), (1500, 2500)], fake_cols(T, []))
+    st.cols[S.CFG["phase_channel"]][1500:2300] = 1.0 + np.arange(800) // 100
     co = S.Corpus.__new__(S.Corpus)
-    co.cfg = S.CFG
+    co.cfg = dict(S.CFG, window=dict(S.CFG["window"], embargo_s=100))
     rows = np.arange(T)
     b = co.step_blocks(st, rows)
     assert b["step_hold"].sum() > 400 and b["step_train"].sum() > 500
     assert not (b["step_hold"] & b["step_train"]).any()
-    emb = S.CFG["window"]["embargo_s"]
+    emb = 100
     first = np.where(b["step_hold"])[0].min()
     assert not b["step_train"][max(0, first - emb):first].any()
     for (lo, hold, hi) in st.spans():
-        assert not b["step_train"][hold - emb:hi].any()
+        assert hold < hi and not b["step_train"][hold - emb:hi].any() and b["step_hold"][hold:hi].all()
     segs = S.Identifier(S.CFG, st).segments()
     assert segs and not any((s["fit"] & b["step_hold"][s["lo"]:s["hi"]]).any() for s in segs)
 

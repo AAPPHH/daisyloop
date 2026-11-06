@@ -25,7 +25,7 @@ CFG = {
     "out_dir": os.path.join(MODELS, "steptrain"),
     "phase_channel": "daisyloop/step/phase",
     "windows": [],
-    "window": {"merge_s": 120, "pre_s": 300, "post_s": 900, "holdout_frac": 0.2, "embargo_s": 900, "ctx_pre_s": 300, "ctx_post_s": 300, "gap_s": 10, "piece_min_s": 120},
+    "window": {"merge_s": 120, "pre_s": 300, "post_s": 900, "embargo_s": 900, "ctx_pre_s": 300, "ctx_post_s": 300, "gap_s": 10, "piece_min_s": 120},
     "blocks": FRESH["blocks"],
     "folds": {"fit": ["train", "oor_pump20", "fresh0", "step_train"], "select": ["val", "fresh1"], "final": ["test", "fresh2", "step_hold"]},
     "stride": MCFG["stride"],
@@ -193,11 +193,14 @@ class Store:
         return out
 
     def spans(self):
-        w = self.cfg["window"]
+        w, who, ph = self.cfg["window"], self.labels(), self.col(self.cfg["phase_channel"])
         out = []
-        for a, b in self.wins:
-            lo, hi = max(0, a - w["pre_s"]), min(self.T, b + w["post_s"])
-            out.append((lo, int(hi - w["holdout_frac"] * (hi - lo)), hi))
+        for i, (a, b) in enumerate(self.wins):
+            pre = min(w["ctx_pre_s"], (a - self.wins[i - 1][1]) // 2) if i else w["ctx_pre_s"]
+            post = min(w["ctx_post_s"], (self.wins[i + 1][0] - b) // 2) if i + 1 < len(self.wins) else w["post_s"]
+            lo, hi = max(0, a - pre), min(self.T, b + post)
+            hit = np.where(np.nan_to_num(ph[lo:hi], nan=-1.0) >= self.cfg["gate"]["grey"]["hold"][who[i]][0])[0]
+            out.append((lo, lo + int(hit[0]) if len(hit) else hi, hi))
         return out
 
     def labels(self):
@@ -224,10 +227,7 @@ class Identifier:
         cols = {c: st.col(c) for c in names + ("d5next/fan/duty", "d5next/pump/duty", self.cfg["phase_channel"])}
         idx0 = st.wins[0][0]
         segs = []
-        for i, (a, b) in enumerate(st.wins):
-            pre = min(w["ctx_pre_s"], a - (st.wins[i - 1][1] if i else 0))
-            post = min(w["ctx_post_s"], st.wins[i + 1][0] - b) if i + 1 < len(st.wins) else w["post_s"]
-            lo, hi = a - pre, min(st.T, b + post)
+        for i, (lo, hold, hi) in enumerate(st.spans()):
             bad = ~np.all([np.isfinite(cols[c][lo:hi]) for c in names], axis=0)
             gs, ge = Ops.runs(bad)
             gap = np.zeros(hi - lo, bool)
@@ -239,24 +239,17 @@ class Identifier:
                 if len(good) < w["piece_min_s"] or len(good) < 0.9 * (y - x):
                     continue
                 x, y = x + int(good[0]), x + int(good[-1]) + 1
-                segs.append(self.piece(cols, who[i], lo + x, lo + y, a, b, idx0, ~bad[x:y]))
+                segs.append(self.piece(cols, who[i], lo + x, lo + y, hold, st.wins[i], idx0, ~bad[x:y]))
         return segs
 
-    def piece(self, cols, who, lo, hi, a, b, idx0, ok):
+    def piece(self, cols, who, lo, hi, hold, win, idx0, ok):
         sl = slice(lo, hi)
         keep = np.where(ok)[0]
         fill = lambda v: np.interp(np.arange(hi - lo), keep, v[sl][keep])
-        ph = cols[self.cfg["phase_channel"]][sl]
-        hold = np.zeros(hi - lo, bool)
-        tail = np.zeros(hi - lo, bool)
-        for _, h, e in self.st.spans():
-            tail[max(h - lo, 0):max(e - lo, 0)] = True
-        hit = np.where(np.nan_to_num(ph, nan=-1.0) >= self.g["grey"]["hold"][who][0])[0]
-        if len(hit):
-            hold[hit[0]:] = True
+        late = np.arange(lo, hi) >= hold
         q = 0.96 * fill(cols["/intelcpu/0/power/0"]) + fill(cols["nvml/0/power"]) + fill(cols["d5next/pump/power"])
         return {"w": fill(cols["d5next/water/temp"]), "q": q, "f": fill(cols["d5next/fan/rpm"]), "p": fill(cols["d5next/pump/rpm"]), "t": (np.arange(lo, hi) - idx0) / 3600.0, "who": who,
-                "fit": ~hold & ~tail & ok, "hold": hold & ok, "all": ok.copy(), "a": a, "b": b, "lo": lo, "hi": hi, "phase": ph, "duty": cols[f"d5next/{who}/duty"][sl]}
+                "fit": ~late & ok, "hold": late & ok, "all": ok.copy(), "a": win[0], "b": win[1], "lo": lo, "hi": hi, "phase": cols[self.cfg["phase_channel"]][sl], "duty": cols[f"d5next/{who}/duty"][sl]}
 
     def excitation(self, who):
         c = self.g[who]
@@ -412,9 +405,10 @@ class Corpus:
         out = {n: np.zeros(len(rows), bool) for n in ("step_train", "step_hold", "step_active")}
         train, zone = np.zeros(len(rows), bool), np.zeros(len(rows), bool)
         for (a, b), (lo, hold, hi) in zip(st.wins, st.spans()):
-            train |= (rows >= lo) & (rows < hold - w["embargo_s"])
-            zone |= (rows >= hold - w["embargo_s"]) & (rows < hi)
-            out["step_hold"] |= (rows >= hold) & (rows < hi)
+            train |= (rows >= max(0, a - w["pre_s"])) & (rows < min(st.T, b + w["post_s"]))
+            if hold < hi:
+                zone |= (rows >= hold - w["embargo_s"]) & (rows < hi)
+                out["step_hold"] |= (rows >= hold) & (rows < hi)
             out["step_active"] |= (rows >= a) & (rows < b)
         out["step_train"] = train & ~zone
         return out
