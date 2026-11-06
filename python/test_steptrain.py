@@ -1,6 +1,10 @@
 import copy
+import json
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import numpy as np
 import steptrain as S
@@ -59,7 +63,7 @@ def test_response_term_matches_between_trainer_and_exporter():
 
 def run_case(case, seed, threads):
     root = tempfile.mkdtemp(prefix="steptest-")
-    cfg = dict(S.CFG, store_dir=S.FRESH["store_dir"], spec=S.CFG["deployed_spec"], threads=threads)
+    cfg = dict(S.CFG, store_dir=S.FRESH["store_dir"], threads=threads)
     try:
         return S.dry_task({"cfg": cfg, "case": case, "seed": seed, "root": root})
     finally:
@@ -74,6 +78,55 @@ def test_gate_ships_with_a_fan_response_refuses_without_and_repeats():
     assert a["ship"] == b["ship"] and a["ratio"] == b["ratio"] and a["fit_rmse"] == b["fit_rmse"]
     for case in ("nofan", "drift_nofan"):
         assert not run_case(case, 2, 1)["ship"]
+
+
+NAMES = ["model_deploy.json", "feature_spec_deploy.json"]
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+STORE = os.path.exists(os.path.join(S.FRESH["store_dir"], "raw.npy"))
+
+
+def doc(name):
+    return open(os.path.join(ROOT, "docs", name), encoding="utf8").read()
+
+
+def test_dryrun_entry_point_runs_as_documented_and_writes_the_pair():
+    if not STORE:
+        return
+    root = tempfile.mkdtemp(prefix="steptest-entry-")
+    try:
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "python", "steptrain.py"), "dryrun", root, "fan", "1"], capture_output=True, text=True, timeout=900)
+        assert r.returncode == 0, r.stderr[-2000:]
+        out = json.loads(r.stdout)
+        assert out["summary"]["fan"]["n"] == 1
+        d = os.path.join(root, "fan-0", "out")
+        assert out["summary"]["fan"]["ship"] == 1
+        assert {*NAMES, "report.json"} <= set(os.listdir(d))
+        assert not (set(os.listdir(d)) & {"golden_deploy.json", "candidate_golden_deploy.json"})
+        assert copy_steps(d, os.path.join(root, "models"), os.path.join(root, "install"))
+        cargo = subprocess.run(["cargo", "test", "--manifest-path", os.path.join(ROOT, "tools", "model_infer", "Cargo.toml"), "--test", "load_dir"], env=dict(os.environ, STEPTRAIN_OUT=os.path.join(root, "install")), capture_output=True, text=True, timeout=900)
+        assert cargo.returncode == 0 and "1 passed" in cargo.stdout, cargo.stdout[-2000:] + cargo.stderr[-2000:]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def copy_steps(out, models, install):
+    where = {r"c:\clones\daisyloop\models\steptrain": out, r"c:\clones\daisyloop\models": models, r"c:\program files\daisyloop\models": install}
+    for d in (models, install):
+        os.makedirs(d, exist_ok=True)
+        for n in NAMES:
+            shutil.copy(os.path.join(ROOT, "models", n), os.path.join(d, n))
+    cmds = re.findall(r"Copy-Item .*", doc("steptest.md").split("## 7.")[1].split("## 8.")[0])
+    assert len(cmds) == 2
+    for c in cmds:
+        names = re.findall(r"(\w+\.json)", c)
+        src = re.search(r"([A-Za-z]:[^,'\s]*)\\" + names[0], c).group(1).lower()
+        dest = re.sub(r"(?i)\s*-Force.*$", "", c[c.rindex(".json") + 5:]).strip(" '\"").lower().rstrip("\\")
+        assert sorted(names) == sorted(NAMES), c
+        assert src in where and dest in where, (src, dest)
+        for n in names:
+            shutil.copy(os.path.join(where[src], n), os.path.join(where[dest], n))
+    return all(open(os.path.join(install, n), "rb").read() == open(os.path.join(out, n), "rb").read() for n in NAMES)
+
 
 
 if __name__ == "__main__":

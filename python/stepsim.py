@@ -125,7 +125,7 @@ class Injector:
         cfg, ic = self.cfg, self.sim["inject"]
         rng = np.random.default_rng(seed)
         meta, X = RawStore({"cache_dir": cfg["store_dir"], "chunk_s": 86400}).load()
-        chans = Spec.load(cfg["spec"]).raw_channels()
+        chans = Spec.load(cfg["deployed_spec"]).raw_channels()
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
         keep = [meta["channels"][ix[c]] for c in chans if c in ix]
         T0 = X.shape[0]

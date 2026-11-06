@@ -39,7 +39,8 @@ CFG = {
     "die_gain": 1.0,
     "boot": {"block_s": 600, "n": 400},
     "ray": {"num_cpus": 2, "memory": 3e9},
-    "workers": 3,
+    "workers": 5,
+    "blas_threads": 1,
     "gate": {
         "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "fit_rmse_max": 0.10, "hold_rmse_max": 0.15, "hold_gain": 1.5, "full_s": 120.0},
         "fan": {"grid_lo_duty": 27.0, "min_levels": 3, "min_span": 40.0, "min_drop": 0.25, "dwell_s": 120},
@@ -533,7 +534,8 @@ class StepExporter(LinearExporter):
 
     def run(self):
         spec = self.spec()
-        return {"nodes": len(spec.nodes), "raw": len(spec.raw_channels()), **self.golden(spec, self.out)}
+        gold = self.golden(spec, self.out) if self.cfg.get("golden_out") else {}
+        return {"nodes": len(spec.nodes), "raw": len(spec.raw_channels()), **gold}
 
 
 class Evaluator:
@@ -588,6 +590,12 @@ class StepTrainer:
         self.cfg = cfg
         self.out = cfg["out_dir"]
 
+    def clear(self):
+        for pre in ("", "candidate_"):
+            for n in ("model_deploy.json", "feature_spec_deploy.json", "golden_deploy.json"):
+                if os.path.exists(os.path.join(self.out, pre + n)):
+                    os.remove(os.path.join(self.out, pre + n))
+
     def gate(self, ident, ev):
         g = self.cfg["gate"]
         flags = {c: bool(ident[c]["identified"]) for c in ("fan", "pump")}
@@ -628,11 +636,17 @@ class StepTrainer:
         verdict = self.gate(ident, ev)
         name = "" if verdict["ship"] else "candidate_"
         os.makedirs(self.out, exist_ok=True)
-        ex = dict(cfg.get("export", {}), spec_out=os.path.join(self.out, f"{name}feature_spec_deploy.json"), model_out=os.path.join(self.out, f"{name}model_deploy.json"),
-                  golden_out=os.path.join(self.out, f"{name}golden_deploy.json"), golden_span=("2026-11-04 07:00", "2026-11-04 09:00"), golden_every=10, store={"cache_dir": cfg["store_dir"], "chunk_s": 86400})
+        ex = dict(cfg.get("export", {}), spec_out=os.path.join(self.out, f"{name}feature_spec_deploy.json"), model_out=os.path.join(self.out, f"{name}model_deploy.json"), store={"cache_dir": cfg["store_dir"], "chunk_s": 86400})
+        if cfg.get("golden"):
+            ex.update(golden_out=os.path.join(self.out, f"{name}golden_deploy.json"), golden_span=("2026-11-04 07:00", "2026-11-04 09:00"), golden_every=10)
         sx = StepExporter(dict(cfg, export=ex), co, resp, co.backbone, fbf)
-        model = sx.build_model(verdict["identified"], bb, fitted[fam], fb)
-        gold = sx.run() if cfg.get("golden") else None
+        self.clear()
+        try:
+            model = sx.build_model(verdict["identified"], bb, fitted[fam], fb)
+            gold = sx.run()
+        except BaseException:
+            self.clear()
+            raise
         report = {"gate": verdict, "identification": ident, "selection": {k: v for k, v in sel.items()}, "trees_select": {t: {"select_rmse": v["select_rmse"], "rounds": v["rounds"]} for t, v in trees.items()},
                   "evaluation": ev, "clipped": self.clipped(bb, fitted[fam], targets), "family": fam, "windows": [[int(a), int(b)] for a, b in st.wins], "golden": gold, "seconds": round(time.time() - t0)}
         with open(os.path.join(self.out, "report.json"), "w") as f:
@@ -675,10 +689,12 @@ class Runner:
         self.cfg = cfg
 
     def map(self, fn, jobs):
-        if self.cfg["workers"] <= 1:
+        for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ[k] = str(self.cfg["blas_threads"])
+        if self.cfg["workers"] <= 1 or len(jobs) <= 1:
             return [fn(j) for j in jobs]
         import multiprocessing as mp
-        with mp.get_context("spawn").Pool(self.cfg["workers"]) as p:
+        with mp.get_context("spawn").Pool(min(self.cfg["workers"], len(jobs))) as p:
             return p.map(fn, jobs, chunksize=1)
 
 
@@ -707,11 +723,17 @@ class DryRun:
         return out
 
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "dryrun":
-        cfg = dict(CFG, store_dir=FRESH["store_dir"])
-        root, res = DryRun(cfg).run(sys.argv[2] if len(sys.argv) > 2 else None)
-        print(root, DryRun.summary(res, cfg["dry"]["factor"]))
+def main(argv, cfg=CFG):
+    if argv and argv[0] == "dryrun":
+        cfg = dict(cfg, store_dir=FRESH["store_dir"])
+        cases = argv[2].split(",") if len(argv) > 2 else None
+        root, res = DryRun(cfg).run(argv[1] if len(argv) > 1 else None, cases, int(argv[3]) if len(argv) > 3 else None)
+        out = {"root": root, "summary": DryRun.summary(res, cfg["dry"]["factor"])}
     else:
-        r = train_task(CFG)
-        print(json.dumps(r["gate"], indent=1))
+        out = train_task(cfg)["gate"]
+    print(json.dumps(out, indent=1))
+    return out
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
