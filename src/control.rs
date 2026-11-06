@@ -242,7 +242,7 @@ impl Default for ControlConfig {
             bound_drop_k: 1.0,
             bound_hold_secs: 900.0,
             bound_raise_cap: 120,
-            bound_raise_step: 10.0,
+            bound_raise_step: 8.0,
             cpu_power_channel: "/intelcpu/0/power/0".into(),
             gpu_power_channel: "nvml/0/power".into(),
             follow_settle_secs: 15.0,
@@ -334,6 +334,9 @@ pub(super) struct Chan {
     used: u32,
     over: bool,
     latch: Option<Latch>,
+    released_ms: Option<i64>,
+    chatter_ms: i64,
+    backoff: u32,
     seen: VecDeque<(i64, f64)>,
     raises: VecDeque<i64>,
 }
@@ -345,7 +348,7 @@ impl Chan {
             log::error!("control: invalid {kind:?} channel config ({e}), defaults used");
             ChannelConfig::defaults(kind)
         });
-        Chan { spec: Spec::of(kind), cal: cfg.calibration(), min: cfg.min_calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, shadow_stop: false, run_since: None, day: 0, used: 0, over: false, latch: None, seen: VecDeque::new(), raises: VecDeque::new() }
+        Chan { spec: Spec::of(kind), cal: cfg.calibration(), min: cfg.min_calibration(), autostart: cfg.autostart_active, cfg, mode: Mode::Shadow, drive: Drive::Firmware, target: None, wanted: None, duty_cmd: None, wrote_ms: 0, fallback: None, limit_trip: false, note: None, release_due: false, follow_since: None, shadow_stop: false, run_since: None, day: 0, used: 0, over: false, latch: None, released_ms: None, chatter_ms: 0, backoff: 0, seen: VecDeque::new(), raises: VecDeque::new() }
     }
     fn rpm_channel(&self) -> String {
         format!("d5next/{}/rpm", self.spec.name)

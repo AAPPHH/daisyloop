@@ -977,12 +977,40 @@ fn scan_case() {
     let c_scale = scan_env("SC_CS", 1.0);
     let base = if scan_env("SC_ALT", 0.0) > 0.0 { PlantSpec::ALTERNATIVE } else { PlantSpec::MEASURED };
     let spec = PlantSpec { ambient: scan_env("SC_AMB", base.ambient), c_scale, g_stop: scan_env("SC_GSTOP", base.g_stop), ..base };
-    let profile = if let Ok(v) = std::env::var("SC_STEP_FROM") { Profile::Step(v.parse().unwrap(), scan_env("SC_STEP_TO", 260.0), 3600) } else { Profile::Constant(scan_env("SC_W", 70.0)) };
-    let (lift, hold, drop) = (scan_env("SC_LIFT", 10.0), scan_env("SC_HOLD", 900.0), scan_env("SC_DROP", 1.0));
+    let profile = if std::env::var("SC_REC").is_ok() { Profile::recurring() } else if std::env::var("SC_SQ").is_ok() { Profile::Square(60.0, 300.0, 600, 600) } else if let Ok(v) = std::env::var("SC_STEP_FROM") { Profile::Step(v.parse().unwrap(), scan_env("SC_STEP_TO", 260.0), 3600) } else { Profile::Constant(scan_env("SC_W", 70.0)) };
+    let (lift, hold, drop) = (scan_env("SC_LIFT", 8.0), scan_env("SC_HOLD", 900.0), scan_env("SC_DROP", 1.0));
     let o = simulate(profile, spec, |c| {
         c.control.bound_raise_step = lift;
         c.control.bound_hold_secs = hold;
         c.control.bound_drop_k = drop;
     });
-    println!("SC alt {} amb {} cs {c_scale} {} lift {lift} hold {hold} drop {drop} swings {} writes {} peak {:.2} hits {} unchanged {:.3} exact_max {} budget {} fallback {} short {}", base.ambient == 20.0, spec.ambient, profile.name(), o.swings, o.writes, o.peak, o.hits, o.unchanged, o.exact_max, o.budget, o.fallback, o.short_cycles);
+    println!("SC fan_cold {:.3} alt {} amb {} cs {c_scale} {} lift {lift} hold {hold} drop {drop} swings {} writes {} peak {:.2} hits {} unchanged {:.3} exact_max {} budget {} fallback {} short {}", o.fan_cold, base.ambient == 20.0, spec.ambient, profile.name(), o.swings, o.writes, o.peak, o.hits, o.unchanged, o.exact_max, o.budget, o.fallback, o.short_cycles);
+}
+
+#[test]
+fn r36_the_pump_limit_cycle_stays_gone_across_ambient_and_heat_capacity() {
+    for (ambient, c_scale, power) in [(20.0, 0.5, 85.0), (20.0, 0.5, 75.0), (21.0, 0.5, 70.0), (22.0, 0.5, 50.0), (22.0, 1.0, 50.0), (23.0, 1.0, 70.0), (24.0, 1.0, 60.0)] {
+        let o = simulate(Profile::Constant(power), PlantSpec { ambient, c_scale, ..PlantSpec::MEASURED }, |_| {});
+        assert!(o.swings <= 2 && o.writes <= 250 && !o.budget && !o.fallback && !o.frozen, "ambient {ambient} c_scale {c_scale} {power} W swings {} writes {}", o.swings, o.writes);
+    }
+}
+
+#[test]
+#[ignore]
+fn r37_ambient_scan_swings_and_writes_per_24_h() {
+    let mut table = String::from("ambient C | c_scale | load W | swings | writes | peak C
+");
+    let (mut worst_swings, mut worst_writes) = (0, 0);
+    for ambient in [20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0] {
+        for c_scale in [0.5, 1.0] {
+            for power in (40..=90).step_by(5) {
+                let o = simulate(Profile::Constant(power as f64), PlantSpec { ambient, c_scale, ..PlantSpec::MEASURED }, |_| {});
+                (worst_swings, worst_writes) = (worst_swings.max(o.swings), worst_writes.max(o.writes));
+                table.push_str(&format!("{ambient} | {c_scale} | {power} | {} | {} | {:.2}
+", o.swings, o.writes, o.peak));
+            }
+        }
+    }
+    eprintln!("{table}worst swings {worst_swings} worst writes {worst_writes}");
+    assert!(worst_swings <= 2 && worst_writes <= 250);
 }
