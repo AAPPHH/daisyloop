@@ -5,6 +5,7 @@ Goal: one evening with the owner at the computer, then the model knows how the f
 - The owner sits at the computer from step 2 to step 6 and watches the UI (water temperature, `Stufentest` line, fan and pump rpm). Leaving the computer is an abort.
 - No game or other GPU/CPU load besides the load generator described in step 4.
 - `writes_enabled` is the only gate for any D5 write. It is `false` before and after the session.
+- The firmware fan set-point on this machine was raised from 30 C to 34 C on 2026-11-05/06 with `d5_fan.exe` (old reports saved as `snapshot\raw\d5_pre_*.bin`). Everything below that says 30 C (cold start, the firmware PID at full speed above 30 C, set-point 30 C in section 0) assumes the 30 C set-point. Before the session set it back to 30 C, after the session set it to 34 C again. From the repo root, owner at the computer, water below 40 C and the pump rpm steady (the tool refuses otherwise): `$env:D5_SEND='YES'; $env:D5_FAN_SETPOINT='3000'; $env:D5_RESTORE='NO'; tools\d5_probe\target\release\d5_fan.exe`, and after the session the same with `'3400'`. Without `D5_RESTORE='NO'` the tool puts the old set-point back after `D5_HOLD` seconds (60 by default), so the change would not stay. Without `D5_SEND='YES'` it is a dry run and sends nothing. It saves the old report as `snapshot\raw\d5_pre_<unix time>.bin`, reads the report back and prints `fan set-point now`; the set-point is in 1/100 C (3000 = 30 C, allowed 2800 to 3800). Remove the `D5_*` variables from the PowerShell session afterwards (`Remove-Item Env:D5_SEND, Env:D5_FAN_SETPOINT, Env:D5_RESTORE`).
 
 ## Cold start requirement
 
@@ -28,8 +29,28 @@ Source: `tools\d5_probe\src\bin\d5_abort.rs`, built once during preparation with
 - Rehearse the retraining once on the dry run: `python python\steptrain.py dryrun` (section 9; arguments `dryrun [directory] [case,case] [seeds]`). It needs the Python environment with numpy, scipy, xgboost, duckdb, pyarrow and pytz. It runs as separate worker processes of one core each (5 by default, `workers` in the `CFG` dict), no Ray; one case takes about 20 s.
 - Check the model and the data path: UI shows model loaded, `warm`; the lake has the LHM channels of the last hour.
 - Build the abort command of section 0 and run `cargo test` in `tools\d5_probe` (no device access); keep a PowerShell window open at the build directory for the whole session.
-- Decide the load generator: a GPU burn with adjustable power and a CPU stress with adjustable threads, both stoppable in one click. Heat at the water is about 0.96 x CPU package power + GPU power + 4 to 18 W pump.
+- The load generator and the abort watcher is `python python\steprun.py <stage> [go]` (section 1a): CPU stress with adjustable threads plus a GPU burn, both on a closed loop and stopped by Ctrl-C. Heat at the water is about 0.96 x CPU package power + GPU power + 4 to 18 W pump.
+- Rehearse it without any D5 write: `python python\steprun.py status` prints the live values and the pipe status, `python python\steprun.py heat go` runs the 100 W CPU load until the water reaches 30.0 C (the start band) and is the way to tune the closed loop.
 - Expected duration 15 min. Abort: nothing is written yet, stop at any time.
+
+### 1a. The operator tool `python\steprun.py`
+
+Source `python\steprun.py`, tests `python\test_steprun.py` (fake telemetry, fake pipe, fake abort runner; nothing touches the device). Run it from the owner's own interactive PowerShell in `C:\clones\daisyloop\python`: the pipe `\.\pipe\daisyloop` is open to interactive logon sessions only, a scheduled task, a service or an SSH session gets access denied. The stage word is the first argument; every stage that starts something also needs the word `go`:
+
+| Command | What it does |
+|---|---|
+| `python steprun.py status` | prints the live values and the pipe status (controls, drive, allowed, alarms); no action, no watchdog |
+| `python steprun.py heat go [30.0]` | 100 W CPU load until the water reaches the value (default 30.0 C), then load off; refuses when the water is already there |
+| `python steprun.py duty go` | step 3: StartStepTest on `d5.fan` (plan 0 %, 120 s), the 3 min rest of the table, then StartStepTest on `d5.pump`; load off; water band 30.0 to 31.0 C |
+| `python steprun.py fan go` | step 4a: StartStepTest on `d5.fan`, then the load of the table for each value of `daisyloop/step/phase` (set within 1 to 2 s of the change), 5 min rest with the load off afterwards; water band 27.0 to 31.0 C |
+| `python steprun.py pump go` | step 4b: StartStepTest on `d5.pump`, 200 W for all phases; water band 27.0 to 33.0 C |
+| `python steprun.py cool` | step 4c: load off, watches until the water is below 31.0 C, prints the drive of both channels |
+
+The load table is `SIM["inject"]["protocols"]["runbook"]` in `python\stepsim.py`; the tool reads it, a load at or below its `idle_w` (70 W) means the load generator is off. The load is the total of CPU package power and GPU power read from the newest `%LOCALAPPDATA%\daisyloop\hot\telemetry-*.arrows`: up to 100 W on the CPU (8 worker processes with PWM duty, `load.cpu_threads` in the `CFG` dict), the rest on the GPU (torch CUDA, PWM duty), regulated at 1 Hz. If the CPU temperature reaches 90 C the CPU share is reduced by 10 W per second and moved to the GPU (the GPU share is reduced the same way at 75 C). Children die with the tool (Windows job object plus a liveness check of the parent); the GPU worker is stopped, which frees its memory, when its share has been zero for 20 s or the load is halted. The closed loop gains in `CFG["load"]` are not tuned on the real machine: tune them with the `heat` stage first.
+
+A stage refuses to start (exit code 2, reasons in the log) unless: the word `go` is given, telemetry is fresh (every safety channel under 10 s old), the water is inside the band of the stage, both channels are on `firmware`, no step test runs, writes are allowed and the tested channel is not in active mode, and the foreign load (CPU plus GPU power minus the tool's own load) is at most `foreign_max_w` (90 W). If the daemon's plan has a different number of phases than the table, the tool aborts at phase 1.
+
+Watchdog, own thread at 1 Hz, independent of the load loop: water at or above 44 C; water rising faster than 1.5 K/min (slope over 60 s) for more than 2 min; CPU package (`/intelcpu/0/temperature/0`) at or above 95 C or GPU (`nvml/0/temp`) at or above 80 C; pump rpm below 1500; one of these channels older than 10 s or missing. On a hit it stops the load first, then sends StopStepTest through the pipe and checks the status for up to 15 s; if the tested channel is not on firmware by then, or the pipe fails, it runs `tools\d5_probe\target\release\d5_abort.exe` and logs its verdict (d5_abort writes the stop file, so the daemon stops and the watchdog task relaunches it). Ctrl-C is the same abort. The tool prints one line per phase change and per abort and a status line every 30 s and appends everything to `%LOCALAPPDATA%\daisyloop\steprun\steprun-<time>.log`. If the tool itself dies, the abort command of section 0 is the first action.
 
 ## 2. Enable writes and the step plans, restart (needs UAC, 5 min)
 
@@ -73,7 +94,7 @@ The step test is per channel: the fan plan and the pump plan are two separate st
 
 ### 4a. Fan test, 47 min
 
-Start: UI fan card, `Stufentest starten ...`, `Ja, starten`. Phases of the plan and the load the owner sets by hand (the daemon does not control the load; the loads are the ones of the dry run, `SIM["inject"]["protocols"]["runbook"]` in `python/stepsim.py`, and a test compares this table with it; adjust to what the thermometer says):
+Start: `python steprun.py fan go` (or the UI fan card, `Stufentest starten ...`, `Ja, starten`, with the load set by hand). Phases of the plan and the load (the daemon does not control the load, `steprun.py` sets it from this table; the loads are the ones of the dry run, `SIM["inject"]["protocols"]["runbook"]` in `python/stepsim.py`, and a test compares this table with it; adjust to what the thermometer says):
 
 | Phase | Fan duty | Time | Load (CPU + GPU power) |
 |---|---|---|---|
