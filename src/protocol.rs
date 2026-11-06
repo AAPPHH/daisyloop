@@ -148,6 +148,8 @@ pub struct StepStatus {
     pub phase: u32,
     pub phases: u32,
     pub duty: f64,
+    #[serde(default)]
+    pub overridden: bool,
     pub left_s: u32,
 }
 

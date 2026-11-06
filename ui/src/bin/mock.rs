@@ -295,7 +295,7 @@ impl Sim {
             }
         }
         let gain = 1.0 - (self.controls[0].target_rpm.unwrap_or(0.0) / FAN_MAX_RPM) * 0.8;
-        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), cpu: Some(self.live[self.index[CPU_TEMP]] + 1.0), gpu: Some(self.live[self.index[GPU_TEMP]] + 0.5), water_limit: 43.5, cpu_limit: 102.5, gpu_limit: 102.5, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
+        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), cpu: Some(self.live[self.index[CPU_TEMP]] + 1.0), gpu: Some(self.live[self.index[GPU_TEMP]] + 0.5), water_limit: 43.5, cpu_limit: 105.0, gpu_limit: 105.0, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
     }
 
     fn tick(&mut self) {
@@ -366,7 +366,7 @@ impl Sim {
             predicted: Some(self.predicted.clone()),
             step_test: self.step.map(|(i, since)| {
                 let phase = (((self.last_tick - since) / 10_000) as u32).min(4);
-                StepStatus { id: self.controls[i].id.clone(), phase: phase + 1, phases: 5, duty: self.controls[i].commanded_duty.unwrap_or(0.0), left_s: (10 - ((self.last_tick - since) / 1000) % 10) as u32 }
+                StepStatus { id: self.controls[i].id.clone(), phase: phase + 1, phases: 5, duty: self.controls[i].commanded_duty.unwrap_or(0.0), overridden: phase == 3, left_s: (10 - ((self.last_tick - since) / 1000) % 10) as u32 }
             }),
             channels,
             controls: self.controls.clone(),

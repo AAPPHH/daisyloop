@@ -11,7 +11,7 @@ Response bodies (`type`): `snapshot`, `history`, `ack`, `error {message}`. A ref
 
 ## Snapshot
 
-`ts_ms`, `seq`, `weight` (0 leise, 1 kuehl), `model` (`loaded`, `warm`, `warmup_left_s`, `fan_identified`, `pump_identified`, `error`), `predicted` (`horizon_s`, `water`, `cpu`, `gpu`, limits, `feasible`, `age_ms`; null before the first plan), `step_test` (`id`, `phase`, `phases`, `duty`, `left_s`; null when idle), `channels[]`, `controls[]`, `limits[]` (`channel`, `low`, `high`, and for the water channel `plan` 46 and `top` 50, both optional; `high` is the takeover), `alarms[]`.
+`ts_ms`, `seq`, `weight` (0 leise, 1 kuehl), `model` (`loaded`, `warm`, `warmup_left_s`, `fan_identified`, `pump_identified`, `error`), `predicted` (`horizon_s`, `water`, `cpu`, `gpu`, limits, `feasible`, `age_ms`; null before the first plan), `step_test` (`id`, `phase`, `phases`, `duty`, `overridden` (true when the rule bound raised the step duty), `left_s`; null when idle), `channels[]`, `controls[]`, `limits[]` (`channel`, `low`, `high`, and for the water channel `plan` 46 and `top` 50, both optional; `high` is the takeover), `alarms[]`.
 
 `channels[]`: `id` (globally unique), `label`, `hardware` (passed through per sensor), `kind`, `unit` (normalised, for example `°C`, `rpm`), `value`, `min`, `max`, `age_ms`, `stale`. A stale channel keeps its last `value`; the UI greys it and shows the age.
 
