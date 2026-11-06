@@ -320,7 +320,7 @@ impl Profile {
     }
     fn grid() -> Vec<Profile> {
         let mut v = vec![];
-        for lo in [30.0, 60.0] {
+        for lo in [30.0, 45.0, 60.0] {
             for hi in [80.0, 120.0, 200.0] {
                 for on in [3, 10, 30] {
                     for off in [5, 20, 60, 125, 135, 180] {

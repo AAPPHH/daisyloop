@@ -387,6 +387,19 @@ fn target_moves_down_slowly_and_up_fast() {
 }
 
 #[test]
+fn the_default_down_step_is_one_coarse_step_of_35_duty_points_and_zero_gives_the_slow_ramp_the_tests_above_rely_on() {
+    let mut rig = Rig::new((true, true), 20.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(35);
+    let high = rig.ctl("d5.fan").commanded_duty.unwrap();
+    rig.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(5000)), heat: Rc::new(Cell::new(0.0)), fail: rig.model_fail.clone() }));
+    rig.run(31);
+    let low = rig.ctl("d5.fan").commanded_duty.unwrap();
+    assert!((high - low - 35.0).abs() < 0.5, "{high} {low}");
+}
+
+#[test]
 fn infeasible_plan_takes_maximum() {
     let mut rig = Rig::new((true, true), 50.0, |_| {});
     rig.run(35);
