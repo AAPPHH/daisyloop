@@ -237,6 +237,13 @@ impl Collector {
         Legacy::seal_leftover(&cfg.data_dir)?;
         let hot = HotStore::open(&cfg.data_dir, Duration::from_secs(cfg.wal_sync_secs))?;
         HotStore::trim_parked(&cfg.data_dir, cfg.parked_max_bytes);
+        let dirs = XgbModel::search_dirs(&cfg.data_dir, cfg.install_dir.as_deref());
+        let model = XgbModel::load(&dirs, &cfg.control.model_spec, &cfg.control.model_file);
+        if let Err(e) = &model {
+            log::error!("model not loaded: {e}");
+        }
+        let history = model.as_ref().map_or_else(|_| Vec::new(), |m| HotStore::recent(&cfg.data_dir, &|c| m.wants(c), cfg.control.seed_secs));
+        let model = model.map(|m| Box::new(m) as Box<dyn Model>);
         let lake = Lake::open(cfg)?;
         let idle = Arc::new(Idle::new(&cfg.gate));
         let gate = Gate::new(cfg, idle.clone());
@@ -269,13 +276,9 @@ impl Collector {
             })
             .collect();
         let hid_cfg = cfg.clone();
-        let dirs = XgbModel::search_dirs(&cfg.data_dir, cfg.install_dir.as_deref());
-        let model = XgbModel::load(&dirs, &cfg.control.model_spec, &cfg.control.model_file).map(|m| Box::new(m) as Box<dyn Model>);
-        if let Err(e) = &model {
-            log::error!("model not loaded: {e}");
-        }
         let actuator = D5Actuator::new(Box::new(move || HidControl::open(&hid_cfg).map(|h| Box::new(h) as Box<dyn D5Control>)), &cfg.control);
-        let control = Control::new(cfg, Box::new(actuator), model);
+        let mut control = Control::new(cfg, Box::new(actuator), model);
+        control.seed(&history, now_micros() / 1_000_000);
         let hub = Arc::new(Mutex::new(Hub::new(&cfg.control, control.status(0))));
         let (jobs_tx, jobs) = channel();
         if cfg.ipc_enabled {

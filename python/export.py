@@ -3,7 +3,6 @@ import math
 import os
 import pickle
 import numpy as np
-from experiments import Stage2
 from features import BatchEngine, Spec, StreamEngine, CONFIG as FCFG
 from models import CONFIG, Dataset, local_idx
 from rawstore import RawStore
@@ -25,6 +24,7 @@ class Exporter:
         self.cfg = cfg
         self.D = Dataset(CONFIG).load()
         self.rich = Spec.load(FCFG["spec_path"])
+        from experiments import Stage2
         pruned, _ = Stage2().pruned(cfg["feature_count"])
         self.feats = pruned + [n for n in CONFIG["forced"] if n not in pruned]
         self.stage = {r["tag"]: r["res"] for r in pickle.load(open(os.path.join(CONFIG["out_dir"], cfg["stage"]), "rb"))}[cfg["tag"]]

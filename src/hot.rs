@@ -17,6 +17,8 @@ type Res<T> = Result<T, Box<dyn std::error::Error>>;
 const SEALED: &str = "sealed";
 const OPEN: &str = "arrows";
 const SYNC: &str = "sync";
+const TAIL: &str = "tail";
+const TAIL_KEEP: usize = 6;
 const PARKED: [&str; 2] = ["bad", "partial"];
 const MARK: usize = 16;
 const MAX_FILE: u64 = 4 << 30;
@@ -252,8 +254,11 @@ impl HotStore {
         for p in Self::list_in(&dir, OPEN) {
             if std::fs::metadata(&p).map(|m| m.len() == 0).unwrap_or(false) {
                 let _ = std::fs::remove_file(&p);
-            } else if let Err(e) = Self::rename_retrying(&p, &Self::with(&p, SEALED)) {
-                log::error!("could not seal leftover {} at start, it stays for the next start: {e}", p.display());
+            } else {
+                match Self::rename_retrying(&p, &Self::with(&p, SEALED)) {
+                    Ok(()) => Self::keep_tail(&dir, &Self::with(&p, SEALED)),
+                    Err(e) => log::error!("could not seal leftover {} at start, it stays for the next start: {e}", p.display()),
+                }
             }
         }
         for p in Self::list_in(&dir, SYNC) {
@@ -362,6 +367,62 @@ impl HotStore {
         }
     }
 
+    fn keep_tail(dir: &Path, sealed: &Path) {
+        if Self::table_of(sealed) != Some(Table::Telemetry) {
+            return;
+        }
+        let tail = dir.join(TAIL);
+        let copy = |from: &Path| -> std::io::Result<()> {
+            match from.file_name() {
+                Some(n) if from.exists() => std::fs::copy(from, tail.join(n)).map(|_| ()),
+                _ => Ok(()),
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&tail).and_then(|()| copy(sealed)).and_then(|()| copy(&Self::sync_path(sealed))) {
+            log::warn!("could not keep a restart copy of {}: {e}", sealed.display());
+            return;
+        }
+        let files = Self::list_in(&tail, SEALED);
+        for old in files.iter().take(files.len().saturating_sub(TAIL_KEEP)) {
+            let _ = std::fs::remove_file(Self::sync_path(old));
+            let _ = std::fs::remove_file(old);
+        }
+    }
+
+    pub fn recent(data_dir: &Path, wanted: &dyn Fn(&str) -> bool, secs: i64) -> Vec<(i64, HashMap<String, f64>)> {
+        let dir = Self::dir(data_dir);
+        let mut files: Vec<PathBuf> = Self::list_in(&dir, SEALED);
+        for p in Self::list_in(&dir.join(TAIL), SEALED) {
+            if !files.iter().any(|f| f.file_name() == p.file_name()) {
+                files.push(p);
+            }
+        }
+        files.retain(|p| Self::table_of(p) == Some(Table::Telemetry));
+        files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        let mut ticks: std::collections::BTreeMap<i64, HashMap<String, f64>> = std::collections::BTreeMap::new();
+        for p in files {
+            let loaded = match Self::read(&p) {
+                Ok(l) => l,
+                Err(e) => {
+                    log::warn!("restart history: skipped {e}");
+                    continue;
+                }
+            };
+            for b in &loaded.items {
+                let (Some(ts), Ok(ch), Some(v)) = (b.column(0).as_any().downcast_ref::<TimestampMicrosecondArray>(), arrow_cast::cast(b.column(2), &DataType::Utf8), b.column(7).as_any().downcast_ref::<Float64Array>()) else { continue };
+                let Some(ch) = ch.as_any().downcast_ref::<StringArray>() else { continue };
+                for i in 0..b.num_rows() {
+                    let c = ch.value(i);
+                    if v.value(i).is_finite() && wanted(c) {
+                        ticks.entry(ts.value(i).div_euclid(1_000_000)).or_default().insert(c.to_string(), v.value(i));
+                    }
+                }
+            }
+        }
+        let Some(&last) = ticks.keys().next_back() else { return Vec::new() };
+        ticks.into_iter().filter(|(e, _)| *e >= last - secs).collect()
+    }
+
     pub fn rotate(&mut self) -> Res<bool> {
         let mut sealed = false;
         let mut keep = Vec::new();
@@ -373,7 +434,10 @@ impl HotStore {
                 continue;
             }
             match std::fs::rename(&s.path, Self::with(&s.path, SEALED)) {
-                Ok(()) => sealed = true,
+                Ok(()) => {
+                    sealed = true;
+                    Self::keep_tail(&self.dir, &Self::with(&s.path, SEALED));
+                }
                 Err(e) => {
                     log::warn!("could not seal {}, keeps growing: {e}", s.path.display());
                     keep.push(s);
@@ -865,5 +929,31 @@ mod tests {
         let per = t.elapsed().as_secs_f64() / n as f64 * 1e6;
         let bytes = hot.live_bytes();
         println!("tick {per:.0} us, {:.1} KB/s, {:.0} MB/day", bytes as f64 / n as f64 / 1e3, bytes as f64 / n as f64 * 86400.0 / 1e6);
+    }
+
+    #[test]
+    fn restart_copy_survives_the_commit_and_keeps_the_newest_files_only() {
+        let d = dir("hot-tail");
+        let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
+        let base = crate::now_micros() / 1_000_000 - 100;
+        for round in 0..(TAIL_KEEP as i64 + 2) {
+            for ts in 0..3 {
+                let rows = vec![Row::new("d5next", "d5next/water/temp", "Water", "temperature", "degC", (round * 10 + ts) as f64)];
+                hot.append(&Tick { ts: (base + round * 10 + ts) * 1_000_000, rows, raw: None }).unwrap();
+            }
+            assert!(hot.rotate().unwrap());
+            for p in HotStore::sealed(&d) {
+                std::fs::remove_file(HotStore::sync_path(&p)).unwrap();
+                std::fs::remove_file(p).unwrap();
+            }
+        }
+        assert_eq!(HotStore::list_in(&d.join("hot").join(TAIL), SEALED).len(), TAIL_KEEP);
+        let all = HotStore::recent(&d, &|c| c == "d5next/water/temp", 1000);
+        assert_eq!(all.len(), 3 * TAIL_KEEP);
+        let last = ((TAIL_KEEP as i64 + 1) * 10 + 2) as f64;
+        assert_eq!(all.last().unwrap().1["d5next/water/temp"], last);
+        assert!(HotStore::recent(&d, &|c| c == "other", 1000).is_empty());
+        let few = HotStore::recent(&d, &|_| true, 2);
+        assert_eq!(few.iter().map(|f| f.1["d5next/water/temp"]).collect::<Vec<_>>(), vec![last - 2.0, last - 1.0, last]);
     }
 }

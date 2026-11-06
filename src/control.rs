@@ -207,6 +207,8 @@ pub struct ControlConfig {
     pub model_spec: String,
     pub model_file: String,
     pub history_secs: u64,
+    pub seed_secs: i64,
+    pub seed_max_gap_secs: i64,
 }
 
 impl Default for ControlConfig {
@@ -251,6 +253,8 @@ impl Default for ControlConfig {
             model_spec: "feature_spec_deploy.json".into(),
             model_file: "model_deploy.json".into(),
             history_secs: 6 * 3600,
+            seed_secs: 7200,
+            seed_max_gap_secs: 300,
         }
     }
 }
@@ -503,6 +507,16 @@ impl Control {
         let store = Ownership::new(cfg.state_dir());
         let owned = store.read();
         Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
+    }
+
+    pub fn seed(&mut self, history: &[(i64, HashMap<String, f64>)], now_epoch: i64) -> usize {
+        let rows: Vec<(i64, HashMap<String, f64>)> = history.iter().map(|(e, r)| (*e, r.iter().filter(|(c, v)| self.plausible(c, **v)).map(|(c, v)| (c.clone(), *v)).collect())).collect();
+        let gap = self.cfg.seed_max_gap_secs;
+        let n = self.model.as_mut().map_or(0, |m| m.seed(&rows, now_epoch, gap));
+        if n > 0 {
+            log::info!("control: model seeded from {n} stored seconds, {} s before start", now_epoch - rows.last().map_or(now_epoch, |r| r.0));
+        }
+        n
     }
 
     fn ix(&self, id: &str) -> Result<usize, String> {

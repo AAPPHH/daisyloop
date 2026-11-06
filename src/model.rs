@@ -14,6 +14,9 @@ pub trait Model {
     fn observe(&mut self, row: &HashMap<String, f64>, epoch: i64);
     fn identified(&self) -> (bool, bool);
     fn warm_secs(&self) -> i64;
+    fn seed(&mut self, _history: &[(i64, HashMap<String, f64>)], _now: i64, _max_gap: i64) -> usize {
+        0
+    }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout_s: u32, horizon_s: u32) -> Result<Forecast, String>;
 }
 
@@ -27,41 +30,11 @@ pub struct XgbModel {
     x: Vec<f64>,
     epoch: i64,
     since: i64,
+    bridge: i64,
 }
 
 impl XgbModel {
-    pub const KEY_CHANNEL: &'static str = "d5next/water/temp";
-    pub const FILL_SECS: i64 = 10;
-
-    pub fn from_text(spec: &str, model: &str) -> Result<XgbModel, String> {
-        let p = Predictor::load(spec, model)?;
-        let channels: Vec<String> = p.engine.raw_channels.to_vec();
-        if !channels.iter().any(|c| c == Self::KEY_CHANNEL) {
-            return Err("feature spec has no water channel".into());
-        }
-        let n = channels.len();
-        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0 })
-    }
-
-    pub fn load(dirs: &[PathBuf], spec: &str, file: &str) -> Result<XgbModel, String> {
-        let read = |name: &str| -> Result<String, String> {
-            dirs.iter().find_map(|d| std::fs::read_to_string(d.join(name)).ok()).ok_or_else(|| format!("{name} not found in {}", dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")))
-        };
-        XgbModel::from_text(&read(spec)?, &read(file)?)
-    }
-
-    pub fn search_dirs(data_dir: &Path, install_dir: Option<&Path>) -> Vec<PathBuf> {
-        vec![install_dir.unwrap_or(data_dir).join("models")]
-    }
-
-    fn filled(&self) -> Vec<f64> {
-        (0..self.channels.len()).map(|i| if self.epoch - self.fill_at[i] <= Self::FILL_SECS { self.fill[i] } else { f64::NAN }).collect()
-    }
-}
-
-impl Model for XgbModel {
-    fn observe(&mut self, row: &HashMap<String, f64>, epoch: i64) {
-        let raw: Vec<f64> = self.channels.iter().map(|c| row.get(c).copied().filter(|v| v.is_finite()).unwrap_or(f64::NAN)).collect();
+    fn advance(&mut self, raw: Vec<f64>, epoch: i64) {
         if self.epoch != 0 && epoch - self.epoch > Self::FILL_SECS {
             self.p = self.fresh.clone();
             self.since = 0;
@@ -77,12 +50,73 @@ impl Model for XgbModel {
         self.last = raw;
     }
 
+    pub const KEY_CHANNEL: &'static str = "d5next/water/temp";
+    pub const FILL_SECS: i64 = 10;
+
+    pub fn from_text(spec: &str, model: &str) -> Result<XgbModel, String> {
+        let p = Predictor::load(spec, model)?;
+        let channels = p.engine.raw_channels.clone();
+        if !channels.iter().any(|c| c == Self::KEY_CHANNEL) {
+            return Err("feature spec has no water channel".into());
+        }
+        let n = channels.len();
+        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0 })
+    }
+
+    pub fn load(dirs: &[PathBuf], spec: &str, file: &str) -> Result<XgbModel, String> {
+        let read = |name: &str| -> Result<String, String> {
+            dirs.iter().find_map(|d| std::fs::read_to_string(d.join(name)).ok()).ok_or_else(|| format!("{name} not found in {}", dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")))
+        };
+        XgbModel::from_text(&read(spec)?, &read(file)?)
+    }
+
+    pub fn wants(&self, channel: &str) -> bool {
+        self.channels.iter().any(|c| c == channel)
+    }
+
+    pub fn search_dirs(data_dir: &Path, install_dir: Option<&Path>) -> Vec<PathBuf> {
+        vec![install_dir.unwrap_or(data_dir).join("models")]
+    }
+
+    fn filled(&self) -> Vec<f64> {
+        (0..self.channels.len()).map(|i| if self.epoch - self.fill_at[i] <= Self::FILL_SECS { self.fill[i] } else { f64::NAN }).collect()
+    }
+}
+
+impl Model for XgbModel {
+    fn observe(&mut self, row: &HashMap<String, f64>, epoch: i64) {
+        let raw: Vec<f64> = self.channels.iter().map(|c| row.get(c).copied().filter(|v| v.is_finite()).unwrap_or(f64::NAN)).collect();
+        let bridge = std::mem::take(&mut self.bridge);
+        let gap = epoch - self.epoch;
+        if self.epoch != 0 && gap > 1 && gap <= bridge {
+            let from = self.last.clone();
+            for k in 1..gap {
+                let f = k as f64 / gap as f64;
+                let mid = from.iter().zip(&raw).map(|(a, b)| if a.is_finite() && b.is_finite() { a + (b - a) * f } else { *a }).collect();
+                self.advance(mid, self.epoch + 1);
+            }
+        }
+        self.advance(raw, epoch);
+    }
+
     fn identified(&self) -> (bool, bool) {
         (self.p.model.identified.fan, self.p.model.identified.pump)
     }
 
     fn warm_secs(&self) -> i64 {
         if !self.x.is_empty() && self.x.iter().all(|v| v.is_finite()) { self.since } else { 0 }
+    }
+
+    fn seed(&mut self, history: &[(i64, HashMap<String, f64>)], now: i64, max_gap: i64) -> usize {
+        let Some((last, _)) = history.last() else { return 0 };
+        if self.epoch != 0 || now < *last || now - *last > max_gap {
+            return 0;
+        }
+        for (epoch, row) in history {
+            self.observe(row, *epoch);
+        }
+        self.bridge = max_gap;
+        self.since as usize
     }
 
     fn forecast(&self, hold: &HashMap<String, f64>, rollout_s: u32, horizon_s: u32) -> Result<Forecast, String> {
@@ -341,5 +375,133 @@ mod tests {
             m.forecast(&HashMap::new(), 0, cfg.horizon_secs).unwrap();
         }
         eprintln!("PLANCOST ms per run (plan plus direct forecast): {:.2}", t0.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+    }
+
+    fn fan_spread(m: &XgbModel) -> Vec<(f64, f64)> {
+        let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
+        let (fcal, pcal) = (fc.calibration(), pc.calibration());
+        let cfg = ControlConfig::default();
+        let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
+        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
+        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: false, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
+        let out: Vec<(f64, f64)> = fan
+            .candidates(cfg.fan_candidates)
+            .into_iter()
+            .map(|rpm| {
+                let mut hold = HashMap::new();
+                fan.hold(rpm, &mut hold);
+                pump.hold(pump.base.rpm, &mut hold);
+                (rpm, m.forecast(&hold, cfg.rollout_secs, cfg.horizon_secs).unwrap().water)
+            })
+            .collect();
+        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
+        assert!(plan.water.is_some_and(f64::is_finite));
+        out
+    }
+
+    #[test]
+    fn exported_step_model_is_identified_and_its_forecast_follows_the_fan_rpm() {
+        let g = Golden::load();
+        let mut m = XgbModel::load(&[Golden::dir().join("fixtures").join("steptrain")], "feature_spec_deploy.json", "model_deploy.json").unwrap();
+        for t in 3000..g.rows.len() {
+            m.observe(&g.row(t), g.k0 + t as i64);
+        }
+        assert_eq!(m.identified(), (true, true));
+        assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
+        let curve = fan_spread(&m);
+        let old = fan_spread(&real());
+        println!("step model {curve:?}
+deployed   {old:?}");
+        let (lo, hi) = (curve.first().unwrap(), curve.last().unwrap());
+        assert!(curve.windows(2).all(|w| w[0].1 >= w[1].1 - 0.02), "forecast must not rise with fan rpm: {curve:?}");
+        assert!(lo.1 - hi.1 > 0.2, "slow fan must forecast warmer water than full fan: {curve:?}");
+        let spread = |c: &[(f64, f64)]| c.first().unwrap().1 - c.last().unwrap().1;
+        assert!(spread(&curve) > 3.0 * spread(&old).abs(), "{curve:?} against {old:?}");
+    }
+
+    fn restart(g: &Golden, upto: usize, gap: usize, seed_secs: i64, name: &str) -> (XgbModel, i64) {
+        use crate::hot::HotStore;
+        use crate::lake::Tick;
+        use crate::Row;
+        let base = crate::now_micros() / 1_000_000 - 8000;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("test-tmp").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut hot = HotStore::open(&dir, std::time::Duration::from_secs(1)).unwrap();
+        for t in 0..upto {
+            let rows = g.row(t).into_iter().map(|(c, v)| Row::new("lhm", c.clone(), c, "other", "", v)).collect();
+            hot.append(&Tick { ts: (base + t as i64) * 1_000_000, rows, raw: None }).unwrap();
+        }
+        hot.rotate().unwrap();
+        drop(hot);
+        let mut m = g.model();
+        let history = HotStore::recent(&dir, &|c| m.wants(c), seed_secs);
+        let now = base + (upto + gap) as i64;
+        println!("history {} first {} last {} expected last {}", history.len(), history.first().map_or(0, |h| h.0 - base), history.last().map_or(0, |h| h.0 - base), upto - 1);
+        assert!(m.seed(&history, now, 300) > 0);
+        (m, base)
+    }
+
+    fn worst(a: &XgbModel, b: &XgbModel) -> (f64, usize, String) {
+        let (mut w, mut name) = (0.0f64, String::new());
+        let mut nan = 0;
+        for (i, (x, y)) in a.x.iter().zip(&b.x).enumerate() {
+            if x.is_nan() != y.is_nan() {
+                nan += 1;
+            } else if !x.is_nan() {
+                let d = (x - y).abs() / (1.0 + x.abs());
+                if d > w {
+                    w = d;
+                    name = a.p.model.features[i].clone();
+                }
+            }
+        }
+        (w, nan, name)
+    }
+
+    fn compare(gap: usize, seed_secs: i64, name: &str) -> Vec<(usize, f64, usize, String)> {
+        let g = Golden::load();
+        let upto = 5400;
+        let mut out = Vec::new();
+        let (mut b, base) = restart(&g, upto, gap, seed_secs, name);
+        let mut a = g.model();
+        for t in (0..upto + gap).filter(|t| !g.row(*t).is_empty()) {
+            a.observe(&g.row(t), base + t as i64);
+        }
+        for t in upto + gap..upto + gap + 700 {
+            a.observe(&g.row(t), base + t as i64);
+            b.observe(&g.row(t), base + t as i64);
+            if [0, 1, 30, 120, 300, 600].contains(&(t - upto - gap)) {
+                let (w, nan, f) = worst(&a, &b);
+                out.push((t - upto - gap, w, nan, f));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn seeding_from_the_hot_store_matches_an_uninterrupted_run() {
+        let exact = compare(0, 5400, "seed-exact");
+        assert!(exact.iter().all(|(_, w, nan, _)| *w < 1e-9 && *nan == 0), "{exact:?}");
+        let short = compare(0, 3600, "seed-3600");
+        println!("history 3600 s, no gap: {short:?}");
+        assert!(short.iter().all(|(_, w, nan, _)| *w < 0.1 && *nan == 0), "{short:?}");
+        for gap in [60, 299] {
+            let r = compare(gap, 3600, &format!("seed-gap{gap}"));
+            println!("history 3600 s, gap {gap} s: {r:?}");
+            assert!(r.iter().all(|(_, _, nan, _)| *nan == 0) && r.last().unwrap().1 < 0.1, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn stale_history_and_a_running_model_are_not_seeded() {
+        let g = Golden::load();
+        let rows: Vec<(i64, HashMap<String, f64>)> = (0..100).map(|t| (1000 + t as i64, g.row(t))).collect();
+        let mut m = g.model();
+        assert_eq!(m.seed(&rows, 1099 + 301, 300), 0);
+        assert_eq!(m.seed(&rows, 1000, 300), 0);
+        assert_eq!(m.seed(&[], 1100, 300), 0);
+        assert_eq!(m.seed(&rows, 1099 + 300, 300), 100);
+        assert_eq!(m.seed(&rows, 1099 + 300, 300), 0);
     }
 }
