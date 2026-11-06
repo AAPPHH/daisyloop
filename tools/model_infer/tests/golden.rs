@@ -15,7 +15,7 @@ fn matches_python_golden() {
     let g: Value = serde_json::from_str(&models("golden.json")).unwrap();
     let mut p = Predictor::new(&models("feature_spec_deploy.json"), &models("model_deploy.json"));
     let chans: Vec<String> = g["channels"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-    assert_eq!(chans, p.engine.raw_channels);
+    assert_eq!(chans, *p.engine.raw_channels);
     let k0 = g["k0"].as_i64().unwrap();
     let ticks: Vec<usize> = g["ticks"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
     let rows = g["rows"].as_array().unwrap();

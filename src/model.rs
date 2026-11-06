@@ -35,7 +35,7 @@ impl XgbModel {
 
     pub fn from_text(spec: &str, model: &str) -> Result<XgbModel, String> {
         let p = Predictor::load(spec, model)?;
-        let channels = p.engine.raw_channels.clone();
+        let channels: Vec<String> = p.engine.raw_channels.to_vec();
         if !channels.iter().any(|c| c == Self::KEY_CHANNEL) {
             return Err("feature spec has no water channel".into());
         }
@@ -322,5 +322,24 @@ mod tests {
         let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
         assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
         assert!(plan.fan_rpm >= fan.rpm_range().0 && plan.fan_rpm <= fan.rpm_range().1 && plan.pump_rpm >= pump.rpm_range().0);
+    }
+    #[test]
+    #[ignore]
+    fn plan_cost_per_run_in_release() {
+        let m = real();
+        let cfg = ControlConfig::default();
+        let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
+        let (fcal, pcal) = (fc.calibration(), pc.calibration());
+        let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
+        let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
+        let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
+        let temps = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+        let runs = 10;
+        let t0 = std::time::Instant::now();
+        for _ in 0..runs {
+            Planner { cfg: &cfg }.plan(&m, &fan, &pump, &temps, 0.5, Some((1200.0, 3400.0))).unwrap();
+            m.forecast(&HashMap::new(), 0, cfg.horizon_secs).unwrap();
+        }
+        eprintln!("PLANCOST ms per run (plan plus direct forecast): {:.2}", t0.elapsed().as_secs_f64() * 1000.0 / runs as f64);
     }
 }

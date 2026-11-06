@@ -58,14 +58,15 @@ struct Node {
 
 #[derive(Clone)]
 pub struct Engine {
-    nodes: Vec<Node>,
+    nodes: Arc<Vec<Node>>,
     state: Vec<State>,
     hist: Vec<VecDeque<f64>>,
-    cap: Vec<usize>,
+    cap: Arc<Vec<usize>>,
     vals: Vec<f64>,
-    pub raw_channels: Vec<String>,
-    pub outputs: Vec<String>,
-    out_idx: Vec<usize>,
+    scratch: Vec<f64>,
+    pub raw_channels: Arc<Vec<String>>,
+    pub outputs: Arc<Vec<String>>,
+    out_idx: Arc<Vec<usize>>,
 }
 
 fn pf(v: &Value, k: &str) -> f64 {
@@ -123,21 +124,24 @@ impl Engine {
         let out_idx = outputs.iter().map(|s| index[s]).collect();
         let n = nodes.len();
         Engine {
-            nodes,
+            nodes: Arc::new(nodes),
             state: vec![State { age: 1_000_000_000, ..State::default() }; n],
             hist: cap.iter().map(|&c| VecDeque::with_capacity(c)).collect(),
-            cap,
+            cap: Arc::new(cap),
             vals: vec![f64::NAN; n],
-            raw_channels,
-            outputs,
-            out_idx,
+            scratch: Vec::new(),
+            raw_channels: Arc::new(raw_channels),
+            outputs: Arc::new(outputs),
+            out_idx: Arc::new(out_idx),
         }
     }
 
     pub fn step(&mut self, raw: &[f64], k: i64) -> Vec<f64> {
-        for i in 0..self.nodes.len() {
-            let node = &self.nodes[i];
-            let a: Vec<f64> = node.ins.iter().map(|&j| self.vals[j]).collect();
+        let nodes = Arc::clone(&self.nodes);
+        let mut a = std::mem::take(&mut self.scratch);
+        for (i, node) in nodes.iter().enumerate() {
+            a.clear();
+            a.extend(node.ins.iter().map(|&j| self.vals[j]));
             let s = &mut self.state[i];
             let y = match &node.op {
                 Op::Raw { ffill, zero_nan } => {
@@ -237,6 +241,7 @@ impl Engine {
                 h.push_back(y);
             }
         }
+        self.scratch = a;
         self.out_idx.iter().map(|&i| self.vals[i]).collect()
     }
 }
