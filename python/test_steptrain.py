@@ -131,13 +131,16 @@ def copy_steps(out, models, install):
 
 class FakeStore:
     def __init__(self, T, wins, cols):
-        self.T, self.wins, self.cols = T, wins, cols
+        self.T, self.wins, self.cols, self.cfg = T, wins, cols, S.CFG
 
     def col(self, c):
         return self.cols[c]
 
     def labels(self):
         return ["fan"] * len(self.wins)
+
+    def spans(self):
+        return S.Store.spans(self)
 
 
 def fake_cols(T, bad):
@@ -173,6 +176,24 @@ def test_restart_gap_before_the_fan_test_still_ships_with_the_right_effect():
     if STORE:
         a = run_case("fan_30.0_gap", 0, 1)
         assert a["ship"] and 1 / 1.5 < a["ratio"] < 1.5
+
+
+def test_step_train_and_hold_do_not_overlap_and_the_fit_stays_clear_of_the_hold_rows():
+    T = 6000
+    st = FakeStore(T, [(1000, 2000), (2300, 2500)], fake_cols(T, []))
+    co = S.Corpus.__new__(S.Corpus)
+    co.cfg = S.CFG
+    rows = np.arange(T)
+    b = co.step_blocks(st, rows)
+    assert b["step_hold"].sum() > 400 and b["step_train"].sum() > 500
+    assert not (b["step_hold"] & b["step_train"]).any()
+    emb = S.CFG["window"]["embargo_s"]
+    first = np.where(b["step_hold"])[0].min()
+    assert not b["step_train"][max(0, first - emb):first].any()
+    for (lo, hold, hi) in st.spans():
+        assert not b["step_train"][hold - emb:hi].any()
+    segs = S.Identifier(S.CFG, st).segments()
+    assert segs and not any((s["fit"] & b["step_hold"][s["lo"]:s["hi"]]).any() for s in segs)
 
 
 if __name__ == "__main__":

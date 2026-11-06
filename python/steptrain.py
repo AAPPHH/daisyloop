@@ -192,6 +192,14 @@ class Store:
             raise ValueError("no step test window: the phase channel has no values")
         return out
 
+    def spans(self):
+        w = self.cfg["window"]
+        out = []
+        for a, b in self.wins:
+            lo, hi = max(0, a - w["pre_s"]), min(self.T, b + w["post_s"])
+            out.append((lo, int(hi - w["holdout_frac"] * (hi - lo)), hi))
+        return out
+
     def labels(self):
         out = []
         for a, b in self.wins:
@@ -240,12 +248,15 @@ class Identifier:
         fill = lambda v: np.interp(np.arange(hi - lo), keep, v[sl][keep])
         ph = cols[self.cfg["phase_channel"]][sl]
         hold = np.zeros(hi - lo, bool)
+        tail = np.zeros(hi - lo, bool)
+        for _, h, e in self.st.spans():
+            tail[max(h - lo, 0):max(e - lo, 0)] = True
         hit = np.where(np.nan_to_num(ph, nan=-1.0) >= self.g["grey"]["hold"][who][0])[0]
         if len(hit):
             hold[hit[0]:] = True
         q = 0.96 * fill(cols["/intelcpu/0/power/0"]) + fill(cols["nvml/0/power"]) + fill(cols["d5next/pump/power"])
         return {"w": fill(cols["d5next/water/temp"]), "q": q, "f": fill(cols["d5next/fan/rpm"]), "p": fill(cols["d5next/pump/rpm"]), "t": (np.arange(lo, hi) - idx0) / 3600.0, "who": who,
-                "fit": ~hold & ok, "hold": hold & ok, "all": ok.copy(), "a": a, "b": b, "lo": lo, "hi": hi, "phase": ph, "duty": cols[f"d5next/{who}/duty"][sl]}
+                "fit": ~hold & ~tail & ok, "hold": hold & ok, "all": ok.copy(), "a": a, "b": b, "lo": lo, "hi": hi, "phase": ph, "duty": cols[f"d5next/{who}/duty"][sl]}
 
     def excitation(self, who):
         c = self.g[who]
@@ -268,9 +279,6 @@ class Identifier:
         thg, ssg, _ = gb.fit(segs, {"gamma": 0.0}, th)
         lr = lambda s0: float(n * math.log(max(s0, sse) / sse) / gc["se_inflate"] ** 2)
         out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "lr_gamma": lr(ssg), "theta_null": dict(zip(gb.NAMES, th0.tolist()))}
-        th_all, sse_all, n_all = gb.fit(segs, x0=th, key="all")
-        out["theta"] = dict(zip(gb.NAMES, th_all.tolist()))
-        out["fit_rmse_all_k"] = float(np.sqrt(sse_all / n_all))
         act = np.concatenate([s["f"][np.isfinite(s["phase"])] for s in fan_s] or [np.zeros(0)])
         ratio = max(float(np.nanmin(act)) / gb.full, 0.05) if len(act) else 1.0
         out["lowest_rpm_ratio"] = ratio
@@ -279,7 +287,7 @@ class Identifier:
             hs = [s for s in ss if s["hold"].any()]
             out[f"hold_{who}"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(nulth, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs))}
         out.update(fan=self.fan(out, th, fan_s), pump=self.pump(out, th, pump_s))
-        out["response"] = self.response(out["theta"])
+        out["response"] = self.response(out["theta_fit"])
         return out
 
     def fan(self, o, th, ss):
@@ -391,19 +399,25 @@ class Corpus:
                 y = np.full(T, np.nan)
                 y[: T - h] = s[h:] - s[: T - h]
                 self.Y[f"{k}_{h}"] = y[self.rows]
-        w = cfg["window"]
-        blocks = {n: np.zeros(len(self.rows), bool) for n in list(cfg["blocks"]) + ["step_train", "step_hold", "step_active"]}
+        blocks = {n: np.zeros(len(self.rows), bool) for n in cfg["blocks"]}
         for n, spans in cfg["blocks"].items():
             for a, z in spans:
                 blocks[n] |= (self.rows >= max(0, local_idx(st.meta, a))) & (self.rows < local_idx(st.meta, z))
-        for a, b in st.wins:
-            lo, hi = max(0, a - w["pre_s"]), min(T, b + w["post_s"])
-            hold = int(hi - w["holdout_frac"] * (hi - lo))
-            blocks["step_train"] |= (self.rows >= lo) & (self.rows < hold - w["embargo_s"])
-            blocks["step_hold"] |= (self.rows >= hold) & (self.rows < hi)
-            blocks["step_active"] |= (self.rows >= a) & (self.rows < b)
+        blocks.update(self.step_blocks(st, self.rows))
         self.blocks = blocks
         return self
+
+    def step_blocks(self, st, rows):
+        w = self.cfg["window"]
+        out = {n: np.zeros(len(rows), bool) for n in ("step_train", "step_hold", "step_active")}
+        train, zone = np.zeros(len(rows), bool), np.zeros(len(rows), bool)
+        for (a, b), (lo, hold, hi) in zip(st.wins, st.spans()):
+            train |= (rows >= lo) & (rows < hold - w["embargo_s"])
+            zone |= (rows >= hold - w["embargo_s"]) & (rows < hi)
+            out["step_hold"] |= (rows >= hold) & (rows < hi)
+            out["step_active"] |= (rows >= a) & (rows < b)
+        out["step_train"] = train & ~zone
+        return out
 
     def lhm_cols(self):
         b, tr = self.blocks["lhm_missing"], self.blocks["train"]
@@ -663,7 +677,7 @@ class StepTrainer:
             self.clear()
             raise
         report = {"gate": verdict, "identification": ident, "selection": {k: v for k, v in sel.items()}, "trees_select": {t: {"select_rmse": v["select_rmse"], "rounds": v["rounds"]} for t, v in trees.items()},
-                  "evaluation": ev, "clipped": self.clipped(bb, fitted[fam], targets), "family": fam, "windows": [[int(a), int(b)] for a, b in st.wins], "golden": gold, "seconds": round(time.time() - t0)}
+                  "evaluation": ev, "clipped": self.clipped(bb, fitted[fam], targets), "family": fam, "windows": [[int(a), int(b)] for a, b in st.wins], "hold_rows": int(co.blocks["step_hold"].sum()), "overlap_rows": int((co.blocks["step_hold"] & co.blocks["step_train"]).sum()), "golden": gold, "seconds": round(time.time() - t0)}
         with open(os.path.join(self.out, "report.json"), "w") as f:
             json.dump(report, f, indent=1, default=float)
         return report
