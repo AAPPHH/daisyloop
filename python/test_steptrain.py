@@ -129,6 +129,52 @@ def copy_steps(out, models, install):
 
 
 
+class FakeStore:
+    def __init__(self, T, wins, cols):
+        self.T, self.wins, self.cols = T, wins, cols
+
+    def col(self, c):
+        return self.cols[c]
+
+    def labels(self):
+        return ["fan"] * len(self.wins)
+
+
+def fake_cols(T, bad):
+    names = ["d5next/water/temp", "d5next/fan/rpm", "d5next/pump/rpm", "/intelcpu/0/power/0", "nvml/0/power", "d5next/pump/power", "d5next/fan/duty", "d5next/pump/duty", S.CFG["phase_channel"]]
+    cols = {c: np.full(T, v) for c, v in zip(names, [30.0, 700.0, 2500.0, 40.0, 30.0, 4.3, 50.0, np.nan, np.nan])}
+    cols["d5next/water/temp"] += np.arange(T) * 0.001
+    cols[S.CFG["phase_channel"]][400:1200] = 1.0 + np.arange(800) // 100
+    for a, b in bad:
+        for c in names[:6]:
+            cols[c][a:b] = np.nan
+    return cols
+
+
+def test_gap_rows_leave_the_fit_and_segments_start_after_the_gap():
+    T, gap = 1600, (200, 330)
+    cols = fake_cols(T, [gap, (700, 703)])
+    segs = S.Identifier(S.CFG, FakeStore(T, [(400, 1200)], cols)).segments()
+    assert len(segs) == 1 and segs[0]["lo"] == gap[1]
+    s = segs[0]
+    for k in "wqfp":
+        assert np.isfinite(s[k]).all()
+    assert s["f"].min() == 700.0 and s["p"].min() == 2500.0
+    bad = np.arange(s["lo"], s["hi"])
+    bad = (bad >= 700) & (bad < 703)
+    assert not (s["fit"] & bad).any() and not (s["hold"] & bad).any() and not (s["all"] & bad).any() and s["all"].sum() == len(bad) - 3
+    cols = fake_cols(T, [(500, 700)])
+    segs = S.Identifier(S.CFG, FakeStore(T, [(400, 1200)], cols)).segments()
+    assert [(s["lo"], s["hi"]) for s in segs] == [(100, 500), (700, 1600)]
+    assert all(np.isfinite(s["w"]).all() for s in segs)
+
+
+def test_restart_gap_before_the_fan_test_still_ships_with_the_right_effect():
+    if STORE:
+        a = run_case("fan_30.0_gap", 0, 1)
+        assert a["ship"] and 1 / 1.5 < a["ratio"] < 1.5
+
+
 if __name__ == "__main__":
     for f in (test_prep_fits_on_the_given_rows_and_exempts_free_columns, test_plant_bound_lifts_a_low_fan_duty_and_rpm_is_never_negative, test_grey_box_recovers_the_fan_exponent_and_rejects_none,
               test_response_term_matches_between_trainer_and_exporter, test_gate_ships_with_a_fan_response_refuses_without_and_repeats):

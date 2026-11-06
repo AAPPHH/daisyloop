@@ -13,7 +13,7 @@ SIM = {
         "fan_full_rpm": 1460.0, "fan_per_duty": 14.7, "spool_s": 4.5, "pump_cal": [[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]],
         "pump_power": [[0.0, 4.26], [19.8, 4.26], [100.0, 18.32]], "dead": [[2400.0, 33.0], [2570.0, 31.0], [4800.0, 11.0]],
         "sensor_k": 0.005, "quant": 0.01, "load_noise_w": 8.0, "rpm_noise": 2.0, "firmware_fan": 100.0, "firmware_pump": 19.8,
-        "bound_fan": [[35.0, 20.0], [38.0, 54.4], [42.0, 100.0]], "bound_pump": [[35.0, 15.0], [36.0, 100.0]], "start_water": 28.5,
+        "bound_fan": [[35.0, 20.0], [38.0, 54.4], [42.0, 100.0]], "bound_pump": [[35.0, 15.0], [36.0, 100.0]], "start_water": 30.5, "drift_shape": "lin",
     },
     "inject": {
         "base_span": ("2026-11-04 07:40", "2026-11-04 09:24"),
@@ -22,6 +22,7 @@ SIM = {
         "loads": {"/intelcpu/0/load/0": ["cpu", 15.0, 250.0], "nvml/0/util_gpu": ["gpu", 0.0, 320.0], "/gpu-nvidia/0/load/3": ["gpu", 0.0, 320.0]},
         "cpu_share": 0.55,
         "idle_w": 70.0,
+        "restart_gap": None,
         "protocols": {
             "runbook": [
                 ["cold", 900, 70],
@@ -40,6 +41,8 @@ SIM = {
 
 
 class Plant:
+    DRIFT = {"lin": lambda x: x, "quad": lambda x: x * x, "sat": lambda x: 1.0 - math.exp(-x / 0.25), "bump": lambda x: math.sin(math.pi * x)}
+
     def __init__(self, cfg=SIM["plant"], fan_response=True, drift_k=0.0):
         self.c = dict(cfg)
         self.drift_k = drift_k
@@ -80,7 +83,7 @@ class Plant:
             x = i - self.dead(prpm)
             j = int(math.floor(x))
             qd = qtot[0] if j < 0 else qtot[i] if j >= i else qtot[j] + (qtot[j + 1] - qtot[j]) * (x - j)
-            ta = c["ta"] + self.drift_k * i / n
+            ta = c["ta"] + self.drift_k * self.DRIFT[c["drift_shape"]](i / n)
             G = self.conductance(r, prpm)
             out[i] = t1
             fd_rec[i], pd_rec[i], frpm[i], prpm_rec[i], ppow_rec[i] = fd, pd, r, prpm, ppow
@@ -104,9 +107,12 @@ class Injector:
     def schedule(self, protocol):
         ic = self.sim["inject"]
         fan, pump, load, phase, active = [], [], [], [], []
+        self.fan_test = None
         for name, *rest in ic["protocols"][protocol]:
             if name in ("fan", "pump"):
                 steps = rest[0]
+                if name == "fan" and len(steps) > 1:
+                    self.fan_test = sum(len(v) for v in fan)
                 for i, (d, secs, w) in enumerate(steps):
                     secs = int(secs)
                     fan.append(np.full(secs, float(d) if name == "fan" else np.nan))
@@ -142,6 +148,7 @@ class Injector:
         pc = np.clip(load * ic["cpu_share"], 5.0, None)
         pg = np.clip(load * (1.0 - ic["cpu_share"]), 3.0, None)
         sim = Plant(self.sim["plant"], fan_response, drift_k).run(fan_cmd, pump_cmd, pc, pg, rng)
+        rg = ic["restart_gap"]
         seg = base.copy()
         w_base, c_base, g_base = seg[:, col["d5next/water/temp"]].copy(), seg[:, col["/intelcpu/0/power/0"]].copy(), seg[:, col["nvml/0/power"]].copy()
         w_fill = np.where(np.isfinite(w_base), w_base, np.nanmedian(w_base))
@@ -156,6 +163,8 @@ class Injector:
         for ch, v in (("d5next/water/temp", sim["water"]), ("d5next/fan/duty", sim["fan_duty"]), ("d5next/fan/rpm", sim["fan_rpm"]), ("d5next/pump/duty", sim["pump_duty"]),
                       ("d5next/pump/rpm", sim["pump_rpm"]), ("d5next/pump/power", sim["pump_pow"]), ("/intelcpu/0/power/0", pc), ("nvml/0/power", pg), ("/gpu-nvidia/0/power/0", pg)):
             seg[:, col[ch]] = v
+        if rg:
+            seg[self.fan_test - rg[1] - rg[0]:self.fan_test - rg[1], :] = np.nan
         gap = np.full((ic["gap_s"], len(keep)), np.nan)
         real = np.asarray(X[:, [ix[c["channel"]] for c in keep]], dtype=np.float32)
         step_cols = np.full((T0 + ic["gap_s"] + n, 1), np.nan, dtype=np.float32)

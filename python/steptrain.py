@@ -17,6 +17,7 @@ from stepsim import Injector, Plant, SIM
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS = os.path.join(HERE, "..", "models")
+ALT = {"m": 1.2, "a": 30.0, "c1": 8500.0, "k": 15.0, "gamma": 0.1, "ta": 22.0, "spool_s": 8.0}
 CFG = {
     "store_dir": FCFG["cache_dir"],
     "deployed": os.path.join(MODELS, "model_deploy.json"),
@@ -24,7 +25,7 @@ CFG = {
     "out_dir": os.path.join(MODELS, "steptrain"),
     "phase_channel": "daisyloop/step/phase",
     "windows": [],
-    "window": {"merge_s": 120, "pre_s": 300, "post_s": 900, "holdout_frac": 0.2, "embargo_s": 900, "ctx_pre_s": 300, "ctx_post_s": 300},
+    "window": {"merge_s": 120, "pre_s": 300, "post_s": 900, "holdout_frac": 0.2, "embargo_s": 900, "ctx_pre_s": 300, "ctx_post_s": 300, "gap_s": 10, "piece_min_s": 120},
     "blocks": FRESH["blocks"],
     "folds": {"fit": ["train", "oor_pump20", "fresh0", "step_train"], "select": ["val", "fresh1"], "final": ["test", "fresh2", "step_hold"]},
     "stride": MCFG["stride"],
@@ -61,7 +62,10 @@ CFG = {
     },
     "plant": SIM["plant"],
     "sim": SIM,
-    "dry": {"cases": {"fan": [True, 0.0], "nofan": [False, 0.0], "drift_nofan": [False, 5.5], "drift_fan": [True, 5.5], "alt_fan": [True, 0.0, {"m": 1.2, "a": 30.0, "c1": 8500.0, "k": 15.0, "gamma": 0.1, "ta": 22.0, "spool_s": 8.0}], "alt_nofan": [False, 3.0, {"a": 30.0, "c1": 8500.0, "k": 15.0, "ta": 22.0}]}, "seeds": 10, "protocol": "runbook", "factor": 1.5},
+    "dry": {"base": {"fan": {"fan": True, "drift": 0.0}, "nofan": {"fan": False, "drift": 0.0}, "drift_nofan": {"fan": False, "drift": 5.5}, "bump_nofan": {"fan": False, "drift": 5.5, "plant": {"drift_shape": "bump"}},
+                     "drift_fan": {"fan": True, "drift": 5.5}, "alt_fan": {"fan": True, "drift": 0.0, "plant": ALT}, "alt_nofan": {"fan": False, "drift": 3.0, "plant": ALT}},
+            "starts": [30.0, 30.5, 31.0], "restart_gap": [120, 30], "grid": {"fan": "all", "nofan": [30.5], "drift_nofan": [30.5], "bump_nofan": [30.5], "alt_fan": [30.5], "alt_nofan": [30.5]},
+            "seeds": 10, "protocol": "runbook", "factor": 1.5},
 }
 
 
@@ -208,29 +212,40 @@ class Identifier:
     def segments(self):
         st, w = self.st, self.cfg["window"]
         who = st.labels()
-        cols = {c: st.col(c) for c in ("d5next/water/temp", "/intelcpu/0/power/0", "nvml/0/power", "d5next/pump/power", "d5next/fan/rpm", "d5next/pump/rpm", "d5next/fan/duty", "d5next/pump/duty", self.cfg["phase_channel"])}
+        names = ("d5next/water/temp", "d5next/fan/rpm", "d5next/pump/rpm", "/intelcpu/0/power/0", "nvml/0/power", "d5next/pump/power")
+        cols = {c: st.col(c) for c in names + ("d5next/fan/duty", "d5next/pump/duty", self.cfg["phase_channel"])}
         idx0 = st.wins[0][0]
         segs = []
         for i, (a, b) in enumerate(st.wins):
             pre = min(w["ctx_pre_s"], a - (st.wins[i - 1][1] if i else 0))
             post = min(w["ctx_post_s"], st.wins[i + 1][0] - b) if i + 1 < len(st.wins) else w["post_s"]
             lo, hi = a - pre, min(st.T, b + post)
-            sl = slice(lo, hi)
-            wt = cols["d5next/water/temp"][sl]
-            ok = np.isfinite(wt) & np.isfinite(cols["d5next/fan/rpm"][sl]) & np.isfinite(cols["d5next/pump/rpm"][sl])
-            if ok.mean() < 0.9:
-                continue
-            ph = cols[self.cfg["phase_channel"]][sl]
-            hold = np.zeros(hi - lo, bool)
-            h0 = self.g["grey"]["hold"][who[i]][0]
-            hit = np.where(np.nan_to_num(ph, nan=-1.0) >= h0)[0]
-            if len(hit):
-                hold[hit[0]:] = True
-            q = 0.96 * np.nan_to_num(cols["/intelcpu/0/power/0"][sl]) + np.nan_to_num(cols["nvml/0/power"][sl]) + np.nan_to_num(cols["d5next/pump/power"][sl])
-            segs.append({"w": np.where(np.isfinite(wt), wt, np.nanmedian(wt)), "q": q, "f": np.nan_to_num(cols["d5next/fan/rpm"][sl]), "p": np.nan_to_num(cols["d5next/pump/rpm"][sl], nan=self.gb.pump_lo),
-                         "t": (np.arange(lo, hi) - idx0) / 3600.0, "who": who[i], "fit": ~hold, "hold": hold, "all": np.ones(hi - lo, bool), "a": a, "b": b, "lo": lo, "hi": hi, "phase": ph,
-                         "duty": cols[f"d5next/{who[i]}/duty"][sl]})
+            bad = ~np.all([np.isfinite(cols[c][lo:hi]) for c in names], axis=0)
+            gs, ge = Ops.runs(bad)
+            gap = np.zeros(hi - lo, bool)
+            for x, y in zip(gs, ge):
+                gap[x:y] |= y - x >= w["gap_s"]
+            ps, pe = Ops.runs(~gap)
+            for x, y in zip(ps, pe):
+                good = np.where(~bad[x:y])[0]
+                if len(good) < w["piece_min_s"] or len(good) < 0.9 * (y - x):
+                    continue
+                x, y = x + int(good[0]), x + int(good[-1]) + 1
+                segs.append(self.piece(cols, who[i], lo + x, lo + y, a, b, idx0, ~bad[x:y]))
         return segs
+
+    def piece(self, cols, who, lo, hi, a, b, idx0, ok):
+        sl = slice(lo, hi)
+        keep = np.where(ok)[0]
+        fill = lambda v: np.interp(np.arange(hi - lo), keep, v[sl][keep])
+        ph = cols[self.cfg["phase_channel"]][sl]
+        hold = np.zeros(hi - lo, bool)
+        hit = np.where(np.nan_to_num(ph, nan=-1.0) >= self.g["grey"]["hold"][who][0])[0]
+        if len(hit):
+            hold[hit[0]:] = True
+        q = 0.96 * fill(cols["/intelcpu/0/power/0"]) + fill(cols["nvml/0/power"]) + fill(cols["d5next/pump/power"])
+        return {"w": fill(cols["d5next/water/temp"]), "q": q, "f": fill(cols["d5next/fan/rpm"]), "p": fill(cols["d5next/pump/rpm"]), "t": (np.arange(lo, hi) - idx0) / 3600.0, "who": who,
+                "fit": ~hold & ok, "hold": hold & ok, "all": ok.copy(), "a": a, "b": b, "lo": lo, "hi": hi, "phase": ph, "duty": cols[f"d5next/{who}/duty"][sl]}
 
     def excitation(self, who):
         c = self.g[who]
@@ -665,11 +680,25 @@ def train_task(cfg):
     return StepTrainer(cfg).run()
 
 
+def dry_cases(d):
+    out = {}
+    for name, starts in d["grid"].items():
+        for st in d["starts"] if starts == "all" else starts:
+            for gap in (False, True):
+                spec = copy.deepcopy(d["base"][name])
+                spec["plant"] = dict(spec.get("plant", {}), start_water=st)
+                spec["inject"] = {"restart_gap": d["restart_gap"] if gap else None}
+                out[f"{name}_{st}" + ("_gap" if gap else "")] = spec
+    return out
+
+
 def dry_task(job):
     cfg, case, seed, root = job["cfg"], job["case"], job["seed"], job["root"]
-    fr, drift, *ov = cfg["dry"]["cases"][case]
+    spec = {**cfg["dry"]["base"], **dry_cases(cfg["dry"])}[case]
+    fr, drift = spec["fan"], spec["drift"]
     sim = copy.deepcopy(cfg["sim"])
-    sim["plant"].update(ov[0] if ov else {})
+    sim["plant"].update(spec.get("plant", {}))
+    sim["inject"].update(spec.get("inject", {}))
     dest = os.path.join(root, f"{case}-{seed}")
     info = Injector(cfg, sim).build(cfg["dry"]["protocol"], fr, os.path.join(dest, "store"), seed, drift)
     truth = Plant(sim["plant"], fr, drift)
@@ -705,7 +734,7 @@ class DryRun:
     def run(self, root=None, cases=None, seeds=None):
         d = self.cfg["dry"]
         root = root or tempfile.mkdtemp(prefix="steptrain-dry-")
-        jobs = [{"cfg": {k: v for k, v in self.cfg.items() if k != "truth"}, "case": c, "seed": s, "root": root} for c in (cases or d["cases"]) for s in range(seeds or d["seeds"])]
+        jobs = [{"cfg": {k: v for k, v in self.cfg.items() if k != "truth"}, "case": c, "seed": s, "root": root} for c in (cases or list(dry_cases(d))) for s in range(seeds or d["seeds"])]
         res = Runner(self.cfg).map(dry_task, jobs)
         with open(os.path.join(root, "dryrun.json"), "w") as f:
             json.dump(res, f, indent=1, default=float)
