@@ -58,14 +58,15 @@ struct Node {
 
 #[derive(Clone)]
 pub struct Engine {
-    nodes: Vec<Node>,
+    nodes: Arc<Vec<Node>>,
     state: Vec<State>,
     hist: Vec<VecDeque<f64>>,
-    cap: Vec<usize>,
+    cap: Arc<Vec<usize>>,
     vals: Vec<f64>,
-    pub raw_channels: Vec<String>,
-    pub outputs: Vec<String>,
-    out_idx: Vec<usize>,
+    scratch: Vec<f64>,
+    pub raw_channels: Arc<Vec<String>>,
+    pub outputs: Arc<Vec<String>>,
+    out_idx: Arc<Vec<usize>>,
 }
 
 fn pf(v: &Value, k: &str) -> f64 {
@@ -123,21 +124,24 @@ impl Engine {
         let out_idx = outputs.iter().map(|s| index[s]).collect();
         let n = nodes.len();
         Engine {
-            nodes,
+            nodes: Arc::new(nodes),
             state: vec![State { age: 1_000_000_000, ..State::default() }; n],
             hist: cap.iter().map(|&c| VecDeque::with_capacity(c)).collect(),
-            cap,
+            cap: Arc::new(cap),
             vals: vec![f64::NAN; n],
-            raw_channels,
-            outputs,
-            out_idx,
+            scratch: Vec::new(),
+            raw_channels: Arc::new(raw_channels),
+            outputs: Arc::new(outputs),
+            out_idx: Arc::new(out_idx),
         }
     }
 
     pub fn step(&mut self, raw: &[f64], k: i64) -> Vec<f64> {
-        for i in 0..self.nodes.len() {
-            let node = &self.nodes[i];
-            let a: Vec<f64> = node.ins.iter().map(|&j| self.vals[j]).collect();
+        let nodes = Arc::clone(&self.nodes);
+        let mut a = std::mem::take(&mut self.scratch);
+        for (i, node) in nodes.iter().enumerate() {
+            a.clear();
+            a.extend(node.ins.iter().map(|&j| self.vals[j]));
             let s = &mut self.state[i];
             let y = match &node.op {
                 Op::Raw { ffill, zero_nan } => {
@@ -237,6 +241,7 @@ impl Engine {
                 h.push_back(y);
             }
         }
+        self.scratch = a;
         self.out_idx.iter().map(|&i| self.vals[i]).collect()
     }
 }
@@ -251,10 +256,58 @@ struct Tree {
     v: Vec<f64>,
 }
 
+#[derive(Deserialize, Default)]
+struct Lin {
+    w: Vec<f64>,
+    mean: Vec<f64>,
+    std: Vec<f64>,
+}
+
 #[derive(Deserialize)]
 struct Target {
+    #[serde(default)]
     base: f64,
+    #[serde(default)]
     trees: Vec<Tree>,
+    #[serde(default)]
+    lin: Option<Lin>,
+}
+
+#[derive(Deserialize, Clone)]
+struct RawResponse {
+    feat: String,
+    pump_feat: String,
+    k: f64,
+    pump: [f64; 2],
+    dead: [f64; 2],
+    #[serde(default)]
+    gain: std::collections::BTreeMap<String, f64>,
+}
+
+struct Response {
+    feat: usize,
+    pump: usize,
+    k: f64,
+    rpm: [f64; 2],
+    dead: [f64; 2],
+    gain: std::collections::BTreeMap<String, f64>,
+}
+
+impl Response {
+    fn term(&self, target: &str, x: &[f64]) -> f64 {
+        let Some((series, h)) = target.split_once('_') else { return 0.0 };
+        let (Some(g), Ok(h)) = (self.gain.get(series), h.parse::<f64>()) else { return 0.0 };
+        let (r, f) = (x[self.pump], x[self.feat]);
+        let u = ((r - self.rpm[0]) / (self.rpm[1] - self.rpm[0])).clamp(0.0, 1.0);
+        let dead = self.dead[0] + (self.dead[1] - self.dead[0]) * u;
+        g * self.k * (h - dead).max(0.0) * f
+    }
+}
+
+#[derive(Deserialize)]
+struct Fallback {
+    features: Vec<String>,
+    targets: std::collections::BTreeMap<String, Target>,
 }
 
 #[derive(Deserialize, Clone, Copy, Default, Debug)]
@@ -269,18 +322,72 @@ struct RawModel {
     #[serde(default)]
     identified: Identified,
     targets: std::collections::BTreeMap<String, Target>,
+    #[serde(default)]
+    fallback: Option<Fallback>,
+    #[serde(default)]
+    clip: Option<f64>,
+    #[serde(default)]
+    free: Vec<String>,
+    #[serde(default)]
+    response: Option<RawResponse>,
 }
 
 pub struct Model {
     pub features: Vec<String>,
     pub identified: Identified,
     targets: Vec<(String, Target)>,
+    fallback: Option<(Vec<usize>, Vec<(String, Target)>)>,
+    clip: Option<f64>,
+    free: Vec<bool>,
+    response: Option<Response>,
 }
 
 impl Model {
     pub fn from_json(text: &str) -> Model {
         let m: RawModel = serde_json::from_str(text).unwrap();
-        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect() }
+        let at = |n: &str| m.features.iter().position(|x| x == n).unwrap();
+        let free = m.features.iter().map(|f| m.free.contains(f)).collect();
+        let response = m.response.as_ref().map(|r| Response { feat: at(&r.feat), pump: at(&r.pump_feat), k: r.k, rpm: r.pump, dead: r.dead, gain: r.gain.clone() });
+        let fallback = m.fallback.map(|f| {
+            let idx = f.features.iter().map(|n| m.features.iter().position(|x| x == n).unwrap_or(usize::MAX)).collect();
+            (idx, f.targets.into_iter().collect())
+        });
+        Model { features: m.features, identified: m.identified, targets: m.targets.into_iter().collect(), fallback, clip: m.clip, free, response }
+    }
+
+    pub fn is_linear(&self) -> bool {
+        self.targets.iter().all(|t| t.1.lin.is_some())
+    }
+
+    fn dot(&self, t: &Target, x: &[f64], pick: Option<&[usize]>) -> f64 {
+        let clip = self.clip;
+        let l = t.lin.as_ref().unwrap();
+        let mut s = t.base;
+        for (j, w) in l.w.iter().enumerate() {
+            let v = match pick {
+                Some(p) => if p[j] == usize::MAX { f64::NAN } else { x[p[j]] },
+                None => x[j],
+            };
+            let z = if v.is_finite() { (v - l.mean[j]) / l.std[j] } else { 0.0 };
+            let free = match pick {
+                Some(p) => p[j] != usize::MAX && self.free[p[j]],
+                None => self.free[j],
+            };
+            s += w * if free { z } else { clip.map_or(z, |c| z.clamp(-c, c)) };
+        }
+        s
+    }
+
+    fn term(&self, target: &str, x: &[f64]) -> f64 {
+        self.response.as_ref().map_or(0.0, |r| r.term(target, x))
+    }
+
+    fn predict_linear(&self, x: &[f64]) -> Vec<(String, f64)> {
+        let primary = self.targets.iter().all(|(_, t)| t.lin.as_ref().unwrap().w.iter().enumerate().all(|(j, w)| *w == 0.0 || x[j].is_finite()));
+        match (&self.fallback, primary) {
+            (Some((idx, ts)), false) => ts.iter().map(|(n, t)| (n.clone(), self.dot(t, x, Some(idx)) - self.term(n, x))).collect(),
+            _ => self.targets.iter().map(|(n, t)| (n.clone(), self.dot(t, x, None) - self.term(n, x))).collect(),
+        }
     }
 
     pub fn target_names(&self) -> Vec<&str> {
@@ -288,6 +395,9 @@ impl Model {
     }
 
     pub fn predict(&self, x: &[f64]) -> Vec<(String, f64)> {
+        if self.is_linear() {
+            return self.predict_linear(x);
+        }
         let xf: Vec<f32> = x.iter().map(|&v| v as f32).collect();
         self.targets
             .iter()

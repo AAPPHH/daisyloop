@@ -123,7 +123,24 @@ struct Rig {
     model_fail: Rc<Cell<bool>>,
     warm: Rc<Cell<i64>>,
     heat: Rc<Cell<f64>>,
+    extra: Vec<(&'static str, f64)>,
+    live: bool,
     dir: std::path::PathBuf,
+}
+
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        drop(TempDir(self.dir.clone()));
+    }
 }
 
 fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
@@ -131,6 +148,7 @@ fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
     let dir = std::env::temp_dir().join(format!("daisyloop-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
     let mut cfg = Config { writes_enabled: true, data_dir: dir, ..Config::default() };
     cfg.control.decision_secs = 30.0;
+    cfg.control.plan_secs = 30.0;
     tweak(&mut cfg);
     cfg
 }
@@ -157,16 +175,19 @@ impl Rig {
         let heat = Rc::new(Cell::new(heat));
         let model = Fake { ident, warm: warm.clone(), heat: heat.clone(), fail: model_fail.clone() };
         let c = Control::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Ok(Box::new(model)));
-        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, dir: cfg.state_dir() }
+        Rig { sim, c, now: 0, water: 30.0, cpu: 50.0, gpu: Some(40.0), model_fail, warm, heat, extra: vec![], live: false, dir: cfg.state_dir() }
     }
     fn rows(&self) -> Vec<Row> {
         let r = self.sim.report();
         let mut rows = vec![
-            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water),
+            Row::new("d5next", "d5next/water/temp", "water", "temperature", "degC", self.water + if self.live { (self.now / 1000 % 2) as f64 * 0.05 } else { 0.0 }),
             Row::new("lhm", "/intelcpu/0/temperature/0", "cpu", "temperature", "degC", self.cpu),
         ];
         if let Some(g) = self.gpu {
             rows.push(Row::new("nvml", "nvml/0/temp", "gpu", "temperature", "degC", g));
+        }
+        for (ch, v) in &self.extra {
+            rows.push(Row::new("test", *ch, *ch, "power", "W", *v));
         }
         let (frozen, force) = (self.sim.0.borrow().freeze_rpm, self.sim.0.borrow().force);
         for (n, (s, curve)) in [(Spec::FAN, ChannelConfig::defaults(ControlKind::Fan).calibration()), (Spec::PUMP, ChannelConfig::defaults(ControlKind::Pump).calibration())].into_iter().enumerate() {
@@ -348,6 +369,7 @@ fn active_is_refused_with_a_reason() {
 fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
     let initial = Sim::new().report();
     let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.live = true;
     rig.run(5);
     rig.active("d5.fan");
     rig.run(400);
@@ -368,7 +390,7 @@ fn active_writes_floored_duty_once_per_interval_and_only_for_its_channel() {
 
 #[test]
 fn target_moves_down_slowly_and_up_fast() {
-    let mut rig = Rig::new((true, true), 20.0, |_| {});
+    let mut rig = Rig::new((true, true), 20.0, |c| c.control.fan.down_step_duty = Some(0.0));
     rig.run(5);
     rig.active("d5.fan");
     rig.run(35);
@@ -378,6 +400,19 @@ fn target_moves_down_slowly_and_up_fast() {
     let (low, low_cmd) = (rig.ctl("d5.fan").target_rpm.unwrap(), rig.ctl("d5.fan").commanded_duty.unwrap() * 14.7);
     assert!(high - low > 150.0, "published target is the plan, not the rate limited step: {high} {low}");
     assert!(high_cmd - low_cmd <= 150.0 + 1e-6 && low_cmd < high_cmd, "{high_cmd} {low_cmd}");
+}
+
+#[test]
+fn the_default_down_step_is_one_coarse_step_of_35_duty_points_and_zero_gives_the_slow_ramp_the_tests_above_rely_on() {
+    let mut rig = Rig::new((true, true), 20.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(35);
+    let high = rig.ctl("d5.fan").commanded_duty.unwrap();
+    rig.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(5000)), heat: Rc::new(Cell::new(0.0)), fail: rig.model_fail.clone() }));
+    rig.run(31);
+    let low = rig.ctl("d5.fan").commanded_duty.unwrap();
+    assert!((high - low - 35.0).abs() < 0.5, "{high} {low}");
 }
 
 #[test]
@@ -486,7 +521,7 @@ fn only_water_above_the_takeover_releases_and_the_top_limit_is_a_display_alarm()
 
 #[test]
 fn rpm_that_does_not_follow_the_command_is_a_fault() {
-    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    let mut rig = Rig::new((true, true), 3.0, |c| c.control.fan.down_step_duty = Some(0.0));
     rig.run(5);
     rig.active("d5.fan");
     rig.run(35);

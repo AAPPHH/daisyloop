@@ -16,3 +16,4 @@ __pycache__/
 /target-ui
 /target-lake
 /python/.venv
+/models/lx44*.json

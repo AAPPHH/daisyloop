@@ -4,9 +4,9 @@ import os
 import pickle
 import numpy as np
 from experiments import Stage2
-from features import BatchEngine, Spec, StreamEngine, CONFIG as FCFG
-from models import CONFIG, Dataset, local_idx
-from rawstore import RawStore
+from features import BatchEngine, PHYS, PhysSpec, Spec, StreamEngine, CONFIG as FCFG
+from models import CONFIG, FRESH, LIN_TARGETS, Dataset, local_idx
+from rawstore import CONFIG as RawCFG, RawStore
 
 CFG = {
     "tag": "x44aug",
@@ -25,6 +25,7 @@ class Exporter:
         self.cfg = cfg
         self.D = Dataset(CONFIG).load()
         self.rich = Spec.load(FCFG["spec_path"])
+        from experiments import Stage2
         pruned, _ = Stage2().pruned(cfg["feature_count"])
         self.feats = pruned + [n for n in CONFIG["forced"] if n not in pruned]
         self.stage = {r["tag"]: r["res"] for r in pickle.load(open(os.path.join(CONFIG["out_dir"], cfg["stage"]), "rb"))}[cfg["tag"]]
@@ -136,5 +137,97 @@ class Exporter:
                 "booster_max_abs_diff": worst, "golden_ticks": len(g["ticks"])}
 
 
+LCFG = {
+    "pickles": [os.path.join(os.path.dirname(FRESH["cache"]), f) for f in ("lin_v3.pkl", "lin_v5.pkl")],
+    "tag": "svr+|pint@new",
+    "tag_fallback": "svr+|pint~nolhm@new",
+    "spec_out": os.path.join(CONFIG["out_dir"], "feature_spec_linear.json"),
+    "model_out": os.path.join(CONFIG["out_dir"], "model_linear.json"),
+    "golden_out": os.path.join(CONFIG["out_dir"], "golden_linear.json"),
+    "golden_span": CFG["golden_span"],
+    "golden_every": 10,
+}
+
+
+class LinearExporter:
+    def __init__(self, cfg=LCFG):
+        self.cfg = cfg
+        res = {r["tag"]: r["res"] for f in cfg["pickles"] for r in pickle.load(open(f, "rb"))}
+        self.full, self.fb = res[cfg["tag"]], res[cfg["tag_fallback"]]
+
+    @staticmethod
+    def block(res, targets):
+        return {tg: {"base": float(res["targets"][tg]["b"]), "lin": {"w": res["targets"][tg]["w"].tolist(), "mean": res["targets"][tg]["mean"].tolist(), "std": res["targets"][tg]["std"].tolist()}} for tg in targets}
+
+    def spec(self):
+        ps = PhysSpec(Spec.load(FCFG["spec_path"]), dict(PHYS, pint=True))
+        sub = ps.build().subset(set(self.full["feats"]) | set(self.fb["feats"]))
+        sub.meta["deployed_outputs"] = self.full["feats"]
+        sub.save(self.cfg["spec_out"])
+        return sub
+
+    def model(self):
+        out = {"kind": "linear", "features": self.full["feats"], "identified": {"fan": False, "pump": False}, "clip": self.full["clip"], "targets": self.block(self.full, LIN_TARGETS),
+               "fallback": {"features": self.fb["feats"], "targets": self.block(self.fb, LIN_TARGETS)}}
+        with open(self.cfg["model_out"], "w") as f:
+            json.dump(out, f, separators=(",", ":"))
+        return out
+
+    @staticmethod
+    def term(model, x, tg):
+        r = model.get("response")
+        series, h = tg.split("_")
+        if not r or series not in r["gain"]:
+            return 0.0
+        f = model["features"]
+        u = min(max((x[f.index(r["pump_feat"])] - r["pump"][0]) / (r["pump"][1] - r["pump"][0]), 0.0), 1.0)
+        dead = r["dead"][0] + (r["dead"][1] - r["dead"][0]) * u
+        return r["gain"][series] * r["k"] * max(float(h) - dead, 0.0) * x[f.index(r["feat"])]
+
+    @staticmethod
+    def predict(model, x):
+        x = np.asarray(x, dtype=np.float64)
+        free = np.array([n in model.get("free", []) for n in model["features"]])
+        def dot(t, v, clip, fr):
+            z = np.where(np.isfinite(v), (v - np.array(t["lin"]["mean"])) / np.array(t["lin"]["std"]), 0.0)
+            return float(t["base"] + np.array(t["lin"]["w"]) @ np.where(fr, z, np.clip(z, -clip, clip)))
+        primary = all(w == 0.0 or np.isfinite(x[j]) for t in model["targets"].values() for j, w in enumerate(t["lin"]["w"]))
+        if primary or not model.get("fallback"):
+            return {tg: dot(t, x, model["clip"], free) - LinearExporter.term(model, x, tg) for tg, t in model["targets"].items()}
+        idx = [model["features"].index(n) if n in model["features"] else -1 for n in model["fallback"]["features"]]
+        v = np.array([x[i] if i >= 0 else np.nan for i in idx])
+        return {tg: dot(t, v, model["clip"], free[idx]) - LinearExporter.term(model, x, tg) for tg, t in model["fallback"]["targets"].items()}
+
+    def golden(self, spec, model):
+        meta, X = RawStore(self.cfg.get("store", RawCFG)).load()
+        a, b = (local_idx(meta, s) for s in self.cfg["golden_span"])
+        chans = spec.raw_channels()
+        ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
+        sub = np.asarray(X[a:b])
+        cols = [ix[c] for c in chans]
+        rows = [[None if math.isnan(float(sub[t, c])) else float(str(np.float32(sub[t, c]))) for c in cols] for t in range(sub.shape[0])]
+        eng = StreamEngine(spec)
+        k0 = meta["k0"] + a
+        ticks, feats, preds, fb = [], [], [], 0
+        for t, row in enumerate(rows):
+            v = eng.step({c: (math.nan if x is None else x) for c, x in zip(chans, row)}, k0 + t)
+            if t % self.cfg["golden_every"] == 0:
+                x = [v[n] for n in model["features"]]
+                ticks.append(t)
+                feats.append([None if math.isnan(y) else y for y in x])
+                preds.append({k: (v if math.isfinite(v) else None) for k, v in self.predict(model, x).items()})
+                fb += not all(math.isfinite(y) for y in x)
+        g = {"channels": chans, "k0": k0, "rows": rows, "ticks": ticks, "features": model["features"], "expected_features": feats, "expected_predictions": preds}
+        with open(self.cfg["golden_out"], "w") as f:
+            json.dump(g, f, separators=(",", ":"))
+        return {"ticks": len(ticks), "fallback_ticks": fb}
+
+    def run(self):
+        spec = self.spec()
+        model = self.model()
+        return {"nodes": len(spec.nodes), "raw": len(spec.raw_channels()), **self.golden(spec, model)}
+
+
 if __name__ == "__main__":
-    print(Exporter().run())
+    import sys
+    print(LinearExporter().run() if len(sys.argv) > 1 and sys.argv[1] == "linear" else Exporter().run())

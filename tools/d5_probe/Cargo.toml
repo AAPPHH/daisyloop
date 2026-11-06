@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 hidapi = "2"
+toml = "0.8"
 
 [workspace]

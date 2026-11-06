@@ -179,3 +179,24 @@ class Lake:
 
     def execute(self, sql, args=None):
         return self.con.execute(sql, args or [])
+
+
+class CopyLake(Lake):
+    def location(self, table):
+        names = sorted(glob.glob(os.path.join(self.dir, "warehouse", self.cfg["namespace"], table, "metadata", "*.metadata.json")))
+        return names[-1]
+
+    def refresh(self, t0=None, t1=None):
+        pass
+        for table, spec in self.cfg["tables"].items():
+            if table != "telemetry":
+                continue
+            snaps = self.snapshots(self.location(table))
+            committed = {s.get("summary", {}).get(self.cfg["source_key"]) for s in snaps}
+            batches = [b for stem, bs in self.load_hot(table, t0, t1).items() if stem not in committed for b in bs]
+            hot = pa.Table.from_batches(batches) if batches else spec["empty"].empty_table()
+            self.con.register(f"hot_{table}", hot)
+            cols = ", ".join(f"{n}::{t} as {n}" for n, t in spec["columns"].items())
+            files = os.path.join(self.dir, "warehouse", self.cfg["namespace"], table, "data", "*.parquet").replace("\\", "/")
+            self.con.execute(f"create or replace view {table} as select {', '.join(spec['columns'])} from read_parquet('{files}') union all select {cols} from hot_{table}")
+        return self

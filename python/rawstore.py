@@ -16,9 +16,9 @@ class RawStore:
         self.meta_path = os.path.join(self.dir, "meta.json")
         self.data_path = os.path.join(self.dir, "raw.npy")
 
-    def build(self, force=False):
+    def build(self, force=False, lake=None):
         os.makedirs(self.dir, exist_ok=True)
-        loader = Loader()
+        loader = Loader(lake=lake)
         table = loader.cfg["table"]
         con = loader.con
         rows = con.execute(f"select count(*) from {table}").fetchone()[0]

@@ -119,6 +119,7 @@ fn z6_water_limit_releases_a_stopped_fan_to_the_firmware_pid() {
 #[test]
 fn z7_commanded_zero_with_a_stopped_fan_is_no_stall_and_a_nonzero_command_without_rpm_is() {
     let mut rig = stopped_fan(|_| {});
+    rig.live = true;
     rig.run(200);
     assert!(!rig.alarm(AlarmKind::FanStopped) && rig.ctl("d5.fan").fallback.is_none() && rig.ctl("d5.fan").actual_rpm == Some(0.0));
     rig.sim.0.borrow_mut().force = [Some(300.0), None];
@@ -300,6 +301,7 @@ fn z15_start_duty_zero_needs_a_fan_floor_and_the_deadband_stays_within_it() {
 #[test]
 fn z16_a_slow_tach_at_low_duty_is_not_following_and_a_spinning_fan_at_command_zero_is_a_note() {
     let mut run = Rig::new((true, true), 3.0, |_| {});
+    run.live = true;
     run.water = 34.0;
     run.run(5);
     run.active("d5.fan");
@@ -315,6 +317,7 @@ fn z16_a_slow_tach_at_low_duty_is_not_following_and_a_spinning_fan_at_command_ze
     assert_eq!(run.sim.mode(Spec::FAN), 1);
     assert!(run.ctl("d5.fan").fallback.unwrap().contains("folgt"));
     let mut z = stopped_fan(|_| {});
+    z.live = true;
     z.sim.0.borrow_mut().force = [Some(300.0), None];
     z.run(150);
     assert!(z.ctl("d5.fan").note.unwrap().contains("dreht") && z.ctl("d5.fan").fallback.is_none() && z.sim.mode(Spec::FAN) == 0);
@@ -348,6 +351,8 @@ fn z17_implausible_water_is_missing_and_a_frozen_value_with_changing_load_alarms
     let mut frozen = Rig::new((false, false), 3.0, |_| {});
     let mut steady = Rig::new((false, false), 3.0, |_| {});
     let mut drifting = Rig::new((false, false), 3.0, |_| {});
+    let mut flat = Rig::new((false, false), 3.0, |_| {});
+    steady.live = true;
     for t in 0..700 {
         frozen.cpu = if t / 10 % 2 == 0 { 40.0 } else { 70.0 };
         drifting.cpu = frozen.cpu;
@@ -355,7 +360,34 @@ fn z17_implausible_water_is_missing_and_a_frozen_value_with_changing_load_alarms
         frozen.tick();
         steady.tick();
         drifting.tick();
+        flat.tick();
     }
+    assert!(flat.alarm(AlarmKind::WaterFrozen));
     assert!(frozen.alarm(AlarmKind::WaterFrozen) && !steady.alarm(AlarmKind::WaterFrozen) && !drifting.alarm(AlarmKind::WaterFrozen));
     assert!(frozen.sim.sets() == 0);
+}
+
+#[test]
+fn a_step_test_abort_whose_release_fails_leaves_duty_until_the_abort_command_or_a_writes_on_start() {
+    let mut rig = Rig::new((false, false), 3.0, |c| c.control.step_test.fan = vec![[0.0, 120.0]]);
+    rig.water = 31.0;
+    rig.run(40);
+    rig.c.start_test("d5.fan", true, rig.now).unwrap();
+    rig.run(30);
+    assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.preset(Spec::FAN)), (0, 0));
+    rig.sim.0.borrow_mut().fail_sets = 2;
+    rig.c.shutdown(rig.now);
+    let sim = rig.sim.clone();
+    let sets = sim.sets();
+    assert_eq!((sim.mode(Spec::FAN), sim.preset(Spec::FAN), rig.marker()), (0, 0, vec![ControlKind::Fan]));
+    let mut off = Rig::with_marker(sim.clone(), &[ControlKind::Fan], (false, false), 3.0, |c| c.writes_enabled = false);
+    off.water = 44.0;
+    off.run(3600);
+    assert_eq!((sim.mode(Spec::FAN), sim.sets()), (0, sets));
+    let a = off.status().alarms.into_iter().find(|a| a.kind == AlarmKind::Foreign).unwrap();
+    assert!(a.message.contains("d5_abort") && a.message.contains("0 %"), "{}", a.message);
+    let mut on = Rig::with_marker(sim.clone(), &[ControlKind::Fan], (false, false), 3.0, |_| {});
+    on.water = 44.0;
+    on.run(10);
+    assert_eq!((sim.mode(Spec::FAN), on.marker()), (1, vec![]));
 }
