@@ -777,24 +777,37 @@ fn r27_frozen_table_stuck_value_load_detection_and_peak_true_water() {
     eprintln!("{table}");
 }
 
-#[test]
-fn r31_a_stuck_water_value_flickering_by_one_lsb_is_caught_and_the_true_water_stays_below_46_c_at_25_c_ambient_and_50_c_at_30_c() {
-    let mut bad = vec![];
+fn flicker_grid() -> Vec<(String, f64, Frozen)> {
+    let mut cases = vec![];
     for (ambient, limit) in [(25.0, 46.0), (30.0, 50.0)] {
         let spec = PlantSpec { ambient, ..PlantSpec::MEASURED };
         for stuck in [37.5, 39.0] {
             for power in (100..=400).step_by(25).map(f64::from) {
                 for dither in [1, 60] {
-                    let f = frozen_run(spec, stuck, power, true, dither);
-                    let case = format!("ambient {ambient} stuck {stuck} load {power} dither {dither} {:?} peak {:.1}", f.detect, f.peak);
-                    if !(f.detect.is_some() && f.peak <= limit && !f.handed_over && f.fan == Some(100.0) && f.pump == Some(100.0)) {
-                        bad.push(case);
-                    }
+                    cases.push((format!("ambient {ambient} stuck {stuck} load {power} dither {dither}"), limit, frozen_run(spec, stuck, power, true, dither)));
                 }
             }
         }
     }
+    cases
+}
+
+#[test]
+fn r31_a_stuck_water_value_flickering_by_one_lsb_is_caught_and_the_true_water_stays_below_46_c_at_25_c_ambient_and_50_c_at_30_c() {
+    let bad: Vec<String> = flicker_grid().into_iter().filter(|(_, limit, f)| !(f.detect.is_some() && f.peak <= *limit && !f.handed_over && f.fan == Some(100.0) && f.pump == Some(100.0))).map(|(case, _, f)| format!("{case} {:?} peak {:.1}", f.detect, f.peak)).collect();
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[test]
+#[ignore]
+fn r46_flicker_table_detection_and_peak_true_water() {
+    let mut table = String::from("case | detected after s | peak true water C
+");
+    for (case, _, f) in flicker_grid() {
+        table.push_str(&format!("{case} | {} | {:.1}
+", f.detect.map_or("none".into(), |t| t.to_string()), f.peak));
+    }
+    eprintln!("{table}");
 }
 
 #[test]
