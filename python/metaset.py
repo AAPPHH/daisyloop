@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from features import FeatureFrame, PHYS, PhysSpec, Spec, CONFIG as FCFG
 from models import LIN_CLIP, LinearFit, Prep
-from rawstore import RawStore
+from metastore import HistoryStore
 
 OUT = os.path.join(os.environ.get("LOCALAPPDATA", "."), "daisyloop-ml", "metaset")
 CONFIG = {
@@ -73,7 +73,7 @@ class Metaset:
     def load(self, meta=None, X=None):
         cfg = self.cfg
         if meta is None:
-            meta, X = (self.store or RawStore()).load()
+            meta, X = (self.store or HistoryStore()).load()
         self.meta, self.X = meta, X
         self.k0, self.T = meta["k0"], X.shape[0]
         self.ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}

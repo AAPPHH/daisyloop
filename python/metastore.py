@@ -26,14 +26,14 @@ CONFIG = {
     "block_s": 900,
     "parquet": {"level": 22, "row_group": 2_000_000},
     "tol": {
-        "rel_q": 0.5, "rel_sigma": 0.25, "q_pct": 10.0, "rel_float": 1e-6, "other_range_frac": 1e-3, "min_samples": 50, "sample_chunks": 8,
+        "rel_q": 0.5, "rel_sigma": 0.1, "q_pct": 10.0, "rel_float": 1e-6, "other_range_frac": 1e-3, "min_samples": 50, "sample_chunks": 8, "door_frac": 0.85,
         "floor": {"temperature": 0.01, "rpm": 1.0, "duty": 0.1, "power": 0.01, "voltage": 0.001, "current": 0.001, "load": 0.1, "clock": 1.0, "flow": 0.01, "other": 0.0},
-        "preset": {},
+        "preset": {"d5next/water/temp": 0.005},
     },
     "signals": {"water": "d5next/water/temp", "fan": "d5next/fan/rpm", "pump": "d5next/pump/rpm", "cpu_w": "/intelcpu/0/power/0", "gpu_w": "nvml/0/power", "phase": "daisyloop/step/phase"},
     "score": {"lag_s": 30, "fan": 1460.0 * 0.05, "pump": 4800.0 * 0.05, "p_total": 40.0, "slope_lag_s": 120, "slope": 0.3, "transient_frac": 0.0, "step_pre_s": 300, "step_post_s": 900, "step_gap_s": 120},
     "cells": [("water", [30.0, 32.0, 34.0, 36.0, 38.0]), ("fan", [100.0, 650.0, 1000.0, 1400.0]), ("pump", [3500.0]), ("p_total", [50.0, 100.0, 200.0, 300.0])],
-    "thin": {"max_mult": 64.0, "step": 2.0, "gain": 0.4, "rare_blocks": 6, "tries": 12, "hold_blocks": 2, "escalate": True},
+    "thin": {"max_mult": 64.0, "step": 2.0, "gain": 0.4, "gain_min": 0.01, "rare_blocks": 6, "tries": 12, "hold_blocks": 2, "escalate": True},
 }
 POINT_COLS = ["c", "t", "v"]
 GAP_COLS = ["c", "s", "n"]
@@ -233,7 +233,7 @@ class HistoryStore:
         return {c["channel"]: c["id"] for c in self.chan}
 
     def tol(self):
-        return np.array([c["tol"] for c in self.chan] + [1.0] * (self.door.n - len(self.chan)))
+        return self.cfg["tol"]["door_frac"] * np.array([c["tol"] for c in self.chan] + [1.0] * (self.door.n - len(self.chan)))
 
     def files(self, kind):
         if not os.path.isdir(self.dir):
@@ -581,7 +581,7 @@ class Thinner:
         st = self.st
         B, D, cfg = st.cfg["block_s"], st.cfg["day_s"], self.cfg
         prev, nxt = self.edges()
-        tol = np.array([c["tol"] for c in st.chan])
+        tol = st.tol()
         by_day = {}
         for blk in sorted(picks):
             by_day.setdefault(blk * B // D, []).append(blk)
@@ -609,7 +609,7 @@ class Thinner:
         bs = BlockScore(st).compute()
         B = st.cfg["block_s"]
         hold = (st.watermark + 1) // B - cfg["hold_blocks"]
-        stage, total, escalated = 0, 0, False
+        stage, total, escalated, gain = 0, 0, False, cfg["gain"]
         ids = np.arange(len(bs["score"])) + bs["b0"]
         for _ in range(cfg["tries"]):
             size = st.size()
@@ -623,10 +623,11 @@ class Thinner:
             m = np.array([self.mult.get(int(b), 1.0) for b in ids])
             cand = np.flatnonzero(~prot & (m < cfg["max_mult"]) & (ids < hold))
             cand = cand[np.lexsort((ids[cand], -bs["cell_n"][cand], bs["score"][cand]))]
-            need, picks, got = size - target, [], 0.0
+            need, picks, got, raw = size - target, [], 0.0, 0.0
             for i in cand:
                 picks.append(int(ids[i]))
-                got += dens.get(int(ids[i]), 0) * bpp * cfg["gain"]
+                raw += dens.get(int(ids[i]), 0) * bpp
+                got = raw * gain
                 if got >= need * 1.1:
                     break
             if not picks:
@@ -636,6 +637,8 @@ class Thinner:
                 raise StoreError(f"store is {size} bytes, budget {self.budget}: no block left to thin without touching step rows")
             total += len(picks)
             self.apply(picks)
+            if raw > 0:
+                gain = min(cfg["gain"], max(cfg["gain_min"], (size - st.size()) / raw))
         size = st.size()
         if size > self.budget:
             raise StoreError(f"store is {size} bytes after thinning, budget {self.budget}")
