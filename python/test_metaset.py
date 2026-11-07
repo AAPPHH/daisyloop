@@ -91,6 +91,23 @@ def test_budget_raises_selectivity(tmp_path):
     assert tight.counts["expected"] <= len(full.idx) * 0.8 + 1
 
 
+def test_budget_level_stores_ks_and_warns(tmp_path, caplog):
+    ms = make()
+    ms.cfg["parquet"] = dict(ms.cfg["parquet"], probe_rows=500, row_group=2000)
+    path = str(tmp_path / "m.parquet")
+    ms.cfg["out_path"] = path
+    assert "ks" not in ms.build().counts
+    ms.cfg["budget_bytes"] = 150_000
+    ms.cfg["eval"]["ks_max"] = 0.0
+    with caplog.at_level("WARNING"):
+        sel, info = ms.run(path=path)
+    assert sel.level < 1.0
+    meta = json.loads(pq.ParquetFile(path).schema_arrow.metadata[b"metaset"])
+    assert meta["level"] == sel.level and set(meta["counts"]["ks"]) == set(ms.cfg["eval"]["ks"])
+    assert all(0.0 <= v <= 1.0 for v in meta["counts"]["ks"].values())
+    assert len([r for r in caplog.records if "weighted KS" in r.getMessage()]) == 1
+
+
 def test_run_fits_byte_budget_and_zstd(tmp_path):
     ms = make()
     ms.cfg["parquet"] = dict(ms.cfg["parquet"], probe_rows=500, row_group=2000)

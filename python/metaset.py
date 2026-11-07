@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 import time
@@ -38,6 +39,12 @@ CONFIG = {
     "eval": {"holdout": 0.2, "alpha": 1000.0, "seeds": 5, "folds": 5, "min_groups": 5, "min_cell_rows": 30, "ks": ["water", "fan_rpm", "pump_rpm", "p_total"], "ks_max": 0.05, "cover": 0.95, "rmse_tol": 0.05, "targets": ["water_30", "water_120"]},
 }
 KEEP_STATS = ["t", "group", "cell", "stratum"]
+
+
+CRITERIA = {
+    "c4": "On par with full data (RMSE ratios 0.979 to 1.034 over cuts 0.4, 0.6, 0.8) and with a random subsample of the same size; it does not reliably beat random (cut 0.6: 19 of 20 random seeds better at water_120; cut 0.8 with 20 seeds: 4 of 20 better). Hyperparameters were chosen on the 0.8 holdout. The value of the metaset is size (9.5 % of rows, 19 % of the full table bytes) with coverage of every cell, step rows and weights, not better accuracy. The pass_beats_random flag is a diagnostic, not a claim.",
+    "caveats": "The score uses the 120 s target residual for choosing the representative; neighbouring groups share EWMA context; some strata are dominated by one step group.",
+}
 
 
 class Hash:
@@ -246,6 +253,13 @@ class Metaset:
         sel = np.flatnonzero(keep)
         _, cnt = np.unique(self.bins(rows)[1], return_counts=True)
         counts = {"eligible": int(len(rows)), "reps": int(len(idx)), "kept": int(len(sel)), "fixed": n_fixed, "expected": float(p.sum()), "cells": int(len(cnt))}
+        if level < 1.0:
+            w = (n_dup[sel] / p[sel]).astype(np.float64)
+            counts["ks"] = {}
+            for n in cfg["eval"]["ks"]:
+                x, r = self.feat(n)[idx[sel]].astype(np.float64), self.feat(n)[rows].astype(np.float64)
+                m = np.isfinite(x)
+                counts["ks"][n] = Evaluator.ks(x[m], w[m], r[np.isfinite(r)])
         return Selection(idx[sel], (n_dup[sel] / p[sel]).astype(np.float32), n_dup[sel].astype(np.int32), sc_r[sel].astype(np.float32), tr_r[sel], st_r[sel], code[sel], self.strata(B[sel], self.t[idx[sel]] // cfg["block_s"]), B[sel], level, cap, counts)
 
     def assemble(self, sel=None):
@@ -304,6 +318,9 @@ class Metaset:
             size = self.write(self.assemble(sel), path)
             info.update({"size": size, "level": sel.level, "counts": sel.counts})
             if size <= cfg["budget_bytes"]:
+                bad = {k: round(v, 4) for k, v in sel.counts.get("ks", {}).items() if v > cfg["eval"]["ks_max"]}
+                if bad:
+                    logging.warning("metaset budget level %.4f: weighted KS above %s against all eligible rows: %s", sel.level, cfg["eval"]["ks_max"], bad)
                 return sel, info
             rows_max = int(rows_max * pc["shrink"])
         raise RuntimeError(f"cannot fit {cfg['budget_bytes']} bytes, last size {size}")
@@ -402,6 +419,9 @@ class Evaluator:
         sel, info = ms.run()
         rep = {"build": info, "size_ok": info["size"] <= cfg["budget_bytes"], "full_rows": int(ms.T), "kept_over_full": len(sel.idx) / ms.T,
                "kept_over_eligible": len(sel.idx) / info["counts"]["eligible"], "weight_sum": float(sel.weight.sum(dtype=np.float64))}
+        rep["criteria"] = CRITERIA
+        if "ks" in info["counts"]:
+            rep["budget_level"], rep["budget_ks"] = info["level"], info["counts"]["ks"]
         rep["structure"] = self.structure(cfg["out_path"], sel.idx)
         t_cut = ms.k0 + int((1 - self.cfg["holdout"]) * (ms.T - 1))
         rep["holdout"] = self.holdout(t_cut)
