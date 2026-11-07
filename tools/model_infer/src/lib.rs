@@ -408,9 +408,21 @@ impl Model {
         }
     }
 
+    pub fn has_fallback(&self) -> bool {
+        self.fallback.is_some()
+    }
+
     pub fn weighted_features(&self, prefix: &str) -> Vec<usize> {
+        self.weighted_in(prefix, true)
+    }
+
+    pub fn fallback_features(&self, prefix: &str) -> Vec<usize> {
+        self.weighted_in(prefix, false)
+    }
+
+    fn weighted_in(&self, prefix: &str, primary: bool) -> Vec<usize> {
         let mut used = vec![false; self.features.len()];
-        for (_, t) in self.targets.iter().filter(|(n, _)| n.starts_with(prefix)) {
+        for (_, t) in self.targets.iter().filter(|(n, _)| primary && n.starts_with(prefix)) {
             if let Some(l) = &t.lin {
                 l.w.iter().enumerate().filter(|(_, w)| **w != 0.0).for_each(|(j, _)| used[j] = true);
             }
@@ -481,7 +493,15 @@ impl Predictor {
     }
 
     pub fn weighted_channels(&self, prefix: &str) -> Vec<String> {
-        let mut cols: Vec<usize> = self.model.weighted_features(prefix).into_iter().flat_map(|j| self.engine.raw_sources(self.order[j])).collect();
+        self.channels_of(self.model.weighted_features(prefix))
+    }
+
+    pub fn fallback_channels(&self, prefix: &str) -> Vec<String> {
+        self.channels_of(self.model.fallback_features(prefix))
+    }
+
+    fn channels_of(&self, features: Vec<usize>) -> Vec<String> {
+        let mut cols: Vec<usize> = features.into_iter().flat_map(|j| self.engine.raw_sources(self.order[j])).collect();
         cols.sort_unstable();
         cols.dedup();
         cols.into_iter().map(|c| self.engine.raw_channels[c].clone()).collect()

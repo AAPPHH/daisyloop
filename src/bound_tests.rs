@@ -1108,10 +1108,26 @@ fn r42_ambient_scan_swings_and_writes_per_24_h() {
 }
 
 #[test]
+fn r9c_a_stale_input_outside_the_fallback_block_does_not_hold_the_plan() {
+    let mut rig = running(34.0, |_| {});
+    rig.live = true;
+    rig.c.inputs = vec!["nvml/0/temp".into(), "/intelcpu/0/temperature/0".into()];
+    rig.c.fallback_inputs = vec!["/intelcpu/0/temperature/0".into()];
+    rig.run(20);
+    rig.gpu = None;
+    rig.run(60);
+    let st = rig.status();
+    assert!(st.alarms.iter().any(|a| a.kind == AlarmKind::Stale && a.channel == "nvml/0/temp"));
+    assert!(st.predicted.is_some_and(|p| p.water.is_some()) && st.controls[0].note.as_deref().is_none_or(|n| !n.contains("veraltet")));
+    assert!(rig.ctl("d5.fan").fallback.is_none());
+}
+
+#[test]
 fn r9b_a_stale_model_input_raises_an_alarm_and_holds_the_plan_without_a_fallback() {
     let mut rig = running(34.0, |_| {});
     rig.live = true;
     rig.c.inputs = vec!["nvml/0/temp".into(), "/intelcpu/0/temperature/0".into()];
+    rig.c.fallback_inputs = rig.c.inputs.clone();
     rig.run(20);
     assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some_and(|p| p.water.is_some()));
     rig.gpu = None;

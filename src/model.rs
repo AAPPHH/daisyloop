@@ -37,6 +37,9 @@ pub trait Model {
     fn inputs(&self) -> Vec<String> {
         Vec::new()
     }
+    fn fallback_inputs(&self) -> Vec<String> {
+        self.inputs()
+    }
     fn digest(&self) -> u64 {
         0
     }
@@ -54,6 +57,7 @@ pub struct XgbModel {
     since: i64,
     bridge: i64,
     inputs: Vec<String>,
+    fallback_inputs: Vec<String>,
     digest: u64,
 }
 
@@ -85,8 +89,9 @@ impl XgbModel {
         }
         let n = channels.len();
         let inputs = p.weighted_channels("water_");
+        let fallback_inputs = if p.model.has_fallback() { p.fallback_channels("water_") } else { inputs.clone() };
         let digest = spec.bytes().chain([0u8]).chain(model.bytes()).fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0, inputs, digest })
+        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0, inputs, fallback_inputs, digest })
     }
 
     pub fn load(dirs: &[PathBuf], spec: &str, file: &str) -> Result<XgbModel, String> {
@@ -131,7 +136,7 @@ impl XgbModel {
 
     #[cfg(test)]
     fn clone_for_observe(&self) -> XgbModel {
-        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since, bridge: self.bridge, inputs: self.inputs.clone(), digest: self.digest }
+        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since, bridge: self.bridge, inputs: self.inputs.clone(), fallback_inputs: self.fallback_inputs.clone(), digest: self.digest }
     }
 
     fn filled(&self) -> Vec<f64> {
@@ -204,6 +209,10 @@ impl Model for XgbModel {
 
     fn inputs(&self) -> Vec<String> {
         self.inputs.clone()
+    }
+
+    fn fallback_inputs(&self) -> Vec<String> {
+        self.fallback_inputs.clone()
     }
 
     fn digest(&self) -> u64 {

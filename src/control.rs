@@ -425,6 +425,7 @@ pub struct Control {
     model_error: Option<String>,
     corr: Corrector,
     inputs: Vec<String>,
+    fallback_inputs: Vec<String>,
     fed_water: bool,
     shown_raw: Option<f64>,
     last: HashMap<String, (i64, f64)>,
@@ -488,9 +489,10 @@ impl Control {
         let chans = vec![Chan::new(ControlKind::Fan, &cc.fan), Chan::new(ControlKind::Pump, &cc.pump)];
         let corr = Corrector::new(&cc.correction, &cfg.data_dir, model.as_ref().map_or(0, |m| m.digest()));
         let inputs = model.as_ref().map_or_else(Vec::new, |m| m.inputs());
+        let fallback_inputs = model.as_ref().map_or_else(Vec::new, |m| m.fallback_inputs());
         let store = Ownership::new(cfg.state_dir());
         let owned = store.read();
-        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, corr, inputs, fed_water: false, shown_raw: None, last: HashMap::new(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, frozen_slow_ms: Self::FROZEN_SLOW_MS, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
+        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, corr, inputs, fallback_inputs, fed_water: false, shown_raw: None, last: HashMap::new(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, frozen_slow_ms: Self::FROZEN_SLOW_MS, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
     }
 
     pub fn seed(&mut self, history: &[(i64, HashMap<String, f64>)], now_epoch: i64) -> usize {
@@ -698,6 +700,10 @@ impl Control {
 
     fn stale_input(&self, now: i64) -> Option<&String> {
         self.inputs.iter().find(|c| self.fresh(c, now).is_none())
+    }
+
+    fn stale_fallback_input(&self, now: i64) -> Option<&String> {
+        self.fallback_inputs.iter().find(|c| self.fresh(c, now).is_none())
     }
 
     fn correct(&mut self, now: i64, epoch: i64) {
@@ -1020,7 +1026,7 @@ impl Control {
         if t.water.is_none() {
             return Outlook::Held("Wassertemperatur fehlt, Plan wird gehalten".into());
         }
-        if let Some(ch) = self.stale_input(now) {
+        if let Some(ch) = self.stale_fallback_input(now) {
             return Outlook::Held(format!("Modelleingang {ch} veraltet (> {:.0} s), Plan wird gehalten", self.cfg.stale_secs));
         }
         let any_active = self.chans.iter().any(|c| c.mode == Mode::Active);
