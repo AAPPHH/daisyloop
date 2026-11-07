@@ -109,7 +109,7 @@ impl Model for Fake {
             return Err("boom".into());
         }
         let (f, p) = (hold.get("d5next/fan/rpm").copied().unwrap_or(1470.0), hold.get("d5next/pump/rpm").copied().unwrap_or(4800.0));
-        Ok(crate::model::Forecast { water: self.heat.get() - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0 })
+        Ok(crate::model::Forecast::plain(self.heat.get() - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0))
     }
 }
 

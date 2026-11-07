@@ -128,9 +128,23 @@ pub struct ModelInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Correction {
+    pub horizon_s: u32,
+    pub bias: f64,
+    pub scale: f64,
+    pub delta: f64,
+    pub updates: u32,
+    pub acting: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Predicted {
     pub horizon_s: u32,
     pub water: Option<f64>,
+    #[serde(default)]
+    pub raw: Option<f64>,
+    #[serde(default)]
+    pub correction: Vec<Correction>,
     pub water_limit: f64,
     pub feasible: bool,
     pub age_ms: i64,

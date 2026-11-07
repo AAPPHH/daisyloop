@@ -33,6 +33,15 @@ impl Model for Shipped {
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, horizon: u32) -> Result<Forecast, String> {
         self.0.forecast(hold, rollout, horizon)
     }
+    fn live(&self) -> Vec<crate::model::Live> {
+        self.0.live()
+    }
+    fn inputs(&self) -> Vec<String> {
+        self.0.inputs()
+    }
+    fn digest(&self) -> u64 {
+        self.0.digest()
+    }
 }
 
 struct Informed {
@@ -57,7 +66,7 @@ impl Model for Informed {
             p.step(power, rpm);
         }
         let d = p.reading() - now;
-        Ok(Forecast { water: d })
+        Ok(Forecast::plain(d))
     }
 }
 

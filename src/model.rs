@@ -6,6 +6,20 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug)]
 pub struct Forecast {
     pub water: f64,
+    pub response: f64,
+}
+
+impl Forecast {
+    pub fn plain(water: f64) -> Forecast {
+        Forecast { water, response: 0.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Live {
+    pub h: u32,
+    pub pred: f64,
+    pub response: f64,
 }
 
 pub trait Model {
@@ -16,6 +30,15 @@ pub trait Model {
         0
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout_s: u32, horizon_s: u32) -> Result<Forecast, String>;
+    fn live(&self) -> Vec<Live> {
+        Vec::new()
+    }
+    fn inputs(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn digest(&self) -> u64 {
+        0
+    }
 }
 
 pub struct XgbModel {
@@ -29,6 +52,8 @@ pub struct XgbModel {
     epoch: i64,
     since: i64,
     bridge: i64,
+    inputs: Vec<String>,
+    digest: u64,
 }
 
 impl XgbModel {
@@ -58,7 +83,9 @@ impl XgbModel {
             return Err("feature spec has no water channel".into());
         }
         let n = channels.len();
-        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0 })
+        let inputs = p.weighted_channels("water_");
+        let digest = spec.bytes().chain([0u8]).chain(model.bytes()).fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0, inputs, digest })
     }
 
     pub fn load(dirs: &[PathBuf], spec: &str, file: &str) -> Result<XgbModel, String> {
@@ -103,7 +130,7 @@ impl XgbModel {
 
     #[cfg(test)]
     fn clone_for_observe(&self) -> XgbModel {
-        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since, bridge: self.bridge }
+        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since, bridge: self.bridge, inputs: self.inputs.clone(), digest: self.digest }
     }
 
     fn filled(&self) -> Vec<f64> {
@@ -162,12 +189,24 @@ impl Model for XgbModel {
         for k in 1..=rollout_s as i64 {
             x = p.features(&raw, self.epoch + k);
         }
-        let out = p.model.predict(&x);
-        let get = |prefix: &str| {
-            let name = format!("{prefix}_{horizon_s}");
-            out.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).filter(|v| v.is_finite()).ok_or_else(|| format!("model has no finite target {name}"))
-        };
-        Ok(Forecast { water: get("water")? })
+        let out = p.model.predict_parts(&x);
+        let name = format!("water_{horizon_s}");
+        out.iter().find(|(n, ..)| *n == name).filter(|(_, v, t)| v.is_finite() && t.is_finite()).map(|(_, v, t)| Forecast { water: *v, response: -*t }).ok_or_else(|| format!("model has no finite target {name}"))
+    }
+
+    fn live(&self) -> Vec<Live> {
+        if self.warm_secs() == 0 {
+            return Vec::new();
+        }
+        self.p.model.predict_parts(&self.x).into_iter().filter_map(|(n, v, t)| Some(Live { h: n.strip_prefix("water_")?.parse().ok()?, pred: v, response: -t })).filter(|l| l.pred.is_finite() && l.response.is_finite()).collect()
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.clone()
+    }
+
+    fn digest(&self) -> u64 {
+        self.digest
     }
 }
 

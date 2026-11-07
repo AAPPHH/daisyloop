@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod control;
+mod correct;
 mod d5;
 mod hot;
 mod ipc;

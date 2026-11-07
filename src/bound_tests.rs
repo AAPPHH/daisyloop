@@ -14,7 +14,7 @@ impl Model for Blind {
         5000
     }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
-        Ok(Forecast { water: 0.0 })
+        Ok(Forecast::plain(0.0))
     }
 }
 
@@ -22,7 +22,7 @@ fn blind_rig(tweak: impl Fn(&mut Config)) -> Rig {
     rig_with(Box::new(Blind), tweak)
 }
 
-fn rig_with(model: Box<dyn Model>, tweak: impl Fn(&mut Config)) -> Rig {
+pub(super) fn rig_with(model: Box<dyn Model>, tweak: impl Fn(&mut Config)) -> Rig {
     let cfg = base_cfg(tweak);
     let sim = Sim::new();
     let s = sim.clone();
@@ -195,7 +195,7 @@ fn r8_only_the_water_plan_limit_exists_and_cpu_gpu_excess_changes_nothing() {
 }
 
 #[test]
-fn r9_a_stale_cpu_or_gpu_changes_nothing_and_only_stale_water_takes_over() {
+fn r9_a_stale_channel_the_model_does_not_weight_changes_nothing_and_only_stale_water_takes_over() {
     let mut rig = running(34.0, |_| {});
     let held = duty(&rig, 0);
     rig.gpu = None;
@@ -1101,4 +1101,25 @@ fn r42_ambient_scan_swings_and_writes_per_24_h() {
     }
     eprintln!("{table}worst swings {worst_swings} worst writes {worst_writes}");
     assert!(worst_swings <= 2 && worst_writes <= 250);
+}
+
+#[test]
+fn r9b_a_stale_model_input_raises_an_alarm_and_holds_the_plan_without_a_fallback() {
+    let mut rig = running(34.0, |_| {});
+    rig.live = true;
+    rig.c.inputs = vec!["nvml/0/temp".into(), "/intelcpu/0/temperature/0".into()];
+    rig.run(20);
+    assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some_and(|p| p.water.is_some()));
+    rig.gpu = None;
+    rig.run(12);
+    let (held, sets) = (duty(&rig, 0), rig.sim.sets());
+    rig.heat.set(40.0);
+    rig.run(60);
+    let st = rig.status();
+    assert!(st.alarms.iter().any(|a| a.kind == AlarmKind::Stale && a.channel == "nvml/0/temp"));
+    assert!(st.predicted.is_none() && st.controls[0].note.as_deref().is_some_and(|n| n.contains("nvml/0/temp")));
+    assert!(duty(&rig, 0) == held && rig.sim.sets() == sets && rig.ctl("d5.fan").fallback.is_none() && rig.sim.mode(Spec::FAN) == 0, "{:?} {:?} {} {} {:?}", duty(&rig, 0), held, rig.sim.sets(), sets, rig.ctl("d5.fan").fallback);
+    rig.gpu = Some(40.0);
+    rig.run(40);
+    assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some());
 }
