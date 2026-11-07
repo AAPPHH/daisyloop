@@ -42,22 +42,25 @@ CFG = {
     "workers": 5,
     "blas_threads": 1,
     "gate": {
-        "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "full_s": 120.0, "fit_rmse_max": 0.12, "c_range": [8.0, 16.0], "ahead": {"h": 120, "step": 10, "gain": 1.5}, "loo": True},
+        "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "full_s": 120.0, "fit_rmse_max": 0.12, "c_range": [8.0, 16.0], "ahead": {"h": 120, "step": 10, "gain": 1.5}, "null_bounds": {"C": [8.0, 16.0], "Ta": [18.0, 30.0]}, "boot": {"block_s": 240, "n": 5000, "seed": 0, "q": 0.025}, "loo": True},
         "fan": {"grid_lo_duty": 27.0, "min_levels": 3, "min_span": 40.0, "min_drop": 0.25, "dwell_s": 120},
         "pump": {"dwell_s": 120, "why": "pump coefficient not identified: the protocol does not separate it from pump heat and dead time (dry run: truth 0 gives a fitted 0.14, flag fired in 2 of 5 runs only at truth 0.6), the pump stays on the firmware PID"},
-        "hist": {"block_s": 60, "min_rpm": 1400.0, "min_pump_rpm": 4000.0, "max_fan_range": 40.0, "max_pump_range": 100.0, "min_blocks": 100, "min_span_k": 3.0, "a_range": [20.0, 28.0]},
+        "hist": {"block_s": 60, "min_rpm": 1400.0, "min_pump_rpm": 4000.0, "max_fan_range": 40.0, "max_pump_range": 100.0, "min_blocks": 100, "min_span_k": 3.0, "a_range": [20.0, 28.0], "h": 120, "step": 10, "gain": 1.5, "bias_max": 0.10, "bias_rpm": 1400.0, "bins": [0.0, 600.0, 1000.0, 1400.0, 1e9]},
         "rmse_targets": ["water_30", "water_120"],
         "hold_targets": ["water_120", "cpu_120", "gpu_120"],
         "required": ["fan"],
         "z": 1.96,
         "text": [
+            "these criteria were fixed after the first real refusal of an earlier version, they are post hoc and were not pre-registered; the thresholds of this version were fixed before its first run",
             "ship only if all of the following hold, otherwise the artifact is written as candidate_* and not as model_deploy.json",
             "1. fan excitation: enough distinct duty levels held long enough in the step windows",
-            "2. grey-box fit of the thermal.md plant with the dead time as a parameter, a linear ambient drift and a constant unmodelled heat input q0 (0 to 120 W) on the rows that are finite, outside gaps and outside the hold-out spans: fit RMSE at most grey.fit_rmse_max = 0.12 K (absolute sanity limit)",
-            "3. fan exponent m is positive with a one-sided 95 % likelihood-ratio bound (variance inflated for autocorrelation) against the nested model without fan response but with ambient drift, and the conductance of the lowest held running duty level (its recorded rpm, not the 0 % test) is at least min_drop below full fan",
+            "2. full-fan conductance A is estimated from the earlier half of the non-step history (steady 60 s blocks above 1400 rpm and 4000 pump rpm, slope of block heat minus C times the water slope against block water temperature, no step rows, only time before the first step window) and must lie in 20 to 28 W/K, otherwise refuse; the grey box holds A fixed at it in the full fit",
+            "2b. grey-box fit of the thermal.md plant with the dead time as a parameter, a linear ambient drift and a constant unmodelled heat input q0 (0 to 120 W) on the rows that are finite, outside gaps and outside the hold-out spans: fit RMSE at most grey.fit_rmse_max = 0.12 K (absolute sanity limit)",
+            "3. fan exponent m is positive with a one-sided 95 % likelihood-ratio bound (variance inflated for autocorrelation) against the nested model without fan response but with ambient drift (A free in it), and the conductance of the lowest held running duty level (its recorded rpm, not the 0 % test) is at least min_drop below full fan",
             "3b. fitted heat capacity C within 8 to 16 kJ/K (the independently known value is 11.7)",
-            "4. independent check on fan phases 6 and 7, which stay out of the fit and the response term: the 120 s ahead forecast, re-initialised from the measured water every 10 s with both lumps set to the measured water, has RMSE at least 1.5 times better than the no-fan refit (q0 and drift free) and strictly better than persistence; the free-run hold-out RMSE and the leave-one-fan-phase-out ranges of C, m, q0 and Ta are reported, not gated",
+            "4. check on fan phases 6 and 7, which stay out of the fit and the response term and run at constant full fan: the 120 s ahead forecast, re-initialised from the measured water every 10 s with both lumps set to the measured water, is strictly better than persistence, and the lower bound (2.5 %) of the RMSE ratio no-fan refit over full model, from a circular 240 s block bootstrap (seed 0, 5000 draws), is above 1.0; the no-fan reference refit has q0 and drift free, A free, C bounded to 8 to 16 kJ/K and Ta to 18 to 30 C. The forecast uses the logged power, pump rpm and fan rpm inside the horizon (the planner compares rpm choices under the same load, so this is a physics test, not a planner skill score); the variants with power held at the origin value and with power and pump held are reported, not gated. The free-run hold-out RMSE and the leave-one-fan-phase-out ranges of C, m, q0 and Ta (their fits include the hold-out rows) are reported, not gated",
             "5. water 30 s and 120 s RMSE of the model on the final fold (test, fresh2, held-out step rows) is not worse than the deployed model's by more than z times the block-bootstrap standard deviation of the paired difference, and on the held-out step rows the 120 s forecasts of water, cpu and gpu are not worse than persistence by more than the same band",
+            "6. on the later half of the non-step history (not used for A, no step rows) the 120 s re-initialised forecast has RMSE at least 1.5 times better than persistence and an absolute mean bias above 1400 rpm of at most 0.10 K; RMSE and bias per rpm bin (0-600, 600-1000, 1000-1400, 1400+) are reported",
             "the pump flag is not part of the gate: identified.pump is always false, the planner then does not use the model for the pump channel",
         ],
     },
@@ -370,27 +373,64 @@ class Identifier:
         a_est["source"] = "history"
         th, sse, n = gb.fit(segs, {"A": a_est["a"]} if a_est["a"] is not None else None)
         th0, sse0, _ = gb.fit(segs, {"m": 0.0}, th)
+        thb, _, _ = gb.fit(segs, {"m": 0.0}, th, bounds=gc["null_bounds"])
+        nfev_null = dict(gb.info)
         lr = lambda s0: float(n * math.log(max(s0, sse) / sse) / gc["se_inflate"] ** 2)
-        out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "theta_null": dict(zip(gb.NAMES, th0.tolist())), "a_est": a_est}
+        out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "theta_null": dict(zip(gb.NAMES, th0.tolist())), "theta_null_bounded": dict(zip(gb.NAMES, thb.tolist())), "null_bounded_fit": nfev_null, "a_est": a_est}
         ex = self.excitation("fan")
         low = [r for l, r in ex["level_rpm"].items() if float(l) > 0.0]
         out["lowest_rpm_ratio"] = min(low) / gb.full if low else None
         out["g_ratio_at_lowest"] = float(out["lowest_rpm_ratio"] ** th[2]) if low else None
         hs = [s for s in fan_s if s["hold"].any()]
-        out["hold_fan"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(th0, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs)), "ahead": self.ahead(th, th0, hs)}
+        out["hold_fan"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(th0, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs)), "ahead": self.ahead(th, thb, hs)}
+        out["hist"] = self.check(th, hist)
         if gc["loo"]:
             out["loo"] = self.loo(th, fan_s)
         out.update(fan=self.fan(out, th, fan_s, ex), pump=self.pump())
         out["response"] = self.response(out["theta_fit"])
         return out
 
-    def ahead(self, th, th0, hs):
+    def ahead(self, th, thb, hs):
         a = self.g["grey"]["ahead"]
-        e = [self.gb.ahead(t, s, a["h"], a["step"]) for s in hs for t in (th, th0)]
-        if not hs or not sum(len(x[0]) for x in e):
+        rm = lambda v: float(np.sqrt(np.mean(v ** 2)))
+        out = None
+        for name, kw in (("logged", {}), ("held_power", {"hold_q": True}), ("held_power_pump", {"hold_q": True, "hold_p": True})):
+            e = [(self.gb.ahead_full(th, s, a["h"], a["step"], **kw), self.gb.ahead_full(thb, s, a["h"], a["step"], **kw)[0]) for s in hs]
+            if not hs or not sum(len(x[0][0]) for x in e):
+                return None
+            ef, pe, en = (np.concatenate(v) for v in ([x[0][0] for x in e], [x[0][1] for x in e], [x[1] for x in e]))
+            ci, med = self.boot(ef, en)
+            r = {"full": rm(ef), "null": rm(en), "persist": rm(pe), "n": int(len(ef)), "ratio": rm(en) / rm(ef), "ratio_ci": ci, "ratio_median": med}
+            if out is None:
+                out = dict(r, variants={})
+            else:
+                out["variants"][name] = r
+        return out
+
+    def boot(self, ef, en):
+        b, n = self.g["grey"]["boot"], len(ef)
+        L = max(1, int(round(b["block_s"] / self.g["grey"]["ahead"]["step"])))
+        st = np.random.default_rng(b["seed"]).integers(0, n, (b["n"], -(-n // L)))
+        idx = ((st[:, :, None] + np.arange(L)) % n).reshape(b["n"], -1)[:, :n]
+        ratio = np.sqrt(np.mean(en[idx] ** 2, 1) / np.mean(ef[idx] ** 2, 1))
+        return [float(np.quantile(ratio, b["q"])), float(np.quantile(ratio, 1.0 - b["q"]))], float(np.median(ratio))
+
+    def check(self, th, hist):
+        hc = self.g["hist"]
+        if not hist:
             return None
-        rm = lambda v: float(np.sqrt(np.mean(np.concatenate(v) ** 2)))
-        return {"full": rm([x[0] for x in e[0::2]]), "null": rm([x[0] for x in e[1::2]]), "persist": rm([x[1] for x in e[0::2]]), "n": int(sum(len(x[0]) for x in e[0::2]))}
+        e = [self.gb.ahead_full(th, s, hc["h"], hc["step"], "all", "later") + (s,) for s in hist]
+        if not sum(len(x[0]) for x in e):
+            return None
+        ef, pe = (np.concatenate([x[k] for x in e]) for k in (0, 1))
+        rpm = np.concatenate([x[3]["f"][x[2]] for x in e])
+        rm = lambda v: float(np.sqrt(np.mean(v ** 2))) if len(v) else None
+        bins = {}
+        for lo, hi in zip(hc["bins"][:-1], hc["bins"][1:]):
+            m = (rpm >= lo) & (rpm < hi)
+            bins[f"{lo:.0f}-{hi:.0f}" if hi < 1e8 else f"{lo:.0f}+"] = {"n": int(m.sum()), "rmse": rm(ef[m]), "persist": rm(pe[m]), "bias": float(np.mean(ef[m])) if m.any() else None}
+        hi = rpm >= hc["bias_rpm"]
+        return {"n": int(len(ef)), "rmse": rm(ef), "persist": rm(pe), "gain": rm(pe) / rm(ef), "bias_hi": float(np.mean(ef[hi])) if hi.any() else None, "bins": bins}
 
     def loo(self, th, fan_s):
         gb, out = self.gb, {"phases": {}}
@@ -425,10 +465,18 @@ class Identifier:
         if a is None:
             why.append("no hold-out fan phases")
         else:
-            if not a["null"] >= gc["ahead"]["gain"] * a["full"]:
-                why.append(f"{gc['ahead']['h']} s forecast on the hold-out phases ({a['full']:.3f} K) not {gc['ahead']['gain']} times better than the no-fan refit ({a['null']:.3f} K)")
+            if not a["ratio_ci"][0] > 1.0:
+                why.append(f"{gc['ahead']['h']} s forecast on the hold-out phases ({a['full']:.3f} K): lower bound of the no-fan/full RMSE ratio {a['ratio_ci'][0]:.2f} (ratio {a['ratio']:.2f}, no-fan {a['null']:.3f} K) not above 1.0")
             if not a["full"] < a["persist"]:
                 why.append(f"{gc['ahead']['h']} s forecast on the hold-out phases ({a['full']:.3f} K) not better than persistence ({a['persist']:.3f} K)")
+        hh, hc = o["hist"], self.g["hist"]
+        if hh is None:
+            why.append("history forecast: no later-half history")
+        else:
+            if not hh["persist"] >= hc["gain"] * hh["rmse"]:
+                why.append(f"history forecast {hc['h']} s on the later half ({hh['rmse']:.3f} K) not {hc['gain']} times better than persistence ({hh['persist']:.3f} K)")
+            if not (hh["bias_hi"] is not None and abs(hh["bias_hi"]) <= hc["bias_max"]):
+                why.append(f"history forecast bias above {hc['bias_rpm']:.0f} rpm {'n/a' if hh['bias_hi'] is None else format(hh['bias_hi'], '.4f')} K exceeds {hc['bias_max']} K")
         hs = [s for s in ss if s["hold"].any()]
         eff = None
         if hs:

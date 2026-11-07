@@ -223,7 +223,7 @@ def test_conductance_check_uses_the_lowest_held_running_level_and_can_fail():
     assert ex["levels_held"] == [0.0, 25.0] and abs(ex["level_rpm"]["25.0"] - 395.0) < 1e-9
     low = min(r for l, r in ex["level_rpm"].items() if float(l) > 0.0) / ident.gb.full
     for m, passes in ((1.6, True), (0.1, False)):
-        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"ahead": None}}
+        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"ahead": None}, "a_est": {"a": 23.6, "n": 700, "ok": True}, "hist": None}
         th = np.zeros(11)
         th[0], th[2] = 12.0, m
         why = ident.fan(o, th, [], ex)["reasons"]
@@ -233,8 +233,12 @@ def test_conductance_check_uses_the_lowest_held_running_level_and_can_fail():
 def test_gate_criteria_are_the_pre_registered_ones_and_the_text_says_so():
     g = S.CFG["gate"]["grey"]
     assert g["fit_rmse_max"] == 0.12 and g["c_range"] == [8.0, 16.0] and g["ahead"] == {"h": 120, "step": 10, "gain": 1.5} and "band" not in g and "hold_rmse_max" not in g
+    assert g["null_bounds"] == {"C": [8.0, 16.0], "Ta": [18.0, 30.0]} and g["boot"] == {"block_s": 240, "n": 5000, "seed": 0, "q": 0.025}
+    h = S.CFG["gate"]["hist"]
+    assert h["a_range"] == [20.0, 28.0] and h["gain"] == 1.5 and h["bias_max"] == 0.10 and h["bias_rpm"] == 1400.0 and h["bins"][:4] == [0.0, 600.0, 1000.0, 1400.0] and h["h"] == 120
     text = " ".join(S.CFG["gate"]["text"])
     assert "0.12 K" in text and "8 to 16 kJ/K" in text and "1.5 times better" in text and "persistence" in text and "q0" in text
+    assert "post hoc" in text and "not a planner skill score" in text and "20 to 28 W/K" in text and "0.10 K" in text and "circular 240 s block bootstrap" in text
 
 
 def test_q0_is_a_parameter_free_in_the_null_model_and_not_a_response_input():
@@ -275,23 +279,53 @@ def test_grey_box_recovers_a_constant_unmodelled_heat_and_the_forecast_beats_the
     assert len(full) == len(per) > 50
     rm = lambda v: float(np.sqrt(np.mean(v ** 2)))
     assert rm(full) < rm(per) and rm(null) >= 1.5 * rm(full), (rm(full), rm(null), rm(per))
+    held, _, a = gb.ahead_full(th, seg, 120, 10, hold_q=True, hold_p=True)
+    logged, _, a2 = gb.ahead_full(th, seg, 120, 10)
+    assert (a == a2).all() and np.allclose(logged, full) and not np.allclose(held, full)
 
 
-def test_forecast_gate_and_heat_capacity_gate_refuse_what_they_should():
+def test_bootstrap_is_circular_seeded_and_the_history_check_reports_bins_and_bias():
+    ident = S.Identifier(S.CFG, None)
+    rng = np.random.default_rng(5)
+    ef = rng.normal(0, 0.3, 74)
+    en = ef * 2.0 + rng.normal(0, 0.05, 74)
+    ci, med = ident.boot(ef, en)
+    assert ci == ident.boot(ef, en)[0] and 1.5 < ci[0] < med < ci[1] < 3.0
+    ci2, _ = ident.boot(ef, ef * 1.0)
+    assert ci2[0] < 1.0 < ci2[1] or abs(ci2[0] - 1.0) < 1e-9
+    seg = forecast_seg(1.61, 65.0, 3)
+    gb = S.GreyBox()
+    th, _, _ = gb.fit([seg])
+    n = len(seg["w"])
+    seg = dict(seg, all=np.ones(n, bool), later=np.arange(n) >= 1800)
+    out = ident.check(th, [seg])
+    assert set(out["bins"]) == {"0-600", "600-1000", "1000-1400", "1400+"} and out["bins"]["1400+"]["n"] > 0 and out["bias_hi"] is not None
+    assert out["n"] == sum(b["n"] for b in out["bins"].values()) and out["gain"] > 1.0
+
+
+def test_forecast_history_heat_capacity_and_conductance_gates_refuse_what_they_should():
     ident = S.Identifier(S.CFG, None)
     ex = {"levels_held": [0.0, 25.0, 50.0, 100.0], "span": 100.0}
     th = np.zeros(11)
     th[0], th[2] = 12.0, 1.5
-    base = {"fit_rmse_k": 0.05, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": 0.3}
-    ok = dict(base, hold_fan={"ahead": {"full": 0.3, "null": 0.6, "persist": 0.62, "n": 100}})
+    good = {"full": 0.3, "null": 0.6, "persist": 0.62, "n": 100, "ratio": 2.0, "ratio_ci": [1.2, 3.0]}
+    hist = {"n": 5000, "rmse": 0.2, "persist": 0.4, "gain": 2.0, "bias_hi": 0.05, "bins": {}}
+    base = {"fit_rmse_k": 0.05, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": 0.3, "a_est": {"a": 23.6, "n": 700, "ok": True}, "hist": hist}
+    ok = dict(base, hold_fan={"ahead": good})
     assert ident.fan(ok, th, [], ex)["reasons"] == []
-    for ahead, text in (({"full": 0.3, "null": 0.44, "persist": 0.62}, "times better than the no-fan refit"), ({"full": 0.3, "null": 0.6, "persist": 0.3}, "not better than persistence"), (None, "no hold-out")):
-        assert any(text in r for r in ident.fan(dict(base, hold_fan={"ahead": ahead}), th, [], ex)["reasons"]), ahead
+    assert any("not above 1.0" in r for r in ident.fan(dict(ok, hold_fan={"ahead": dict(good, ratio_ci=[0.98, 3.0])}), th, [], ex)["reasons"])
+    assert any("persistence" in r for r in ident.fan(dict(ok, hold_fan={"ahead": dict(good, persist=0.3)}), th, [], ex)["reasons"])
+    assert any("no hold-out" in r for r in ident.fan(dict(ok, hold_fan={"ahead": None}), th, [], ex)["reasons"])
     for c in (7.9, 16.1):
         t = th.copy()
         t[0] = c
         assert any("heat capacity" in r for r in ident.fan(ok, t, [], ex)["reasons"])
     assert any("fit RMSE" in r for r in ident.fan(dict(ok, fit_rmse_k=0.121), th, [], ex)["reasons"])
+    for h, text in ((dict(hist, persist=0.29), "times better than persistence"), (dict(hist, bias_hi=0.11), "bias above 1400"), (dict(hist, bias_hi=-0.11), "bias above 1400"), (dict(hist, bias_hi=None), "bias above 1400"), (None, "no later-half history")):
+        assert any(text in r for r in ident.fan(dict(ok, hist=h), th, [], ex)["reasons"]), h
+    assert ident.fan(dict(ok, hist=dict(hist, persist=0.31, bias_hi=-0.10)), th, [], ex)["reasons"] == []
+    for a in ({"a": 19.9, "n": 700, "ok": False}, {"a": 28.1, "n": 700, "ok": False}, {"a": None, "n": 3, "ok": False}):
+        assert any("conductance estimate" in r for r in ident.fan(dict(ok, a_est=a), th, [], ex)["reasons"]), a
 
 
 def steady_history(a, n=24000, seed=0):
