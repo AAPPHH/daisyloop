@@ -398,6 +398,7 @@ mod tests {
     fn shipped_model_loads_is_identified_by_owner_override_and_forecasts_finite_values() {
         let m = real();
         assert_eq!(m.identified(), (true, true));
+        assert!(m.inputs().len() >= 6 && m.inputs().iter().any(|c| c == "nvml/0/power") && m.digest() != 0);
         assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
