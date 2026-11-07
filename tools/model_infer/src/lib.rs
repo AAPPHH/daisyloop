@@ -136,6 +136,24 @@ impl Engine {
         }
     }
 
+    pub fn raw_sources(&self, output: usize) -> Vec<usize> {
+        let mut seen = vec![false; self.nodes.len()];
+        let mut stack = vec![self.out_idx[output]];
+        let mut cols = Vec::new();
+        while let Some(i) = stack.pop() {
+            if std::mem::replace(&mut seen[i], true) {
+                continue;
+            }
+            let n = &self.nodes[i];
+            if n.raw_col != usize::MAX {
+                cols.push(n.raw_col);
+            }
+            stack.extend(n.ins.iter().copied());
+        }
+        cols.sort_unstable();
+        cols
+    }
+
     pub fn step(&mut self, raw: &[f64], k: i64) -> Vec<f64> {
         let nodes = Arc::clone(&self.nodes);
         let mut a = std::mem::take(&mut self.scratch);
@@ -382,21 +400,45 @@ impl Model {
         self.response.as_ref().map_or(0.0, |r| r.term(target, x))
     }
 
-    fn predict_linear(&self, x: &[f64]) -> Vec<(String, f64)> {
+    fn predict_linear(&self, x: &[f64]) -> Vec<(String, f64, f64)> {
         let primary = self.targets.iter().all(|(_, t)| t.lin.as_ref().unwrap().w.iter().enumerate().all(|(j, w)| *w == 0.0 || x[j].is_finite()));
         match (&self.fallback, primary) {
-            (Some((idx, ts)), false) => ts.iter().map(|(n, t)| (n.clone(), self.dot(t, x, Some(idx)) - self.term(n, x))).collect(),
-            _ => self.targets.iter().map(|(n, t)| (n.clone(), self.dot(t, x, None) - self.term(n, x))).collect(),
+            (Some((idx, ts)), false) => ts.iter().map(|(n, t)| (n.clone(), self.dot(t, x, Some(idx)) - self.term(n, x), self.term(n, x))).collect(),
+            _ => self.targets.iter().map(|(n, t)| (n.clone(), self.dot(t, x, None) - self.term(n, x), self.term(n, x))).collect(),
         }
+    }
+
+    pub fn weighted_features(&self, prefix: &str) -> Vec<usize> {
+        let mut used = vec![false; self.features.len()];
+        for (_, t) in self.targets.iter().filter(|(n, _)| n.starts_with(prefix)) {
+            if let Some(l) = &t.lin {
+                l.w.iter().enumerate().filter(|(_, w)| **w != 0.0).for_each(|(j, _)| used[j] = true);
+            }
+        }
+        if let Some((idx, ts)) = &self.fallback {
+            for (_, t) in ts.iter().filter(|(n, _)| n.starts_with(prefix)) {
+                if let Some(l) = &t.lin {
+                    l.w.iter().enumerate().filter(|(j, w)| **w != 0.0 && idx[*j] != usize::MAX).for_each(|(j, _)| used[idx[j]] = true);
+                }
+            }
+        }
+        used.iter().enumerate().filter(|(_, u)| **u).map(|(j, _)| j).collect()
     }
 
     pub fn target_names(&self) -> Vec<&str> {
         self.targets.iter().map(|t| t.0.as_str()).collect()
     }
 
-    pub fn predict(&self, x: &[f64]) -> Vec<(String, f64)> {
+    pub fn predict_parts(&self, x: &[f64]) -> Vec<(String, f64, f64)> {
         if self.is_linear() {
             return self.predict_linear(x);
+        }
+        self.predict(x).into_iter().map(|(n, v)| (n, v, 0.0)).collect()
+    }
+
+    pub fn predict(&self, x: &[f64]) -> Vec<(String, f64)> {
+        if self.is_linear() {
+            return self.predict_linear(x).into_iter().map(|(n, v, _)| (n, v)).collect();
         }
         let xf: Vec<f32> = x.iter().map(|&v| v as f32).collect();
         self.targets
@@ -436,6 +478,13 @@ impl Predictor {
 
     pub fn load(spec_json: &str, model_json: &str) -> Result<Predictor, String> {
         std::panic::catch_unwind(|| Predictor::new(spec_json, model_json)).map_err(|_| "feature spec or model file is malformed".to_string())
+    }
+
+    pub fn weighted_channels(&self, prefix: &str) -> Vec<String> {
+        let mut cols: Vec<usize> = self.model.weighted_features(prefix).into_iter().flat_map(|j| self.engine.raw_sources(self.order[j])).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        cols.into_iter().map(|c| self.engine.raw_channels[c].clone()).collect()
     }
 
     pub fn features(&mut self, raw: &[f64], k: i64) -> Vec<f64> {

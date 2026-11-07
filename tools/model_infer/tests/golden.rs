@@ -116,3 +116,36 @@ fn water_only_model_predicts_the_deployed_water_targets() {
         assert!((a.iter().find(|(m, _)| m == n).unwrap().1 - p).abs() < 1e-12);
     }
 }
+
+#[test]
+fn weighted_channels_are_the_raw_sources_of_the_nonzero_water_weights() {
+    let p = Predictor::new(&models("feature_spec_deploy.json"), &models("model_deploy.json"));
+    let all = p.weighted_channels("");
+    let water = p.weighted_channels("water_");
+    println!("{water:?}");
+    assert!(water.len() < p.engine.raw_channels.len() && water.len() < 15 && !water.is_empty());
+    for c in ["d5next/water/temp", "d5next/pump/power", "nvml/0/power", "nvml/0/temp", "/intelcpu/0/power/0"] {
+        assert!(water.iter().any(|w| w == c), "{c}");
+    }
+    assert!(water.iter().all(|w| all.contains(w)));
+}
+
+#[test]
+fn predict_parts_value_equals_predict_and_the_term_is_the_response() {
+    let mut p = Predictor::new(&models("feature_spec_deploy.json"), &models("model_deploy.json"));
+    let g: Value = serde_json::from_str(&models("golden_deploy.json")).unwrap();
+    let k0 = g["k0"].as_i64().unwrap();
+    let mut seen = 0;
+    for (t, row) in g["rows"].as_array().unwrap().iter().enumerate() {
+        let raw: Vec<f64> = row.as_array().unwrap().iter().map(num).collect();
+        let x = p.features(&raw, k0 + t as i64);
+        if t < 2400 || x.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        let (a, b) = (p.model.predict(&x), p.model.predict_parts(&x));
+        assert!(a.iter().zip(&b).all(|(a, b)| a.0 == b.0 && a.1 == b.1));
+        assert!(b.iter().filter(|x| x.0.starts_with("water_")).all(|x| x.2.is_finite() && x.2 >= 0.0));
+        seen += 1;
+    }
+    assert!(seen > 100);
+}
