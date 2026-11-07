@@ -208,10 +208,10 @@ class RangeLake(CopyLake):
         self.dir = os.path.abspath(config["data_dir"])
         self.con = duckdb.connect()
 
-    def parquet(self, t0):
+    def parquet(self, t0, table="telemetry"):
         slack = self.cfg.get("file_slack_s", 3600)
         out = []
-        for p in glob.glob(os.path.join(self.dir, "warehouse", self.cfg["namespace"], "telemetry", "data", "*.parquet")):
+        for p in glob.glob(os.path.join(self.dir, "warehouse", self.cfg["namespace"], table, "data", "*.parquet")):
             try:
                 stamp = int(os.path.basename(p).split("-")[1]) / 1e6
             except (IndexError, ValueError):
@@ -220,20 +220,32 @@ class RangeLake(CopyLake):
                 out.append(p.replace("\\", "/"))
         return sorted(out)
 
-    def refresh(self, t0=None, t1=None):
-        table, spec = "telemetry", self.cfg["tables"]["telemetry"]
-        try:
-            snaps = self.snapshots(self.location(table))
-        except IndexError:
-            snaps = []
-        committed = {s.get("summary", {}).get(self.cfg["source_key"]) for s in snaps}
-        batches = [b for stem, paths in self.hot_files(table, t0, t1).items() if stem not in committed and not any(os.path.exists(p + ".done") for p in paths) for b in self.read_stream(paths)]
-        hot = pa.Table.from_batches(batches) if batches else spec["empty"].empty_table()
-        self.con.register(f"hot_{table}", hot)
-        cols = ", ".join(f"{n}::{t} as {n}" for n, t in spec["columns"].items())
-        parts = [f"select {cols} from hot_{table}"]
-        files = self.parquet(t0)
-        if files:
-            parts.insert(0, f"select {', '.join(spec['columns'])} from read_parquet({files!r})")
-        self.con.execute(f"create or replace view {table} as " + " union all ".join(parts))
+    def listing(self, table, committed, t0, t1):
+        for _ in range(self.cfg["retries"]):
+            try:
+                batches = [b for stem, paths in self.hot_files(table, t0, t1).items() if stem not in committed and not any(os.path.exists(p + ".done") for p in paths) for b in self.read_stream(paths)]
+                files = self.parquet(t0, table)
+                for p in files:
+                    os.stat(p)
+                return batches, files
+            except (FileNotFoundError, PermissionError):
+                time.sleep(self.cfg["retry_wait"])
+        raise LakeError("no consistent listing of the lake after retries")
+
+    def refresh(self, t0=None, t1=None, tables=("telemetry",)):
+        for table in tables:
+            spec = self.cfg["tables"][table]
+            try:
+                snaps = self.snapshots(self.location(table))
+            except IndexError:
+                snaps = []
+            committed = {s.get("summary", {}).get(self.cfg["source_key"]) for s in snaps}
+            batches, files = self.listing(table, committed, t0, t1)
+            hot = pa.Table.from_batches(batches) if batches else spec["empty"].empty_table()
+            self.con.register(f"hot_{table}", hot)
+            cols = ", ".join(f"{n}::{t} as {n}" for n, t in spec["columns"].items())
+            parts = [f"select {cols} from hot_{table}"]
+            if files:
+                parts.insert(0, f"select {', '.join(spec['columns'])} from read_parquet({files!r})")
+            self.con.execute(f"create or replace view {table} as " + " union all ".join(parts))
         return self
