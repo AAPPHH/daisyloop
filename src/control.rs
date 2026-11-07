@@ -707,7 +707,8 @@ impl Control {
         let live = self.model.as_ref().map_or_else(Vec::new, |m| m.live());
         let ok = self.fed_water && self.stale_input(now).is_none() && self.frozen_hit(now).is_none() && self.test.is_none() && now - self.start >= self.corr.hold_secs() * 1000 && self.operating(&self.chans[0], now).is_some() && self.operating(&self.chans[1], now).is_some();
         let water = self.temps(now).water.filter(|_| self.fed_water);
-        self.corr.feed(epoch, ok, water, &live);
+        let rpm = |i: usize| self.fresh(&self.chans[i].rpm_channel(), now).unwrap_or(f64::NAN);
+        self.corr.feed(epoch, ok, water, [rpm(0), rpm(1), self.heat_watts(now)], &live);
         self.corr.save(epoch, false);
     }
 

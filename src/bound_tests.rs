@@ -251,11 +251,12 @@ struct PlantSpec {
     exponent: f64,
     c_scale: f64,
     g_full: f64,
+    cold_w: f64,
 }
 
 impl PlantSpec {
-    const MEASURED: PlantSpec = PlantSpec { ambient: 25.0, p0: 0.0, g_stop: 0.5, exponent: 1.61, c_scale: 1.0, g_full: 24.0 };
-    const ALTERNATIVE: PlantSpec = PlantSpec { ambient: 20.0, p0: 119.0, g_stop: 5.0, exponent: 0.865, c_scale: 1.0, g_full: 24.0 };
+    const MEASURED: PlantSpec = PlantSpec { ambient: 25.0, p0: 0.0, g_stop: 0.5, exponent: 1.61, c_scale: 1.0, g_full: 24.0, cold_w: 0.0 };
+    const ALTERNATIVE: PlantSpec = PlantSpec { ambient: 20.0, p0: 119.0, g_stop: 5.0, exponent: 0.865, c_scale: 1.0, g_full: 24.0, cold_w: 0.0 };
     const NAMED: [(&'static str, PlantSpec); 2] = [("measured", Self::MEASURED), ("alternative", Self::ALTERNATIVE)];
 }
 
@@ -286,7 +287,7 @@ impl Plant {
     fn step(&mut self, power: f64, fan_rpm: f64) -> f64 {
         let g = self.spec.g_stop + (self.spec.g_full - self.spec.g_stop) * (fan_rpm / 1470.0).powf(self.spec.exponent);
         let flow = Self::K * (self.t1 - self.t2);
-        self.t1 += (power + self.spec.p0 - g * (self.t1 - self.spec.ambient) - flow) / (Self::C1 * self.spec.c_scale);
+        self.t1 += (power + self.spec.p0 + if fan_rpm < 1000.0 { self.spec.cold_w } else { 0.0 } - g * (self.t1 - self.spec.ambient) - flow) / (Self::C1 * self.spec.c_scale);
         self.t2 += flow / (Self::C2 * self.spec.c_scale);
         self.seen.push_back(self.t1);
         if self.seen.len() > Self::DELAY + 1 {
@@ -1050,6 +1051,9 @@ fn r26_hold_and_coarse_down_step_table() {
 
 #[path = "plan_tests.rs"]
 mod plan;
+
+#[path = "online_tests.rs"]
+mod online;
 
 fn scan_env(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)

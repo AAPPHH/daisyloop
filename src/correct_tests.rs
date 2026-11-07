@@ -1,5 +1,6 @@
 use super::*;
 
+const REST: [f64; 3] = [800.0, 3000.0, 150.0];
 const HORIZONS: [u32; 4] = [30, 60, 90, 120];
 
 fn water(t: i64) -> f64 {
@@ -30,7 +31,7 @@ fn dir(name: &str) -> PathBuf {
 
 fn run(c: &mut Corrector, truth: &Truth, from: i64, to: i64) {
     for t in from..to {
-        c.feed(t, true, Some(water(t)), &truth.live(t));
+        c.feed(t, true, Some(water(t)), REST, &truth.live(t));
     }
 }
 
@@ -71,7 +72,7 @@ fn bias_and_scale_stay_inside_their_bounds_for_any_truth() {
     for (bias, scale) in [(3.0, 3.0), (-3.0, -3.0), (0.9, 0.9), (-1.2, 2.0)] {
         let mut c = Corrector::new(&c0, &d, 1);
         for t in 0..4 * 3600 {
-            c.feed(t, true, Some(water(t)), &Truth { bias, scale }.live(t));
+            c.feed(t, true, Some(water(t)), REST, &Truth { bias, scale }.live(t));
             for r in c.state().values() {
                 assert!(r.bounded(&c0), "{bias} {scale} {r:?}");
             }
@@ -87,34 +88,34 @@ fn skipped_seconds_never_update() {
     let n = |c: &Corrector| c.state().get(&120).map_or(0, |r| r.n);
     let mut c = Corrector::new(&cfg(), &d, 1);
     for t in 0..3000 {
-        c.feed(t, false, Some(water(t)), &truth.live(t));
+        c.feed(t, false, Some(water(t)), REST, &truth.live(t));
     }
     assert_eq!(n(&c), 0);
     for t in 3000..6000 {
-        c.feed(t, true, None, &truth.live(t));
+        c.feed(t, true, None, REST, &truth.live(t));
     }
     assert_eq!(n(&c), 0);
     for t in 6000..9000 {
-        c.feed(t, true, Some(water(t)), &[]);
+        c.feed(t, true, Some(water(t)), REST, &[]);
     }
     assert_eq!(n(&c), 0);
     for t in 9000..12000 {
-        c.feed(t, true, Some(31.0), &truth.live(t));
+        c.feed(t, true, Some(31.0), REST, &truth.live(t));
     }
     assert_eq!(n(&c), 0);
     for t in 12000..12400 {
-        c.feed(t, true, Some(water(t)), &truth.live(t));
+        c.feed(t, true, Some(water(t)), REST, &truth.live(t));
     }
     assert!(n(&c) > 0);
     let before = n(&c);
-    c.feed(12400, false, Some(water(12400)), &truth.live(12400));
+    c.feed(12400, false, Some(water(12400)), REST, &truth.live(12400));
     for t in 12401..12520 {
-        c.feed(t, true, Some(water(t)), &truth.live(t));
+        c.feed(t, true, Some(water(t)), REST, &truth.live(t));
         assert_eq!(n(&c), before, "{t}");
     }
-    c.feed(12600, true, Some(water(12600)), &truth.live(12600));
+    c.feed(12600, true, Some(water(12600)), REST, &truth.live(12600));
     assert_eq!(n(&c), before);
-    c.feed(12601, true, Some(water(12601) + 5.0), &truth.live(12601));
+    c.feed(12601, true, Some(water(12601) + 5.0), REST, &truth.live(12601));
     assert_eq!(n(&c), before);
 }
 
@@ -139,7 +140,7 @@ fn covariance_stays_capped_without_excitation_and_the_scale_is_not_thrown_by_the
     let mut c = Corrector::new(&c0, &d, 1);
     let flat = |t: i64| -> Vec<Live> { HORIZONS.iter().map(|h| Live { h: *h, pred: water(t + *h as i64) - water(t) - 0.1, response: 0.0 }).collect() };
     for t in 0..12 * 3600 {
-        c.feed(t, true, Some(water(t)), &flat(t));
+        c.feed(t, true, Some(water(t)), REST, &flat(t));
     }
     let r = c.state()[&120];
     assert!(r.p[1][1] <= c0.p0_scale + 1e-12 && r.p[0][0] <= c0.p0_bias + 1e-12 && (r.theta[0] - 0.1).abs() < 0.02 && r.theta[1].abs() < 1e-9, "{r:?}");
@@ -199,4 +200,27 @@ fn the_config_validates_and_rejects_nonsense() {
     }
     assert!(toml::from_str::<CorrectionConfig>("half_life_secs = 7200.0\nenabled = false").unwrap().validate().is_ok());
     assert!((cfg().lambda().powf(2160.0) - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn only_windows_with_held_fan_and_pump_rpm_update() {
+    let d = dir("held");
+    let truth = Truth { bias: 0.4, scale: 0.0 };
+    let mut c = Corrector::new(&cfg(), &d, 1);
+    for t in 0..4000 {
+        c.feed(t, true, Some(water(t)), [800.0 + 200.0 * ((t / 20) % 2) as f64, 3000.0, 150.0], &truth.live(t));
+    }
+    assert_eq!(c.state().get(&120).map_or(0, |r| r.n), 0);
+    for t in 4000..8000 {
+        c.feed(t, true, Some(water(t)), [800.0 + 10.0 * ((t / 20) % 2) as f64, 3000.0 + 30.0 * ((t / 7) % 2) as f64, 150.0], &truth.live(t));
+    }
+    assert!(c.state()[&120].n > 100);
+    for t in 8000..8200 {
+        c.feed(t, true, Some(water(t)), [800.0, 3000.0, 150.0 + 60.0 * ((t / 30) % 2) as f64], &truth.live(t));
+    }
+    let n = c.state()[&120].n;
+    for t in 8200..12000 {
+        c.feed(t, true, Some(water(t)), [800.0, 3000.0, 150.0 + 60.0 * ((t / 30) % 2) as f64], &truth.live(t));
+    }
+    assert_eq!(c.state()[&120].n, n);
 }

@@ -14,6 +14,7 @@ pub struct CorrectionConfig {
     pub scale_min: f64,
     pub scale_max: f64,
     pub restart_hold_secs: i64,
+    pub hold: [f64; 3],
     pub resid_max: f64,
     pub jump_k: f64,
     pub p0_bias: f64,
@@ -23,13 +24,13 @@ pub struct CorrectionConfig {
 
 impl Default for CorrectionConfig {
     fn default() -> Self {
-        CorrectionConfig { enabled: true, half_life_secs: 6.0 * 3600.0, update_secs: 10, min_updates: 180, bias_max: 1.0, scale_min: 0.5, scale_max: 1.5, restart_hold_secs: 600, resid_max: 4.0, jump_k: 0.5, p0_bias: 0.25, p0_scale: 0.09, save_secs: 60 }
+        CorrectionConfig { enabled: true, half_life_secs: 6.0 * 3600.0, update_secs: 10, min_updates: 180, bias_max: 1.0, scale_min: 0.5, scale_max: 1.5, restart_hold_secs: 600, hold: [40.0, 100.0, 25.0], resid_max: 4.0, jump_k: 0.5, p0_bias: 0.25, p0_scale: 0.09, save_secs: 60 }
     }
 }
 
 impl CorrectionConfig {
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.half_life_secs, self.bias_max, self.scale_min, self.scale_max, self.resid_max, self.jump_k, self.p0_bias, self.p0_scale];
+        let nums = [self.hold[0], self.hold[1], self.hold[2], self.half_life_secs, self.bias_max, self.scale_min, self.scale_max, self.resid_max, self.jump_k, self.p0_bias, self.p0_scale];
         if nums.iter().any(|v| !v.is_finite() || *v <= 0.0) || self.update_secs < 1 || self.restart_hold_secs < 0 || self.save_secs < 1 {
             return Err("online correction value out of range".into());
         }
@@ -108,6 +109,7 @@ impl Rls {
 struct Sample {
     epoch: i64,
     water: f64,
+    ctl: [f64; 3],
     live: Vec<Live>,
 }
 
@@ -190,7 +192,7 @@ impl Corrector {
         &self.horizons
     }
 
-    pub fn feed(&mut self, epoch: i64, ok: bool, water: Option<f64>, live: &[Live]) {
+    pub fn feed(&mut self, epoch: i64, ok: bool, water: Option<f64>, ctl: [f64; 3], live: &[Live]) {
         if !self.cfg.enabled {
             return;
         }
@@ -207,7 +209,7 @@ impl Corrector {
             self.ring.clear();
             return;
         };
-        self.ring.push_back(Sample { epoch, water: w, live: live.to_vec() });
+        self.ring.push_back(Sample { epoch, water: w, ctl, live: live.to_vec() });
         let keep = live.iter().map(|l| l.h as i64).max().unwrap_or(0) + 1;
         while self.ring.len() as i64 > keep {
             self.ring.pop_front();
@@ -224,6 +226,13 @@ impl Corrector {
                 continue;
             }
             let Some(old) = self.ring.get(at as usize).filter(|s| s.epoch == epoch - h) else { continue };
+            let held = (0..3).all(|k| {
+                let (lo, hi) = self.ring.iter().skip(at as usize).map(|s| s.ctl[k]).fold((f64::INFINITY, f64::NEG_INFINITY), |a, v| (a.0.min(v), a.1.max(v)));
+                hi - lo <= self.cfg.hold[k]
+            });
+            if !held {
+                continue;
+            }
             let Some(pred) = old.live.iter().find(|x| x.h == l.h) else { continue };
             let resid = (w - old.water) - pred.pred;
             let r = self.horizons.entry(l.h).or_insert_with(|| Rls::fresh(&self.cfg));
