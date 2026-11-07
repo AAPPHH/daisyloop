@@ -9,6 +9,7 @@ import tempfile
 import time
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.signal import lfilter
 from export import LinearExporter
 from features import FeatureFrame, Node, Ops, PHYS, PhysSpec, Spec, CONFIG as FCFG
 from models import CONFIG as MCFG, FRESH, LIN_CLIP, LinearFit, Metrics, PINT, Prep, local_idx
@@ -46,7 +47,7 @@ CFG = {
         "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "full_s": 120.0, "fit_rmse_max": 0.12, "c_range": [8.0, 16.0], "ahead": {"h": 120, "step": 10, "gain": 1.5}, "null_bounds": {"C": [8.0, 16.0], "Ta": [18.0, 30.0]}, "boot": {"block_s": 240, "n": 5000, "seed": 0, "q": 0.025}, "loo": True},
         "fan": {"grid_lo_duty": 27.0, "min_levels": 3, "min_span": 40.0, "min_drop": 0.25, "dwell_s": 120},
         "pump": {"dwell_s": 120, "why": "pump coefficient not identified: the protocol does not separate it from pump heat and dead time (dry run: truth 0 gives a fitted 0.14, flag fired in 2 of 5 runs only at truth 0.6), the pump stays on the firmware PID"},
-        "hist": {"block_s": 60, "min_rpm": 1400.0, "min_pump_rpm": 4000.0, "max_fan_range": 40.0, "max_pump_range": 100.0, "min_blocks": 100, "min_span_k": 3.0, "a_range": [20.0, 28.0], "h": 120, "step": 10, "gain": 1.5, "bias_max": 0.10, "bias_rpm": 1400.0, "bins": [0.0, 600.0, 1000.0, 1400.0, 1e9]},
+        "hist": {"block_s": 60, "warm_s": 300, "min_rpm": 1400.0, "min_pump_rpm": 4000.0, "max_fan_range": 40.0, "max_pump_range": 100.0, "min_blocks": 100, "min_span_k": 3.0, "a_range": [20.0, 28.0], "h": 120, "step": 10, "gain": 1.5, "bias_max": 0.10, "bias_rpm": 1400.0, "bins": [0.0, 600.0, 1000.0, 1400.0, 1e9]},
         "rmse_targets": ["water_30", "water_120"],
         "hold_targets": ["water_120", "cpu_120", "gpu_120"],
         "required": ["fan"],
@@ -322,7 +323,7 @@ class Identifier:
 
     def conductance(self, hs):
         hc, pc = self.g["hist"], self.cfg["plant"]
-        cap, dead, B = pc["c1"] + pc["c2"], pc["dead"][-1][1], int(hc["block_s"])
+        c1, c2, kk, dead, B = pc["c1"], pc["c2"], pc["k"], pc["dead"][-1][1], int(hc["block_s"])
         xs, ys = [], []
         for s in hs:
             n = len(s["w"])
@@ -332,12 +333,15 @@ class Identifier:
                 continue
             sh = (k, B)
             r = lambda v: v[: k * B].reshape(sh)
-            ok = r(s["early"]).all(1) & (r(s["f"]).mean(1) >= hc["min_rpm"]) & (np.ptp(r(s["f"]), 1) <= hc["max_fan_range"]) & (r(s["p"]).mean(1) >= hc["min_pump_rpm"]) & (np.ptp(r(s["p"]), 1) <= hc["max_pump_range"])
+            ok = (np.arange(k) * B >= hc["warm_s"]) & r(s["early"]).all(1) & (r(s["f"]).mean(1) >= hc["min_rpm"]) & (np.ptp(r(s["f"]), 1) <= hc["max_fan_range"]) & (r(s["p"]).mean(1) >= hc["min_pump_rpm"]) & (np.ptp(r(s["p"]), 1) <= hc["max_pump_range"])
             tt = np.arange(B) - (B - 1) / 2.0
             w = r(s["w"])
-            slope = (w * tt).sum(1) / (tt * tt).sum()
+            lag = kk / c2
+            t2 = lfilter([lag], [1.0, lag - 1.0], s["w"][:-1], zi=[(1.0 - lag) * s["w"][0]])[0]
+            t2 = np.r_[s["w"][0], t2]
+            slope = lambda v: (v * tt).sum(1) / (tt * tt).sum()
             xs.append(w.mean(1)[ok])
-            ys.append((r(qd).mean(1) - cap * slope)[ok])
+            ys.append((r(qd).mean(1) - c1 * slope(w) - c2 * slope(r(t2)))[ok])
         x, y = (np.concatenate(v) if v else np.zeros(0) for v in (xs, ys))
         if len(x) < hc["min_blocks"] or np.ptp(x) < hc["min_span_k"]:
             return {"a": None, "n": int(len(x)), "ok": False, "span_k": float(np.ptp(x)) if len(x) else 0.0}

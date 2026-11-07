@@ -348,7 +348,7 @@ def test_full_fan_conductance_is_estimated_from_steady_history_blocks_and_out_of
     ident = S.Identifier(S.CFG, None)
     for a in (21.0, 24.0, 27.0):
         e = ident.conductance([steady_history(a)])
-        assert e["ok"] and abs(e["a"] - a) < 1.5 and e["n"] > 100, (a, e)
+        assert e["ok"] and abs(e["a"] - a) < 0.01 * a and e["n"] > 100, (a, e)
     assert not ident.conductance([steady_history(31.0)])["ok"]
     slow = steady_history(24.0)
     slow["f"] = np.full(len(slow["w"]), 900.0)
