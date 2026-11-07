@@ -208,7 +208,7 @@ fn only_windows_with_held_fan_and_pump_rpm_update() {
     let truth = Truth { bias: 0.4, scale: 0.0 };
     let mut c = Corrector::new(&cfg(), &d, 1);
     for t in 0..4000 {
-        c.feed(t, true, Some(water(t)), [800.0 + 200.0 * ((t / 20) % 2) as f64, 3000.0, 150.0], &truth.live(t));
+        c.feed(t, true, Some(water(t)), [800.0 + 400.0 * ((t / 20) % 2) as f64, 3000.0, 150.0], &truth.live(t));
     }
     assert_eq!(c.state().get(&120).map_or(0, |r| r.n), 0);
     for t in 4000..8000 {
@@ -216,11 +216,11 @@ fn only_windows_with_held_fan_and_pump_rpm_update() {
     }
     assert!(c.state()[&120].n > 100);
     for t in 8000..8200 {
-        c.feed(t, true, Some(water(t)), [800.0, 3000.0, 150.0 + 60.0 * ((t / 30) % 2) as f64], &truth.live(t));
+        c.feed(t, true, Some(water(t)), [800.0, 3000.0, 150.0 + 100.0 * ((t / 30) % 2) as f64], &truth.live(t));
     }
     let n = c.state()[&120].n;
     for t in 8200..12000 {
-        c.feed(t, true, Some(water(t)), [800.0, 3000.0, 150.0 + 60.0 * ((t / 30) % 2) as f64], &truth.live(t));
+        c.feed(t, true, Some(water(t)), [800.0, 3000.0, 150.0 + 100.0 * ((t / 30) % 2) as f64], &truth.live(t));
     }
     assert_eq!(c.state()[&120].n, n);
 }

@@ -24,7 +24,7 @@ pub struct CorrectionConfig {
 
 impl Default for CorrectionConfig {
     fn default() -> Self {
-        CorrectionConfig { enabled: true, half_life_secs: 6.0 * 3600.0, update_secs: 10, min_updates: 180, bias_max: 1.0, scale_min: 0.5, scale_max: 1.5, restart_hold_secs: 600, hold: [40.0, 100.0, 25.0], resid_max: 4.0, jump_k: 0.5, p0_bias: 0.25, p0_scale: 0.09, save_secs: 60 }
+        CorrectionConfig { enabled: true, half_life_secs: 6.0 * 3600.0, update_secs: 10, min_updates: 180, bias_max: 1.0, scale_min: 0.5, scale_max: 1.5, restart_hold_secs: 600, hold: [100.0, 300.0, 80.0], resid_max: 4.0, jump_k: 0.5, p0_bias: 0.25, p0_scale: 0.09, save_secs: 60 }
     }
 }
 
@@ -149,6 +149,7 @@ pub struct Corrector {
 impl Corrector {
     pub const FILE: &'static str = "online_correction.json";
     const VERSION: u32 = 1;
+    const MAX_GAP_SECS: i64 = 10;
 
     pub fn new(cfg: &CorrectionConfig, dir: &Path, digest: u64) -> Corrector {
         let mut c = Corrector { cfg: cfg.clone(), horizons: BTreeMap::new(), ring: VecDeque::new(), last_epoch: None, last_water: None, changed: 0, bad: i64::MIN / 2, next_at: 0, live: Vec::new(), digest, path: dir.join(Self::FILE), dirty: false, saved_at: i64::MIN / 2 };
@@ -197,7 +198,7 @@ impl Corrector {
             return;
         }
         let water = water.filter(|w| w.is_finite());
-        let gap = self.last_epoch.is_some_and(|p| epoch != p + 1);
+        let gap = self.last_epoch.is_some_and(|p| epoch <= p || epoch - p > Self::MAX_GAP_SECS);
         let jump = water.zip(self.last_water).is_some_and(|(a, b)| (a - b).abs() > self.cfg.jump_k);
         if water != self.last_water {
             self.changed = epoch;
@@ -210,8 +211,8 @@ impl Corrector {
             return;
         };
         self.ring.push_back(Sample { epoch, water: w, ctl, live: live.to_vec() });
-        let keep = live.iter().map(|l| l.h as i64).max().unwrap_or(0) + 1;
-        while self.ring.len() as i64 > keep {
+        let keep = live.iter().map(|l| l.h as i64).max().unwrap_or(0);
+        while self.ring.front().is_some_and(|s| s.epoch < epoch - keep) {
             self.ring.pop_front();
         }
         if epoch < self.next_at {
@@ -220,14 +221,13 @@ impl Corrector {
         let mut done = false;
         for l in live {
             let h = l.h as i64;
-            let Some(front) = self.ring.front().map(|s| s.epoch) else { break };
-            let at = epoch - h - front;
-            if at < 0 || self.bad > epoch - h || self.changed <= epoch - h {
+            if self.bad > epoch - h || self.changed <= epoch - h {
                 continue;
             }
-            let Some(old) = self.ring.get(at as usize).filter(|s| s.epoch == epoch - h) else { continue };
+            let at = self.ring.partition_point(|s| s.epoch < epoch - h);
+            let Some(old) = self.ring.get(at).filter(|s| s.epoch == epoch - h) else { continue };
             let held = (0..3).all(|k| {
-                let (lo, hi) = self.ring.iter().skip(at as usize).map(|s| s.ctl[k]).fold((f64::INFINITY, f64::NEG_INFINITY), |a, v| (a.0.min(v), a.1.max(v)));
+                let (lo, hi) = self.ring.iter().skip(at).map(|s| s.ctl[k]).fold((f64::INFINITY, f64::NEG_INFINITY), |a, v| (a.0.min(v), a.1.max(v)));
                 hi - lo <= self.cfg.hold[k]
             });
             if !held {

@@ -201,3 +201,143 @@ fn owner_config_values_validate_and_hold_the_water_near_the_target_in_simulation
     println!("owner config 120 W constant: mean water in hour 3 {mean:.2}, peak {peak:.2}");
     assert!(peak < 35.5 && mean < 34.6 && run.rig.c.chans.iter().all(|c| c.fallback.is_none()));
 }
+
+struct History {
+    channels: Vec<String>,
+    data: Vec<f32>,
+    k0: i64,
+    rows: usize,
+}
+
+impl History {
+    fn load(dir: &str) -> History {
+        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{dir}/meta.json")).unwrap()).unwrap();
+        let channels: Vec<String> = meta["channels"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        let bytes = std::fs::read(format!("{dir}/data.f32")).unwrap();
+        let data: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let rows = meta["rows"].as_u64().unwrap() as usize;
+        assert_eq!(data.len(), rows * channels.len());
+        History { channels, data, k0: meta["k0"].as_i64().unwrap(), rows }
+    }
+    fn row(&self, t: usize) -> &[f32] {
+        let n = self.channels.len();
+        &self.data[t * n..(t + 1) * n]
+    }
+    fn col(&self, name: &str) -> usize {
+        self.channels.iter().position(|c| c == name).unwrap()
+    }
+}
+
+#[derive(Default)]
+struct Bins {
+    corrected: Vec<f64>,
+    raw: Vec<f64>,
+}
+
+impl Bins {
+    fn add(&mut self, c: f64, r: f64) {
+        self.corrected.push(c);
+        self.raw.push(r);
+    }
+    fn line(&self, name: &str) -> String {
+        let (c, r) = (rmse(&self.corrected), rmse(&self.raw));
+        format!("{name}: n {} corrected {c:.4} uncorrected {r:.4} change {:+.1} %", self.raw.len(), (c / r - 1.0) * 100.0)
+    }
+}
+
+#[test]
+#[ignore]
+fn b_replay_of_the_real_history_through_the_deployed_model_and_the_correction() {
+    use crate::correct::Corrector;
+    use crate::model::XgbModel;
+    let h = History::load(&std::env::var("DL_HIST").expect("DL_HIST"));
+    let models = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models")];
+    let mut model = XgbModel::load(&models, "feature_spec_deploy.json", "model_deploy.json").unwrap();
+    let cfg = crate::correct::CorrectionConfig::default();
+    let dir = std::env::temp_dir().join(format!("daisyloop-replay-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut corr = Corrector::new(&cfg, &dir, model.digest());
+    let inputs = model.inputs();
+    let ix: Vec<usize> = inputs.iter().map(|c| h.col(c)).collect();
+    let (iw, iff, ipr, ipp, icpu, igpu, iph) = (h.col("d5next/water/temp"), h.col("d5next/fan/rpm"), h.col("d5next/pump/rpm"), h.col("d5next/pump/power"), h.col("/intelcpu/0/power/0"), h.col("nvml/0/power"), h.col("daisyloop/step/phase"));
+    let fin = |v: f32| v.is_finite();
+    let mut last_seen = vec![i64::MIN / 2; ix.len()];
+    let mut last_data = i64::MIN / 2;
+    let mut contiguous_since = 0i64;
+    let mut scored: Vec<(usize, f64, f64, f64, bool)> = Vec::new();
+    let half = h.rows / 2;
+    let mut updates_first_half = 0u32;
+    let mut counts = [0usize; 7];
+    for t in 0..h.rows {
+        let row = h.row(t);
+        let epoch = h.k0 + t as i64;
+        if !row.iter().enumerate().any(|(i, v)| i != iph && fin(*v)) {
+            continue;
+        }
+        if epoch - last_data > 10 {
+            contiguous_since = epoch;
+        }
+        last_data = epoch;
+        let map: HashMap<String, f64> = h.channels.iter().zip(row).filter(|(c, v)| fin(**v) && c.as_str() != "daisyloop/step/phase" && (c.as_str() != "d5next/water/temp" || (5.0..=80.0).contains(&(**v as f64)))).map(|(c, v)| (c.clone(), *v as f64)).collect();
+        model.observe(&map, epoch);
+        for (k, c) in inputs.iter().enumerate() {
+            if map.contains_key(c) {
+                last_seen[k] = epoch;
+            }
+        }
+        let water = map.get("d5next/water/temp").copied();
+        let live = model.live();
+        let step = fin(row[iph]);
+        let stale = last_seen.iter().any(|s| epoch - s > 10);
+        let ok = water.is_some() && !stale && !step && epoch - contiguous_since >= cfg.restart_hold_secs && map.contains_key("d5next/fan/rpm") && map.contains_key("d5next/pump/rpm");
+        counts[0] += 1;
+        counts[1] += water.is_some() as usize;
+        counts[2] += (!live.is_empty()) as usize;
+        counts[3] += stale as usize;
+        counts[4] += step as usize;
+        counts[5] += ok as usize;
+        counts[6] += (ok && !live.is_empty()) as usize;
+        let watts: f64 = [icpu, igpu, ipp].iter().filter(|i| fin(row[**i])).map(|i| (row[*i] as f64).max(0.0)).sum();
+        let rpm = |i: usize| if fin(row[i]) { row[i] as f64 } else { f64::NAN };
+        if let (Some(l), Some(w)) = (live.iter().find(|l| l.h == 120), water) {
+            if t + HORIZON < h.rows && fin(h.row(t + HORIZON)[iw]) && fin(row[iff]) {
+                let actual = h.row(t + HORIZON)[iw] as f64 - w;
+                let corrected = l.pred + corr.delta(120, l.response);
+                scored.push((t, corrected - actual, l.pred - actual, row[iff] as f64, step));
+            }
+        }
+        corr.feed(epoch, ok, water, [rpm(iff), rpm(ipr), watts], &live);
+        if t == half {
+            updates_first_half = corr.state().get(&120).map_or(0, |r| r.n);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let edges = [0.0, 600.0, 1000.0, 1400.0, f64::INFINITY];
+    let mut later = Bins::default();
+    let mut later_nostep = Bins::default();
+    let mut bins: Vec<Bins> = (0..4).map(|_| Bins::default()).collect();
+    let mut first = Bins::default();
+    for (t, c, r, fan, step) in &scored {
+        if *t < half {
+            first.add(*c, *r);
+            continue;
+        }
+        later.add(*c, *r);
+        if !step {
+            later_nostep.add(*c, *r);
+        }
+        let b = (0..4).find(|b| *fan >= edges[*b] && *fan < edges[*b + 1]).unwrap();
+        bins[b].add(*c, *r);
+    }
+    println!("B seconds: with data, water, live, stale, step, ok, ok and live = {counts:?}");
+    println!("B history rows {} (k0 {}), scored samples {}, updates at h120 by the half {updates_first_half}", h.rows, h.k0, scored.len());
+    println!("B first half {}", first.line("first half (learning)"));
+    println!("B {}", later.line("later half overall"));
+    println!("B {}", later_nostep.line("later half without step-test seconds"));
+    for (b, name) in ["fan 0-600", "fan 600-1000", "fan 1000-1400", "fan 1400+"].iter().enumerate() {
+        println!("B {}", bins[b].line(name));
+    }
+    for (hh, s) in corr.state() {
+        println!("B final state h {hh}: bias {:.3} scale {:.3} n {} rejected {}", s.theta[0], 1.0 + s.theta[1], s.n, s.rejected);
+    }
+}
