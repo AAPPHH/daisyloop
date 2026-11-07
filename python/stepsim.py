@@ -9,7 +9,7 @@ from rawstore import RawStore
 
 SIM = {
     "plant": {
-        "c1": 7100.0, "c2": 4600.0, "k": 24.0, "a": 23.8, "m": 1.61, "gamma": 0.03, "ta": 25.0, "eta_cpu": 0.96, "eta_gpu": 1.0,
+        "c1": 7100.0, "c2": 4600.0, "k": 24.0, "a": 23.8, "m": 1.61, "gamma": 0.03, "ta": 25.0, "q0": 65.0, "eta_cpu": 0.96, "eta_gpu": 1.0,
         "fan_full_rpm": 1460.0, "fan_per_duty": 14.7, "spool_s": 4.5, "pump_cal": [[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]],
         "pump_power": [[0.0, 4.26], [19.8, 4.26], [100.0, 18.32]], "dead": [[2400.0, 33.0], [2570.0, 31.0], [4800.0, 11.0]],
         "sensor_k": 0.005, "quant": 0.01, "load_noise_w": 8.0, "rpm_noise": 2.0, "firmware_fan": 100.0, "firmware_pump": 19.8,
@@ -71,7 +71,7 @@ class Plant:
         qtot = np.empty(n)
         out, fd_rec, pd_rec = np.empty(n), np.empty(n), np.empty(n)
         frpm, prpm_rec, ppow_rec, wread = np.empty(n), np.empty(n), np.empty(n), np.empty(n)
-        qload = c["eta_cpu"] * p_cpu + c["eta_gpu"] * p_gpu
+        qload = c["eta_cpu"] * p_cpu + c["eta_gpu"] * p_gpu + c["q0"]
         r = (c["firmware_fan"] if np.isnan(fan_cmd[0]) else fan_cmd[0]) * c["fan_per_duty"]
         t1 = t2 = w_prev = c["start_water"]
         for i in range(n):

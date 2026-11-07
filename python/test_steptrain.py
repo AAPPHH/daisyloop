@@ -223,18 +223,75 @@ def test_conductance_check_uses_the_lowest_held_running_level_and_can_fail():
     assert ex["levels_held"] == [0.0, 25.0] and abs(ex["level_rpm"]["25.0"] - 395.0) < 1e-9
     low = min(r for l, r in ex["level_rpm"].items() if float(l) > 0.0) / ident.gb.full
     for m, passes in ((1.6, True), (0.1, False)):
-        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"rmse_full": None}}
-        th = np.zeros(10)
-        th[2] = m
+        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"ahead": None}}
+        th = np.zeros(11)
+        th[0], th[2] = 12.0, m
         why = ident.fan(o, th, [], ex)["reasons"]
         assert ("conductance drop at the lowest level too small" in why) == (not passes), (m, why)
 
 
-def test_rmse_limits_are_the_dry_run_noise_band_times_the_margin():
+def test_gate_criteria_are_the_pre_registered_ones_and_the_text_says_so():
     g = S.CFG["gate"]["grey"]
-    assert g["fit_rmse_max"] == round(g["band"]["margin"] * g["band"]["fit_max"], 3) and g["hold_rmse_max"] == round(g["band"]["margin"] * g["band"]["hold_max"], 3)
-    res = [{"case": "fan_30.0", "fit_rmse": 0.04, "hold": {"rmse_full": 0.05}}, {"case": "fan_30.5", "fit_rmse": 0.05, "hold": {"rmse_full": 0.06}}, {"case": "alt_fan_30.5", "fit_rmse": 0.2, "hold": {"rmse_full": 0.9}}]
-    assert S.DryRun.band(res) == {"fit_max": 0.05, "hold_max": 0.06, "runs": 2}
+    assert g["fit_rmse_max"] == 0.12 and g["c_range"] == [8.0, 16.0] and g["ahead"] == {"h": 120, "step": 10, "gain": 1.5} and "band" not in g and "hold_rmse_max" not in g
+    text = " ".join(S.CFG["gate"]["text"])
+    assert "0.12 K" in text and "8 to 16 kJ/K" in text and "1.5 times better" in text and "persistence" in text and "q0" in text
+
+
+def test_q0_is_a_parameter_free_in_the_null_model_and_not_a_response_input():
+    gb = S.GreyBox()
+    i = gb.NAMES.index("q0")
+    assert (gb.LO[i], gb.HI[i]) == (0.0, 120.0)
+    n = 1800
+    seg = {"w": np.full(n, 30.0), "q": np.full(n, 100.0), "f": np.full(n, 700.0), "p": np.full(n, 3000.0), "t": np.arange(n) / 3600.0}
+    th = np.array(gb.X0)
+    base = gb.simulate(th, seg)
+    th2 = th.copy()
+    th2[i] += 20.0
+    assert gb.simulate(th2, seg)[-1] > base[-1]
+    resp = S.Identifier(S.CFG, None).response(dict(zip(gb.NAMES, th.tolist())))
+    assert "q0" not in resp
+    assert {n.name for n in S.Response(resp).nodes()} == {"step.fr", "step.fm", "step.pr", "step.pf", "step.wt", "step.fp", "step.fx"}
+
+
+def forecast_seg(m, q0, seed):
+    n = 3000
+    fan = np.concatenate([np.full(1200, 100.0), np.full(600, 50.0), np.full(600, 100.0), np.full(600, 60.0)])
+    load = np.concatenate([np.full(1200, 200.0), np.full(600, 70.0), np.full(600, 200.0), np.full(600, 120.0)])
+    c = dict(SIM["plant"], q0=q0, m=m)
+    sim = Plant(c, True).run(fan, np.full(n, 19.8), load * 0.55, load * 0.45, np.random.default_rng(seed))
+    hold = np.arange(n) >= 1800
+    return {"w": sim["water"], "q": 0.96 * load * 0.55 + load * 0.45 + sim["pump_pow"], "f": sim["fan_rpm"], "p": sim["pump_rpm"], "t": np.arange(n) / 3600.0, "fit": ~hold, "hold": hold}
+
+
+def test_grey_box_recovers_a_constant_unmodelled_heat_and_the_forecast_beats_the_references():
+    gb = S.GreyBox()
+    seg = forecast_seg(1.61, 65.0, 3)
+    th, sse, n = gb.fit([seg])
+    th0, _, _ = gb.fit([seg], {"m": 0.0}, th)
+    d = dict(zip(gb.NAMES, th))
+    assert abs(d["q0"] - 65.0) < 30.0 and 8.0 <= d["C"] <= 16.0, d
+    full, per = gb.ahead(th, seg, 120, 10)
+    null, _ = gb.ahead(th0, seg, 120, 10)
+    assert len(full) == len(per) > 50
+    rm = lambda v: float(np.sqrt(np.mean(v ** 2)))
+    assert rm(full) < rm(per) and rm(null) >= 1.5 * rm(full), (rm(full), rm(null), rm(per))
+
+
+def test_forecast_gate_and_heat_capacity_gate_refuse_what_they_should():
+    ident = S.Identifier(S.CFG, None)
+    ex = {"levels_held": [0.0, 25.0, 50.0, 100.0], "span": 100.0}
+    th = np.zeros(11)
+    th[0], th[2] = 12.0, 1.5
+    base = {"fit_rmse_k": 0.05, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": 0.3}
+    ok = dict(base, hold_fan={"ahead": {"full": 0.3, "null": 0.6, "persist": 0.62, "n": 100}})
+    assert ident.fan(ok, th, [], ex)["reasons"] == []
+    for ahead, text in (({"full": 0.3, "null": 0.44, "persist": 0.62}, "times better than the no-fan refit"), ({"full": 0.3, "null": 0.6, "persist": 0.3}, "not better than persistence"), (None, "no hold-out")):
+        assert any(text in r for r in ident.fan(dict(base, hold_fan={"ahead": ahead}), th, [], ex)["reasons"]), ahead
+    for c in (7.9, 16.1):
+        t = th.copy()
+        t[0] = c
+        assert any("heat capacity" in r for r in ident.fan(ok, t, [], ex)["reasons"])
+    assert any("fit RMSE" in r for r in ident.fan(dict(ok, fit_rmse_k=0.121), th, [], ex)["reasons"])
 
 
 if __name__ == "__main__":

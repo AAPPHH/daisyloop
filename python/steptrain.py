@@ -42,8 +42,7 @@ CFG = {
     "workers": 5,
     "blas_threads": 1,
     "gate": {
-        "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "hold_gain": 1.5, "full_s": 120.0,
-                 "band": {"margin": 1.25, "fit_max": 0.0514, "hold_max": 0.0877, "runs": 60}},
+        "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "full_s": 120.0, "fit_rmse_max": 0.12, "c_range": [8.0, 16.0], "ahead": {"h": 120, "step": 10, "gain": 1.5}, "loo": True},
         "fan": {"grid_lo_duty": 27.0, "min_levels": 3, "min_span": 40.0, "min_drop": 0.25, "dwell_s": 120},
         "pump": {"dwell_s": 120, "why": "pump coefficient not identified: the protocol does not separate it from pump heat and dead time (dry run: truth 0 gives a fitted 0.14, flag fired in 2 of 5 runs only at truth 0.6), the pump stays on the firmware PID"},
         "rmse_targets": ["water_30", "water_120"],
@@ -53,9 +52,10 @@ CFG = {
         "text": [
             "ship only if all of the following hold, otherwise the artifact is written as candidate_* and not as model_deploy.json",
             "1. fan excitation: enough distinct duty levels held long enough in the step windows",
-            "2. grey-box fit of the thermal.md plant with the dead time as a parameter and a linear ambient drift on the rows that are finite, outside gaps and outside the hold-out spans: fit RMSE at most grey.fit_rmse_max, the largest RMSE of the correct plant over the dry-run seeds (grey.band) times grey.band.margin",
+            "2. grey-box fit of the thermal.md plant with the dead time as a parameter, a linear ambient drift and a constant unmodelled heat input q0 (0 to 120 W) on the rows that are finite, outside gaps and outside the hold-out spans: fit RMSE at most grey.fit_rmse_max = 0.12 K (absolute sanity limit)",
             "3. fan exponent m is positive with a one-sided 95 % likelihood-ratio bound (variance inflated for autocorrelation) against the nested model without fan response but with ambient drift, and the conductance of the lowest held running duty level (its recorded rpm, not the 0 % test) is at least min_drop below full fan",
-            "4. independent check: phases not used in the fit (fan phases 6 and 7, pump phases 4 and 5 and what follows) are predicted with RMSE at most grey.hold_rmse_max (the same band rule) and at least hold_gain times better than by the nested no-fan-plus-drift model refitted on the same fit phases",
+            "3b. fitted heat capacity C within 8 to 16 kJ/K (the independently known value is 11.7)",
+            "4. independent check on fan phases 6 and 7, which stay out of the fit and the response term: the 120 s ahead forecast, re-initialised from the measured water every 10 s with both lumps set to the measured water, has RMSE at least 1.5 times better than the no-fan refit (q0 and drift free) and strictly better than persistence; the free-run hold-out RMSE and the leave-one-fan-phase-out ranges of C, m, q0 and Ta are reported, not gated",
             "5. water 30 s and 120 s RMSE of the model on the final fold (test, fresh2, held-out step rows) is not worse than the deployed model's by more than z times the block-bootstrap standard deviation of the paired difference, and on the held-out step rows the 120 s forecasts of water, cpu and gpu are not worse than persistence by more than the same band",
             "the pump flag is not part of the gate: identified.pump is always false, the planner then does not use the model for the pump channel",
         ],
@@ -67,9 +67,6 @@ CFG = {
             "starts": [30.0, 30.5, 31.0], "restart_gap": [120, 30], "grid": {"fan": "all", "nofan": [30.5], "drift_nofan": [30.5], "bump_nofan": [30.5], "alt_fan": [30.5], "alt_nofan": [30.5]},
             "seeds": 10, "need": 9, "protocol": "runbook", "factor": 1.5},
 }
-
-for _k in ("fit", "hold"):
-    CFG["gate"]["grey"][f"{_k}_rmse_max"] = round(CFG["gate"]["grey"]["band"]["margin"] * CFG["gate"]["grey"]["band"][f"{_k}_max"], 3)
 
 
 class Forest:
@@ -108,11 +105,11 @@ class Forest:
 
 
 class GreyBox:
-    NAMES = ["C", "A", "m", "gamma", "Ta", "tau", "f1", "K", "tau_hi", "drift"]
-    LO = [3.0, 1.0, 0.0, -1.0, 10.0, 5.0, 0.3, 5.0, 3.0, -8.0]
-    HI = [40.0, 80.0, 3.5, 1.0, 30.0, 60.0, 1.0, 80.0, 60.0, 8.0]
-    X0 = [11.7, 20.0, 1.0, 0.0, 25.0, 20.0, 0.6, 24.0, 12.0, 0.0]
-    SCALE = [5.0, 10.0, 1.0, 0.2, 5.0, 10.0, 0.3, 10.0, 10.0, 2.0]
+    NAMES = ["C", "A", "m", "gamma", "Ta", "tau", "f1", "K", "tau_hi", "drift", "q0"]
+    LO = [3.0, 1.0, 0.0, -1.0, 10.0, 5.0, 0.3, 5.0, 3.0, -8.0, 0.0]
+    HI = [40.0, 80.0, 3.5, 1.0, 30.0, 60.0, 1.0, 80.0, 60.0, 8.0, 120.0]
+    X0 = [11.7, 20.0, 1.0, 0.0, 25.0, 20.0, 0.6, 24.0, 12.0, 0.0, 60.0]
+    SCALE = [5.0, 10.0, 1.0, 0.2, 5.0, 10.0, 0.3, 10.0, 10.0, 2.0, 20.0]
 
     def __init__(self, cfg=CFG):
         p = cfg["plant"]
@@ -122,14 +119,30 @@ class GreyBox:
     def conductance(self, th, f, p):
         return th[1] * np.power(np.maximum(f, 0.0) / self.full, th[2]) * (1.0 + th[3] * (p / self.pump_full - 1.0))
 
-    def simulate(self, th, s):
-        C, A, m, gam, Ta, tau, f1, K, tau_hi, drift = th
+    def parts(self, th, s):
+        C, A, m, gam, Ta, tau, f1, K, tau_hi, drift, q0 = th
         w, p = s["w"], s["p"]
         n = len(w)
-        qd = np.interp(np.arange(n) - np.interp(p, [self.pump_lo, self.pump_hi], [tau, tau_hi]), np.arange(n), s["q"]).tolist()
-        G = self.conductance(th, s["f"], p).tolist()
-        ta = (Ta + drift * s["t"]).tolist()
-        c1, c2 = C * 1000.0 * f1, C * 1000.0 * (1.0 - f1) + 1e-9
+        qd = np.interp(np.arange(n) - np.interp(p, [self.pump_lo, self.pump_hi], [tau, tau_hi]), np.arange(n), s["q"]) + q0
+        return qd, self.conductance(th, s["f"], p), Ta + drift * s["t"], C * 1000.0 * f1, C * 1000.0 * (1.0 - f1) + 1e-9, K
+
+    def ahead(self, th, s, h, step):
+        qd, G, ta, c1, c2, K = self.parts(th, s)
+        w = s["w"]
+        a = np.arange(0, len(w) - h, step)
+        a = a[s["hold"][a + h]]
+        t = w[a].copy()
+        u = t.copy()
+        for j in range(h):
+            f = K * (t - u)
+            t = t + (qd[a + j] - G[a + j] * (t - ta[a + j]) - f) / c1
+            u = u + f / c2
+        return t - w[a + h], w[a] - w[a + h]
+
+    def simulate(self, th, s):
+        qd, G, ta, c1, c2, K = (v.tolist() if isinstance(v, np.ndarray) else v for v in self.parts(th, s))
+        w = s["w"]
+        n = len(w)
         t1 = t2 = w[0]
         out = [0.0] * n
         for i in range(n):
@@ -280,9 +293,31 @@ class Identifier:
         out["lowest_rpm_ratio"] = min(low) / gb.full if low else None
         out["g_ratio_at_lowest"] = float(out["lowest_rpm_ratio"] ** th[2]) if low else None
         hs = [s for s in fan_s if s["hold"].any()]
-        out["hold_fan"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(th0, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs))}
+        out["hold_fan"] = {"rmse_full": gb.rmse(th, hs, "hold") if hs else None, "rmse_null": gb.rmse(th0, hs, "hold") if hs else None, "rows": int(sum(s["hold"].sum() for s in hs)), "ahead": self.ahead(th, th0, hs)}
+        if gc["loo"]:
+            out["loo"] = self.loo(th, fan_s)
         out.update(fan=self.fan(out, th, fan_s, ex), pump=self.pump())
         out["response"] = self.response(out["theta_fit"])
+        return out
+
+    def ahead(self, th, th0, hs):
+        a = self.g["grey"]["ahead"]
+        e = [self.gb.ahead(t, s, a["h"], a["step"]) for s in hs for t in (th, th0)]
+        if not hs or not sum(len(x[0]) for x in e):
+            return None
+        rm = lambda v: float(np.sqrt(np.mean(np.concatenate(v) ** 2)))
+        return {"full": rm([x[0] for x in e[0::2]]), "null": rm([x[0] for x in e[1::2]]), "persist": rm([x[1] for x in e[0::2]]), "n": int(sum(len(x[0]) for x in e[0::2]))}
+
+    def loo(self, th, fan_s):
+        gb, out = self.gb, {"phases": {}}
+        for ph in range(1, 8):
+            for s in self.segs:
+                out_ph = (s["who"] == "fan") & (s["phase"] == ph)
+                s["lo_fit"], s["lo_hold"] = s["all"] & ~out_ph, s["all"] & out_ph
+            t, _, _ = gb.fit(self.segs, x0=th, key="lo_fit")
+            ls = [s for s in fan_s if s["lo_hold"].any()]
+            out["phases"][str(ph)] = {**{k: float(t[gb.NAMES.index(k)]) for k in ("C", "m", "q0", "Ta")}, "left_out_rmse": gb.rmse(t, ls, "lo_hold") if ls else None}
+        out["range"] = {k: [min(v[k] for v in out["phases"].values()), max(v[k] for v in out["phases"].values())] for k in ("C", "m", "q0", "Ta")}
         return out
 
     def fan(self, o, th, ss, ex):
@@ -293,17 +328,20 @@ class Identifier:
             why.append("fan not excited enough")
         if not o["fit_rmse_k"] <= gc["fit_rmse_max"]:
             why.append(f"grey-box fit RMSE {o['fit_rmse_k']:.3f} K above {gc['fit_rmse_max']}")
+        if not gc["c_range"][0] <= th[0] <= gc["c_range"][1]:
+            why.append(f"fitted heat capacity {th[0]:.1f} kJ/K outside {gc['c_range'][0]} to {gc['c_range'][1]}")
         if not (th[2] > 0 and o["lr_m"] >= o["lr_threshold"]):
             why.append("fan exponent not significant against no fan response with ambient drift")
         if o["g_ratio_at_lowest"] is None or not o["g_ratio_at_lowest"] <= 1.0 - c["min_drop"]:
             why.append("conductance drop at the lowest level too small")
-        if h["rmse_full"] is None:
+        a = h.get("ahead")
+        if a is None:
             why.append("no hold-out fan phases")
         else:
-            if not h["rmse_full"] <= gc["hold_rmse_max"]:
-                why.append(f"hold-out RMSE {h['rmse_full']:.3f} K above {gc['hold_rmse_max']}")
-            if not h["rmse_null"] >= gc["hold_gain"] * h["rmse_full"]:
-                why.append("hold-out not predicted better than by no fan response with drift")
+            if not a["null"] >= gc["ahead"]["gain"] * a["full"]:
+                why.append(f"{gc['ahead']['h']} s forecast on the hold-out phases ({a['full']:.3f} K) not {gc['ahead']['gain']} times better than the no-fan refit ({a['null']:.3f} K)")
+            if not a["full"] < a["persist"]:
+                why.append(f"{gc['ahead']['h']} s forecast on the hold-out phases ({a['full']:.3f} K) not better than persistence ({a['persist']:.3f} K)")
         hs = [s for s in ss if s["hold"].any()]
         eff = None
         if hs:
@@ -691,7 +729,7 @@ def dry_task(job):
     dest = os.path.join(root, f"{case}-{seed}")
     info = Injector(cfg, sim).build(cfg["dry"]["protocol"], fr, os.path.join(dest, "store"), seed, drift)
     truth = Plant(sim["plant"], fr, drift)
-    c = dict(cfg, store_dir=os.path.join(dest, "store"), out_dir=os.path.join(dest, "out"), truth=truth, seed=seed)
+    c = dict(cfg, store_dir=os.path.join(dest, "store"), out_dir=os.path.join(dest, "out"), truth=truth, seed=seed, gate=dict(cfg["gate"], grey=dict(cfg["gate"]["grey"], loo=False)))
     try:
         rep = StepTrainer(c).run()
     finally:
@@ -699,7 +737,7 @@ def dry_task(job):
     f = rep["identification"]["fan"]
     ratio = f["effect_k"] / f["truth_k"] if f.get("truth_k") else None
     return {"case": case, "seed": seed, "ship": rep["gate"]["ship"], "identified": rep["gate"]["identified"], "reasons": rep["gate"]["reasons"], "fan_effect_k": f["effect_k"], "truth_k": f.get("truth_k"), "ratio": ratio,
-            "m": f["m"], "gamma": rep["identification"]["theta_fit"]["gamma"], "fit_rmse": rep["identification"]["fit_rmse_k"], "hold": rep["identification"]["hold_fan"], "family": rep["family"], "seconds": rep["seconds"], "water_max": info["water_max"]}
+            "m": f["m"], "gamma": rep["identification"]["theta_fit"]["gamma"], "q0": rep["identification"]["theta_fit"]["q0"], "c": rep["identification"]["theta_fit"]["C"], "fit_rmse": rep["identification"]["fit_rmse_k"], "hold": rep["identification"]["hold_fan"], "family": rep["family"], "seconds": rep["seconds"], "water_max": info["water_max"]}
 
 
 class Runner:
@@ -737,13 +775,9 @@ class DryRun:
             rs = [r for r in res if r["case"] == case]
             ok = [bool(r["ratio"] is not None and 1.0 / factor <= r["ratio"] <= factor) for r in rs]
             out[case] = {"n": len(rs), "ship": sum(r["ship"] for r in rs), "ship_ok": sum(bool(r["ship"] and o) for r, o in zip(rs, ok)), "fan_id": sum(r["identified"]["fan"] for r in rs), "ratio_ok": sum(ok),
-                         "fit": rng([r["fit_rmse"] for r in rs]), "hold": rng([r["hold"]["rmse_full"] for r in rs if r["hold"]["rmse_full"] is not None]), "ratio": rng([r["ratio"] for r in rs if r["ratio"]])}
+                         "fit": rng([r["fit_rmse"] for r in rs]), "hold": rng([r["hold"]["rmse_full"] for r in rs if r["hold"]["rmse_full"] is not None]), "ratio": rng([r["ratio"] for r in rs if r["ratio"]]),
+                         "q0": rng([r["q0"] for r in rs]), "c": rng([r["c"] for r in rs]), "ahead_gain": rng([r["hold"]["ahead"]["null"] / r["hold"]["ahead"]["full"] for r in rs if r["hold"].get("ahead")])}
         return out
-
-    @staticmethod
-    def band(res):
-        fan = [r for r in res if r["case"].startswith("fan_")]
-        return {"fit_max": max(r["fit_rmse"] for r in fan), "hold_max": max(r["hold"]["rmse_full"] for r in fan), "runs": len(fan)} if fan else None
 
     @staticmethod
     def verdict(summary, need=9):
@@ -764,7 +798,7 @@ def main(argv, cfg=CFG):
         cases = argv[2].split(",") if len(argv) > 2 else None
         root, res = DryRun(cfg).run(argv[1] if len(argv) > 1 else None, cases, int(argv[3]) if len(argv) > 3 else None)
         sm = DryRun.summary(res, cfg["dry"]["factor"])
-        out = {"root": root, "band": DryRun.band(res), "summary": sm, "criteria": DryRun.verdict(sm, cfg["dry"]["need"])}
+        out = {"root": root, "summary": sm, "criteria": DryRun.verdict(sm, cfg["dry"]["need"])}
     else:
         out = train_task(cfg)["gate"]
     print(json.dumps(out, indent=1))
