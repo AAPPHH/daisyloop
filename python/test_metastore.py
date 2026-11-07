@@ -4,6 +4,8 @@ import shutil
 import tempfile
 import numpy as np
 import pytest
+import metastore
+from lake import CONFIG as LCFG, RangeLake, LakeError
 from metastore import CONFIG, BlockScore, HistoryStore, StoreError, Thinner
 
 K0 = 1_700_000_000
@@ -18,7 +20,8 @@ def cfg_for(tmp, **tol):
     c["tol"]["sample_chunks"] = 2
     c["tol"]["preset"] = dict(zip(NAMES, [0.01, 1.0, 5.0, 0.5, 0.5, 0.1, 0.5, 0.1, 0.5]), **tol)
     c["thin"].update(hold_blocks=1, rare_blocks=2)
-    c["score"]["transient_frac"] = 0.05
+    c["cache_dir"] = os.path.join(tmp, "cache")
+    c["d5"]["width"] = 20
     return c
 
 
@@ -47,6 +50,7 @@ class FakeReader:
     def __init__(self, X, floor=None):
         self.X, self.avail, self.floor = X, T, floor
         self.reads = []
+        self.with_d5 = False
 
     def read(self, a, b):
         if self.floor is not None and a < self.floor():
@@ -57,6 +61,19 @@ class FakeReader:
         r, c = np.nonzero(np.isfinite(sub))
         rows = {"k": (r + i0 + K0).astype(np.int64), "channel": np.array(NAMES, dtype=object)[c], "v": sub[r, c].astype(np.float64)}
         return rows, {n: ("src", n, k, "u", "state") for n, k in zip(NAMES, KINDS)}
+
+    def read_d5(self, a, b, width):
+        if not self.with_d5:
+            return np.zeros(0, np.int64), np.zeros((0, width), np.uint8), 0
+        if not hasattr(self, "D5"):
+            rng = np.random.default_rng(5)
+            m = np.cumsum(rng.integers(-1, 2, (T, width)), axis=0).astype(np.uint8)
+            m[:, 3] = (np.arange(T) * 10).astype(np.uint8)
+            m[500:900] = m[500]
+            self.D5 = m
+        i0, i1 = a - K0, min(b, K0 + self.avail) - K0
+        t = (np.arange(i0, i1) + K0) * 1_000_000 + (np.arange(i0, i1) * 37) % 900_000
+        return t.astype(np.int64), self.D5[i0:i1], 0
 
     def latest(self, a=None):
         return K0 + self.avail - 1
@@ -203,3 +220,114 @@ def test_update_after_thinning_stays_within_tolerance(tmp):
         i = NAMES.index(ch["channel"])
         fin = np.isfinite(X[:, i])
         assert (np.abs(R[fin, j].astype(np.float64) - X[fin, i]) <= mult[fin] * tol[j] + slack(X)[i]).all()
+
+
+def protected_share(th):
+    bs = BlockScore(th.st).compute()
+    prot = th.protected(bs)
+    return prot[~bs["step"]].mean(), bs, prot
+
+
+def test_d5_stored_exactly_with_duplicate_runs_collapsed_and_incremental(tmp):
+    X = synth(3)
+    c = cfg_for(tmp)
+    rd = FakeReader(X)
+    rd.with_d5 = True
+    for n in (4, 10):
+        rd.avail = T * n // 10
+        st = HistoryStore(c)
+        info = st.update(rd)
+    t, M = st.reports()
+    i = np.arange(len(t))
+    assert len(t) == T * 10 // 10 and (np.diff(t) > 0).all() and info["bytes_d5"] > 0 and info["bytes_telemetry"] > 0
+    assert (M == rd.D5[: len(t)]).all() and (t == (i + K0) * 1_000_000 + (i * 37) % 900_000).all()
+    day = st.d5_day(int(t[0] // 1_000_000 // c["day_s"]))
+    raw = open(st.files("d5")[int(t[0] // 1_000_000 // c["day_s"])], "rb").read()
+    assert int.from_bytes(raw[8:16], "little") < int.from_bytes(raw[:8], "little")
+    assert info["bytes"] == info["bytes_telemetry"] + info["bytes_d5"]
+    t2, M2 = st.reports(K0 + 100, K0 + 199)
+    assert len(t2) == 100 and (M2 == rd.D5[100:200]).all()
+
+
+def test_load_is_a_memmap_cached_until_the_store_changes(tmp):
+    X = synth(4)
+    st = build(tmp, X)
+    meta, R = st.load()
+    assert isinstance(R, np.memmap) and R.mode == "c"
+    cache = os.path.join(tmp, "cache")
+    names = sorted(os.listdir(cache))
+    mt = {n: os.stat(os.path.join(cache, n)).st_mtime_ns for n in names}
+    meta2, R2 = HistoryStore(st.cfg).load()
+    assert sorted(os.listdir(cache)) == names and mt == {n: os.stat(os.path.join(cache, n)).st_mtime_ns for n in names}
+    assert (np.isfinite(R) == np.isfinite(R2)).all()
+    sub, S = st.load(channels=[NAMES[0]], k0=K0 + 5000, k1=K0 + 5999)
+    assert S.shape == (1000, 1) and np.array_equal(S[:, 0], R[5000:6000, meta["channels"].index(next(c for c in meta["channels"] if c["channel"] == NAMES[0]))], equal_nan=True)
+    Thinner(st, budget=int(st.size() * 0.8)).enforce()
+    del R, R2
+    _, R3 = HistoryStore(st.cfg).load()
+    assert sorted(os.listdir(cache)) != names
+
+
+def test_stage_one_protects_about_a_fifth_of_non_step_blocks(tmp):
+    st = build(tmp, synth())
+    share, bs, prot = protected_share(Thinner(st))
+    assert 0.17 <= share <= 0.23 and not (prot & bs["step"]).any()
+
+
+def test_ladder_continues_oldest_first_beyond_max_mult_and_records_bound(tmp):
+    X = synth()
+    st = build(tmp, X)
+    th = Thinner(st, budget=int(st.size() * 0.45))
+    th.cfg.update(max_mult=2.0, ladder_max=64.0)
+    out = th.enforce()
+    assert out["ladder"] and st.size() <= th.budget
+    assert 2.0 < max(th.mult.values()) <= 64.0
+    ids = sorted(b for b, m in th.mult.items() if m > 2.0)
+    low = sorted(b for b, m in th.mult.items() if m <= 2.0)
+    assert ids and (not low or ids[0] <= low[len(low) // 2])
+    meta, R = HistoryStore(st.cfg).load()
+    tol = np.array(meta["tol"])
+    mult = np.array([th.mult.get(int(x) // st.cfg["block_s"], 1.0) for x in np.arange(T) + K0])
+    for j, ch in enumerate(meta["channels"]):
+        i = NAMES.index(ch["channel"])
+        fin = np.isfinite(X[:, i])
+        assert (np.abs(R[fin, j].astype(np.float64) - X[fin, i]) <= mult[fin] * tol[j] + slack(X)[i]).all(), ch["channel"]
+    sm = BlockScore(st).compute()
+    assert all(th.mult.get(int(b), 1.0) == 1.0 for b in np.flatnonzero(sm["step"]) + sm["b0"])
+    with pytest.raises(StoreError):
+        Thinner(st, budget=1000).enforce()
+
+
+def test_thinning_overshoot_stays_small(tmp):
+    st = build(tmp, synth())
+    th = Thinner(st, budget=int(st.size() * 0.8))
+    out = th.enforce()
+    assert 0.0 <= (th.budget * st.cfg["safety"] - out["size_after"]) / th.budget < 0.05
+
+
+def test_range_lake_retries_a_file_that_disappears_and_gives_up_cleanly(tmp):
+    lake = RangeLake(dict(LCFG, data_dir=tmp, retry_wait=0.001, retries=3))
+    lake.location = lambda t: (_ for _ in ()).throw(IndexError())
+    calls = []
+    real = lake.hot_files
+
+    def racing(table, t0, t1):
+        calls.append(1)
+        if len(calls) == 1:
+            raise FileNotFoundError("gone")
+        return real(table, t0, t1)
+
+    lake.hot_files = racing
+    lake.refresh(0, 10)
+    assert len(calls) == 2 and lake.con.execute("select count(*) from telemetry").fetchone()[0] == 0
+    lake.hot_files = lambda *a: (_ for _ in ()).throw(FileNotFoundError("gone"))
+    with pytest.raises(LakeError):
+        lake.refresh(0, 10)
+
+
+def test_failures_before_main_are_logged(tmp):
+    c = cfg_for(tmp)
+    c["data_dir"] = os.path.join(tmp, "nolake")
+    with pytest.raises(Exception):
+        metastore.main(["bogus"], c)
+    assert "bogus failed" in open(c["log"]).read()
