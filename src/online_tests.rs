@@ -267,8 +267,15 @@ fn b_replay_of_the_real_history_through_the_deployed_model_and_the_correction() 
     let mut scored: Vec<(usize, f64, f64, f64, bool)> = Vec::new();
     let half = h.rows / 2;
     let mut updates_first_half = 0u32;
-    let mut counts = [0usize; 7];
+    let fb_ix: Vec<usize> = model.fallback_inputs().iter().filter_map(|c| inputs.iter().position(|i| i == c)).collect();
+    let repeat: i64 = std::env::var("DL_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let mut counts = [0usize; 8];
+    let mut drift_first: Option<usize> = None;
+    let mut stale_by = vec![0usize; ix.len()];
     for t in 0..h.rows {
+        if t == half {
+            updates_first_half = corr.state().get(&120).map_or(0, |r| r.n);
+        }
         let row = h.row(t);
         let epoch = h.k0 + t as i64;
         if !row.iter().enumerate().any(|(i, v)| i != iph && fin(*v)) {
@@ -297,6 +304,10 @@ fn b_replay_of_the_real_history_through_the_deployed_model_and_the_correction() 
         counts[4] += step as usize;
         counts[5] += ok as usize;
         counts[6] += (ok && !live.is_empty()) as usize;
+        for (k, s) in last_seen.iter().enumerate() {
+            stale_by[k] += (epoch - s > 10) as usize;
+        }
+        counts[7] += fb_ix.iter().any(|k| epoch - last_seen[*k] > 10) as usize;
         let watts: f64 = [icpu, igpu, ipp].iter().filter(|i| fin(row[**i])).map(|i| (row[*i] as f64).max(0.0)).sum();
         let rpm = |i: usize| if fin(row[i]) { row[i] as f64 } else { f64::NAN };
         if let (Some(l), Some(w)) = (live.iter().find(|l| l.h == 120), water) {
@@ -307,8 +318,11 @@ fn b_replay_of_the_real_history_through_the_deployed_model_and_the_correction() 
             }
         }
         corr.feed(epoch, ok, water, [rpm(iff), rpm(ipr), watts], &live);
-        if t == half {
-            updates_first_half = corr.state().get(&120).map_or(0, |r| r.n);
+        if drift_first.is_none() && !corr.drifting().is_empty() {
+            drift_first = Some(t);
+        }
+        if repeat > 0 && epoch % repeat == 0 {
+            corr.feed(epoch, ok, water, [rpm(iff), rpm(ipr), watts], &live);
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -329,7 +343,9 @@ fn b_replay_of_the_real_history_through_the_deployed_model_and_the_correction() 
         let b = (0..4).find(|b| *fan >= edges[*b] && *fan < edges[*b + 1]).unwrap();
         bins[b].add(*c, *r);
     }
-    println!("B seconds: with data, water, live, stale, step, ok, ok and live = {counts:?}");
+    println!("B seconds: with data, water, live, stale (any input), step, ok, ok and live, hold (fallback input stale) = {counts:?}, hold share {:.2} %, repeat {repeat}", 100.0 * counts[7] as f64 / counts[0] as f64);
+    println!("B stale seconds per input {:?}, fallback inputs {:?}", inputs.iter().zip(&stale_by).collect::<Vec<_>>(), model.fallback_inputs());
+    println!("B drift alarm first at row {drift_first:?} of {}, horizons drifting at the end {:?}", h.rows, corr.drifting());
     println!("B history rows {} (k0 {}), scored samples {}, updates at h120 by the half {updates_first_half}", h.rows, h.k0, scored.len());
     println!("B first half {}", first.line("first half (learning)"));
     println!("B {}", later.line("later half overall"));

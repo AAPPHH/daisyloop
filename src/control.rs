@@ -787,6 +787,9 @@ impl Control {
     }
 
     fn fall_back(&mut self, i: usize, why: &str, limit: bool) {
+        for h in self.corr.drifting() {
+            self.raise(&mut out, AlarmKind::ModelDrift, &format!("correction/{h}"), format!("Modell driftet, Neutraining empfohlen ({h} s)"), None, None, now);
+        }
         if self.chans[i].mode == Mode::Active || self.chans[i].driving() {
             self.trip(i, why, limit);
         }
@@ -1305,6 +1308,7 @@ impl Control {
             rows.push(row("step/duty".into(), "step test duty".into(), "%", self.step_duty(t, now), "input"));
             rows.push(row("step/overridden".into(), "step test duty raised by the rule bound (1 yes)".into(), "", self.step_overridden(t, now) as u8 as f64, "aux"));
         }
+            rows.push(row(format!("correction/{h}/drift"), format!("online correction at {h} s sat at its bias or scale bound for more than the drift time (1 yes, retraining recommended)"), "", s.drift as u8 as f64, "aux"));
         rows
     }
 
@@ -1342,7 +1346,7 @@ impl Control {
         let left = self.warm_left();
         let model = ModelInfo { loaded: self.model.is_some(), warm: self.model.is_some() && left == 0, warmup_left_s: left as u32, fan_identified: self.identified(0), pump_identified: self.identified(1), error: self.model_error.clone() };
         let predicted = self.plan.as_ref().map(|(p, at)| {
-            Predicted { horizon_s: self.cfg.horizon_secs, water: self.shown, raw: self.shown_raw, correction: self.corr.shown().into_iter().map(|s| Correction { horizon_s: s.h, bias: s.bias, scale: s.scale, delta: s.delta, updates: s.updates, acting: s.acting }).collect(), water_limit: p.limit, feasible: p.feasible, age_ms: now - at }
+            Predicted { horizon_s: self.cfg.horizon_secs, water: self.shown, raw: self.shown_raw, correction: self.corr.shown().into_iter().map(|s| Correction { horizon_s: s.h, bias: s.bias, scale: s.scale, delta: s.delta, updates: s.updates, acting: s.acting, drift: s.drift }).collect(), water_limit: p.limit, feasible: p.feasible, age_ms: now - at }
         });
         let step = self.test.as_ref().map(|t| StepStatus { id: format!("d5.{}", self.chans[t.chan].spec.name), phase: t.idx as u32 + 1, phases: t.steps.len() as u32, duty: self.step_duty(t, now), overridden: self.step_overridden(t, now), left_s: ((t.steps[t.idx][1] * 1000.0 - (now - t.since) as f64) / 1000.0).max(0.0) as u32 });
         let limits = vec![

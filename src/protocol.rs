@@ -56,6 +56,7 @@ pub enum AlarmKind {
     Fallback,
     Foreign,
     Budget,
+    ModelDrift,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -135,6 +136,8 @@ pub struct Correction {
     pub delta: f64,
     pub updates: u32,
     pub acting: bool,
+    #[serde(default)]
+    pub drift: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

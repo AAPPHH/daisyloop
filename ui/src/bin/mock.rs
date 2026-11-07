@@ -295,7 +295,7 @@ impl Sim {
             }
         }
         let gain = 1.0 - (self.controls[0].target_rpm.unwrap_or(0.0) / FAN_MAX_RPM) * 0.8;
-        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), raw: Some(water + 0.28 + 1.2 * gain), correction: vec![Correction { horizon_s: 120, bias: -0.12, scale: 1.04, delta: -0.1, updates: 900, acting: true }], water_limit: 43.5, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
+        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), raw: Some(water + 0.28 + 1.2 * gain), correction: vec![Correction { horizon_s: 120, bias: -0.12, scale: 1.04, delta: -0.1, updates: 900, acting: true, drift: false }], water_limit: 43.5, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
     }
 
     fn tick(&mut self) {

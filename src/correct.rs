@@ -20,18 +20,21 @@ pub struct CorrectionConfig {
     pub p0_bias: f64,
     pub p0_scale: f64,
     pub save_secs: i64,
+    pub clamp_p_frac: f64,
+    pub sat_frac: f64,
+    pub drift_secs: i64,
 }
 
 impl Default for CorrectionConfig {
     fn default() -> Self {
-        CorrectionConfig { enabled: true, half_life_secs: 6.0 * 3600.0, update_secs: 10, min_updates: 180, bias_max: 1.0, scale_min: 0.5, scale_max: 1.5, restart_hold_secs: 600, hold: [100.0, 300.0, 80.0], resid_max: 4.0, jump_k: 0.5, p0_bias: 0.25, p0_scale: 0.09, save_secs: 60 }
+        CorrectionConfig { enabled: true, half_life_secs: 6.0 * 3600.0, update_secs: 10, min_updates: 180, bias_max: 1.0, scale_min: 0.5, scale_max: 1.5, restart_hold_secs: 600, hold: [100.0, 300.0, 80.0], resid_max: 4.0, jump_k: 0.5, p0_bias: 0.25, p0_scale: 0.09, save_secs: 60, clamp_p_frac: 0.1, sat_frac: 0.95, drift_secs: 6 * 3600 }
     }
 }
 
 impl CorrectionConfig {
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.hold[0], self.hold[1], self.hold[2], self.half_life_secs, self.bias_max, self.scale_min, self.scale_max, self.resid_max, self.jump_k, self.p0_bias, self.p0_scale];
-        if nums.iter().any(|v| !v.is_finite() || *v <= 0.0) || self.update_secs < 1 || self.restart_hold_secs < 0 || self.save_secs < 1 {
+        let nums = [self.hold[0], self.hold[1], self.hold[2], self.half_life_secs, self.bias_max, self.scale_min, self.scale_max, self.resid_max, self.jump_k, self.p0_bias, self.p0_scale, self.clamp_p_frac, self.sat_frac];
+        if nums.iter().any(|v| !v.is_finite() || *v <= 0.0) || self.update_secs < 1 || self.restart_hold_secs < 0 || self.save_secs < 1 || self.drift_secs < 1 || self.clamp_p_frac > 1.0 || self.sat_frac > 1.0 {
             return Err("online correction value out of range".into());
         }
         if self.scale_min >= 1.0 || self.scale_max <= 1.0 || self.half_life_secs < 60.0 * self.update_secs as f64 {
@@ -51,11 +54,13 @@ pub struct Rls {
     pub p: [[f64; 2]; 2],
     pub n: u32,
     pub rejected: u32,
+    #[serde(default)]
+    pub sat: i64,
 }
 
 impl Rls {
     pub fn fresh(c: &CorrectionConfig) -> Rls {
-        Rls { theta: [0.0, 0.0], p: [[c.p0_bias, 0.0], [0.0, c.p0_scale]], n: 0, rejected: 0 }
+        Rls { theta: [0.0, 0.0], p: [[c.p0_bias, 0.0], [0.0, c.p0_scale]], n: 0, rejected: 0, sat: 0 }
     }
 
     fn sane(&self) -> bool {
@@ -66,7 +71,15 @@ impl Rls {
         self.sane() && self.theta[0].abs() <= c.bias_max && self.theta[1] >= c.scale_min - 1.0 && self.theta[1] <= c.scale_max - 1.0
     }
 
-    pub fn update(&mut self, c: &CorrectionConfig, resid: f64, response: f64) {
+    fn saturated(&self, c: &CorrectionConfig) -> bool {
+        self.theta[0].abs() >= c.sat_frac * c.bias_max || self.theta[1] <= c.sat_frac * (c.scale_min - 1.0) || self.theta[1] >= c.sat_frac * (c.scale_max - 1.0)
+    }
+
+    pub fn drifting(&self, c: &CorrectionConfig, epoch: i64) -> bool {
+        self.sat != 0 && epoch - self.sat > c.drift_secs
+    }
+
+    pub fn update(&mut self, c: &CorrectionConfig, resid: f64, response: f64, epoch: i64) {
         let before = *self;
         let phi = [1.0, response];
         let lambda = c.lambda();
@@ -95,8 +108,14 @@ impl Rls {
         let clamped = [self.theta[0].clamp(-c.bias_max, c.bias_max), self.theta[1].clamp(c.scale_min - 1.0, c.scale_max - 1.0)];
         if clamped != self.theta {
             self.theta = clamped;
-            self.p = Rls::fresh(c).p;
+            let mid = [c.p0_bias * c.clamp_p_frac, c.p0_scale * c.clamp_p_frac];
+            for i in 0..2 {
+                self.p[i][i] = 0.5 * (self.p[i][i] + mid[i]);
+            }
+            self.p[0][1] *= 0.5;
+            self.p[1][0] = self.p[0][1];
         }
+        self.sat = if self.saturated(c) { if self.sat == 0 { epoch } else { self.sat } } else { 0 };
         self.n += 1;
     }
 
@@ -121,6 +140,7 @@ pub struct Shown {
     pub delta: f64,
     pub updates: u32,
     pub acting: bool,
+    pub drift: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -199,7 +219,15 @@ impl Corrector {
             return;
         }
         let water = water.filter(|w| w.is_finite());
-        let gap = self.last_epoch.is_some_and(|p| epoch <= p || epoch - p > Self::MAX_GAP_SECS);
+        if self.last_epoch == Some(epoch) {
+            self.live = live.to_vec();
+            if let (Some(s), Some(w)) = (self.ring.back_mut().filter(|s| s.epoch == epoch), water.filter(|_| ok && !live.is_empty())) {
+                *s = Sample { epoch, water: w, ctl, live: live.to_vec() };
+                self.last_water = Some(w);
+            }
+            return;
+        }
+        let gap = self.last_epoch.is_some_and(|p| epoch < p || epoch - p > Self::MAX_GAP_SECS);
         let jump = water.zip(self.last_water).is_some_and(|(a, b)| (a - b).abs() > self.cfg.jump_k);
         if water != self.last_water {
             self.changed = epoch;
@@ -241,7 +269,7 @@ impl Corrector {
                 r.rejected += 1;
                 continue;
             }
-            r.update(&self.cfg, resid, pred.response);
+            r.update(&self.cfg, resid, pred.response, epoch);
             done = true;
         }
         if done {
@@ -257,12 +285,20 @@ impl Corrector {
         self.horizons.get(&h).map_or(0.0, |r| r.delta(&self.cfg, response))
     }
 
+    fn drifting_at(&self, r: &Rls) -> bool {
+        self.cfg.enabled && self.last_epoch.is_some_and(|e| r.drifting(&self.cfg, e))
+    }
+
+    pub fn drifting(&self) -> Vec<u32> {
+        self.horizons.iter().filter(|(_, r)| self.drifting_at(r)).map(|(h, _)| *h).collect()
+    }
+
     pub fn shown(&self) -> Vec<Shown> {
         self.horizons
             .iter()
             .map(|(h, r)| {
                 let response = self.live.iter().find(|l| l.h == *h).map_or(0.0, |l| l.response);
-                Shown { h: *h, bias: r.theta[0], scale: 1.0 + r.theta[1], delta: r.delta(&self.cfg, response), updates: r.n, acting: r.n >= self.cfg.min_updates }
+                Shown { h: *h, bias: r.theta[0], scale: 1.0 + r.theta[1], delta: r.delta(&self.cfg, response), updates: r.n, acting: r.n >= self.cfg.min_updates, drift: self.drifting_at(r) }
             })
             .collect()
     }

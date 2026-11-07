@@ -224,3 +224,42 @@ fn only_windows_with_held_fan_and_pump_rpm_update() {
     }
     assert_eq!(c.state()[&120].n, n);
 }
+
+#[test]
+fn a_repeated_epoch_keeps_the_latest_values_and_does_not_clear_the_ring_but_a_backwards_jump_does() {
+    let truth = Truth { bias: 0.3, scale: 0.1 };
+    let n = |c: &Corrector| c.state().get(&120).map_or(0, |r| r.n);
+    let (mut clean, mut rep) = (Corrector::new(&cfg(), &dir("rep-a"), 1), Corrector::new(&cfg(), &dir("rep-b"), 1));
+    for t in 0..3 * 3600 {
+        clean.feed(t, true, Some(water(t)), REST, &truth.live(t));
+        rep.feed(t, true, Some(water(t) + if t % 83 == 0 { 0.05 } else { 0.0 }), REST, &truth.live(t));
+        if t % 83 == 0 {
+            rep.feed(t, true, Some(water(t)), REST, &truth.live(t));
+        }
+    }
+    assert_eq!(n(&rep), n(&clean));
+    assert!((0..2).all(|i| (rep.state()[&120].theta[i] - clean.state()[&120].theta[i]).abs() < 0.01));
+    let before = n(&rep);
+    rep.feed(3 * 3600 - 500, true, Some(water(3 * 3600 - 500)), REST, &truth.live(3 * 3600 - 500));
+    for t in 3 * 3600 - 499..3 * 3600 - 400 {
+        rep.feed(t, true, Some(water(t)), REST, &truth.live(t));
+    }
+    assert_eq!(n(&rep), before);
+}
+
+#[test]
+fn sustained_saturation_raises_the_drift_flag_after_six_hours_and_the_covariance_is_shrunk_not_reset() {
+    let c0 = cfg();
+    let mut c = Corrector::new(&c0, &dir("drift"), 1);
+    run(&mut c, &Truth { bias: 3.0, scale: 0.0 }, 0, 5 * 3600);
+    let r = c.state()[&120];
+    assert!(r.theta[0] > 0.95 * c0.bias_max && r.p[0][0] < c0.p0_bias && r.bounded(&c0));
+    assert!(c.drifting().is_empty() && c.shown().iter().all(|s| !s.drift));
+    run(&mut c, &Truth { bias: 3.0, scale: 0.0 }, 5 * 3600, 9 * 3600);
+    assert!(c.drifting().contains(&120) && c.shown().iter().any(|s| s.drift));
+    run(&mut c, &Truth { bias: 0.2, scale: 0.0 }, 9 * 3600, 22 * 3600);
+    assert!(c.drifting().is_empty());
+    let mut ok = Corrector::new(&c0, &dir("nodrift"), 1);
+    run(&mut ok, &Truth { bias: 0.3, scale: 0.1 }, 0, 12 * 3600);
+    assert!(ok.drifting().is_empty());
+}
