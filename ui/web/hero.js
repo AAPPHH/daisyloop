@@ -162,6 +162,9 @@ export class Hero {
     $('#pred-water').textContent = p?.water != null ? num(p.water, 1) + ' °C' : '–';
     $('#pred-water').classList.toggle('over', p?.water != null && p.water > p.water_limit);
     $('#pred-water-lim').textContent = p ? `wirksame Planobergrenze ${num(p.water_limit, 1)}` : '';
+    const corr = p?.correction ?? [];
+    const at = corr.find((c) => c.horizon_s === p?.horizon_s);
+    $('#pred-corr').textContent = !at ? '' : at.acting ? `Korrektur ${at.delta >= 0 ? '+' : ''}${num(at.delta, 2)} K (Versatz ${at.bias >= 0 ? '+' : ''}${num(at.bias, 2)}, Skala ${num(at.scale, 2)}, roh ${p.raw != null ? num(p.raw, 1) : '�'}) � ${corr.map((c) => `${c.horizon_s}s ${c.bias >= 0 ? '+' : ''}${num(c.bias, 2)}/${num(c.scale, 2)}`).join(' ')}` : `Korrektur lernt (${at.updates} Updates)`;
     const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
     $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));
   }
