@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug)]
 pub struct Forecast {
     pub water: f64,
-    pub cpu: f64,
-    pub gpu: f64,
 }
 
 pub trait Model {
@@ -169,7 +167,7 @@ impl Model for XgbModel {
             let name = format!("{prefix}_{horizon_s}");
             out.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).filter(|v| v.is_finite()).ok_or_else(|| format!("model has no finite target {name}"))
         };
-        Ok(Forecast { water: get("water")?, cpu: get("cpu")?, gpu: get("gpu")? })
+        Ok(Forecast { water: get("water")? })
     }
 }
 
@@ -244,14 +242,6 @@ impl Axis<'_> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Temps {
     pub water: Option<f64>,
-    pub cpu: Option<f64>,
-    pub gpu: Option<f64>,
-}
-
-impl Temps {
-    pub fn all(&self) -> bool {
-        self.water.is_some() && self.cpu.is_some() && self.gpu.is_some()
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,9 +249,7 @@ pub struct Plan {
     pub fan_rpm: f64,
     pub pump_rpm: f64,
     pub water: Option<f64>,
-    pub cpu: Option<f64>,
-    pub gpu: Option<f64>,
-    pub limits: [f64; 3],
+    pub limit: f64,
     pub feasible: bool,
 }
 
@@ -270,9 +258,8 @@ pub struct Planner<'a> {
 }
 
 impl Planner<'_> {
-    pub fn limits(cfg: &ControlConfig, weight: f64) -> [f64; 3] {
-        let shift = weight.clamp(0.0, 1.0) * cfg.weight_span_k;
-        [cfg.water_plan_limit - shift, cfg.cpu_plan_limit, cfg.gpu_plan_limit]
+    pub fn limit(cfg: &ControlConfig, weight: f64) -> f64 {
+        cfg.water_plan_limit - weight.clamp(0.0, 1.0) * cfg.weight_span_k
     }
 
     fn noise(&self, fan: &Axis, pump: &Axis, f: f64, p: f64) -> f64 {
@@ -281,17 +268,17 @@ impl Planner<'_> {
     }
 
     fn within(plan: &Plan, margin: f64) -> bool {
-        [plan.water, plan.cpu, plan.gpu].iter().zip(plan.limits).all(|(t, l)| t.is_some_and(|t| t <= l - margin))
+        plan.water.is_some_and(|t| t <= plan.limit - margin)
     }
 
     pub fn plan(&self, model: &dyn Model, fan: &Axis, pump: &Axis, now: &Temps, weight: f64, prev: Option<(f64, f64)>) -> Result<Plan, String> {
-        let limits = Self::limits(self.cfg, weight);
+        let limit = Self::limit(self.cfg, weight);
         let eval = |f: f64, p: f64| -> Result<Plan, String> {
             let mut hold = HashMap::new();
             fan.hold(f, &mut hold);
             pump.hold(p, &mut hold);
             let fc = model.forecast(&hold, self.cfg.rollout_secs, self.cfg.horizon_secs)?;
-            Ok(Plan { fan_rpm: f, pump_rpm: p, water: now.water.map(|t| t + fc.water), cpu: now.cpu.map(|t| t + fc.cpu), gpu: now.gpu.map(|t| t + fc.gpu), limits, feasible: true })
+            Ok(Plan { fan_rpm: f, pump_rpm: p, water: now.water.map(|t| t + fc.water), limit, feasible: true })
         };
         let (fans, pumps) = (fan.candidates(self.cfg.fan_candidates), pump.candidates(self.cfg.pump_candidates));
         let mut all: Vec<(f64, Plan)> = Vec::new();
@@ -307,7 +294,7 @@ impl Planner<'_> {
         }
         let cheapest = |margin: f64| all.iter().filter(|(_, p)| Self::within(p, margin)).min_by(|a, b| a.0.total_cmp(&b.0));
         let stay = match prev {
-            Some((f, p)) if now.all() => {
+            Some((f, p)) if now.water.is_some() => {
                 let (f, p) = (fan.fit(f).1, pump.fit(p).1);
                 let plan = eval(f, p)?;
                 Self::within(&plan, 0.0).then(|| (self.noise(fan, pump, f, p), plan))
@@ -368,15 +355,31 @@ mod tests {
     }
 
     #[test]
-    fn shipped_model_loads_is_not_identified_and_forecasts_finite_values() {
+    fn shipped_model_loads_is_identified_by_owner_override_and_forecasts_finite_values() {
         let m = real();
-        assert_eq!(m.identified(), (false, false));
+        assert_eq!(m.identified(), (true, true));
         assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
-        assert!(f.water.is_finite() && f.cpu.is_finite() && f.gpu.is_finite());
+        assert!(f.water.is_finite());
         assert!(m.forecast(&hold, 120, 77).is_err());
         assert!(XgbModel::load(&[PathBuf::from("nowhere")], "a", "b").is_err());
+    }
+
+    #[test]
+    fn a_water_only_model_loads_and_forecasts_like_the_deployed_one() {
+        let dir = Golden::dir();
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("model_deploy.json")).unwrap()).unwrap();
+        v["targets"].as_object_mut().unwrap().retain(|k, _| k.starts_with("water_"));
+        let spec = std::fs::read_to_string(dir.join("feature_spec_deploy.json")).unwrap();
+        let g = Golden::load();
+        let (mut only, mut full) = (XgbModel::from_text(&spec, &v.to_string()).unwrap(), g.model());
+        for t in 3000..3400 {
+            only.observe(&g.row(t), g.k0 + t as i64);
+            full.observe(&g.row(t), g.k0 + t as i64);
+        }
+        let hold: HashMap<String, f64> = HashMap::new();
+        assert!((only.forecast(&hold, 120, 120).unwrap().water - full.forecast(&hold, 120, 120).unwrap().water).abs() < 1e-9);
     }
 
     #[test]
@@ -389,7 +392,7 @@ mod tests {
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
         let t0 = std::time::Instant::now();
-        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0) }, 0.5, None).unwrap();
         assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
         assert!(plan.fan_rpm >= fan.rpm_range().0 && plan.fan_rpm <= fan.rpm_range().1 && plan.pump_rpm >= pump.rpm_range().0);
     }
@@ -403,7 +406,7 @@ mod tests {
         let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
-        let temps = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+        let temps = Temps { water: Some(31.0) };
         let runs = 10;
         let t0 = std::time::Instant::now();
         for _ in 0..runs {
@@ -430,7 +433,7 @@ mod tests {
                 (rpm, m.forecast(&hold, cfg.rollout_secs, cfg.horizon_secs).unwrap().water)
             })
             .collect();
-        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0) }, 0.5, None).unwrap();
         assert!(plan.water.is_some_and(f64::is_finite));
         out
     }
@@ -584,7 +587,7 @@ mod cost {
         let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
-        let temps = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+        let temps = Temps { water: Some(31.0) };
         let planner = Planner { cfg: &cfg };
         let mut ts: Vec<f64> = (0..reps)
             .map(|_| {
@@ -625,7 +628,7 @@ mod cost {
         assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
-        assert!(f.water.is_finite() && f.cpu.is_finite() && f.gpu.is_finite());
+        assert!(f.water.is_finite());
         assert!(m.forecast(&hold, 120, 77).is_err());
         assert!(plan_ms(&m, 1).0 < 5000.0);
     }

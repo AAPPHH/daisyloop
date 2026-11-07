@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const PIPE_NAME: &str = r"\\.\pipe\daisyloop";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,8 +48,6 @@ pub enum Drive {
 #[serde(rename_all = "snake_case")]
 pub enum AlarmKind {
     WaterHigh,
-    CpuHigh,
-    GpuHigh,
     WaterTop,
     WaterFrozen,
     PumpLow,
@@ -133,11 +131,7 @@ pub struct ModelInfo {
 pub struct Predicted {
     pub horizon_s: u32,
     pub water: Option<f64>,
-    pub cpu: Option<f64>,
-    pub gpu: Option<f64>,
     pub water_limit: f64,
-    pub cpu_limit: f64,
-    pub gpu_limit: f64,
     pub feasible: bool,
     pub age_ms: i64,
 }

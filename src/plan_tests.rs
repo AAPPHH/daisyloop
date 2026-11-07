@@ -57,7 +57,7 @@ impl Model for Informed {
             p.step(power, rpm);
         }
         let d = p.reading() - now;
-        Ok(Forecast { water: d, cpu: d, gpu: 0.0 })
+        Ok(Forecast { water: d })
     }
 }
 

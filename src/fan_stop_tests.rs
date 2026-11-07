@@ -205,24 +205,24 @@ fn z10_calibration_and_the_features_cope_with_rpm_zero_and_duty_zero() {
     let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
     let (fcal, pcal) = (fc.calibration(), pc.calibration());
     let cfg = ControlConfig::default();
-    let now = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+    let now = Temps { water: Some(31.0) };
     for (rpm, duty) in [(0.0, 0.0), (0.5, 0.0), (3.0, 1.0), (1200.0, 80.0)] {
         let op = Operating { duty, rpm, power: Some(0.02), current: Some(0.01) };
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
         let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &now, 0.5, Some((0.0, 3132.0))).unwrap();
-        assert!([plan.fan_rpm, plan.pump_rpm, plan.water.unwrap(), plan.cpu.unwrap(), plan.gpu.unwrap()].iter().all(|v| v.is_finite()), "{rpm} {plan:?}");
+        assert!([plan.fan_rpm, plan.pump_rpm, plan.water.unwrap()].iter().all(|v| v.is_finite()), "{rpm} {plan:?}");
         assert!(plan.fan_rpm == 0.0 || plan.fan_rpm >= fcal.rpm(20.0) - 1e-9);
     }
     let hold: HashMap<String, f64> = [("d5next/fan/rpm", 0.0), ("d5next/fan/duty", 0.0), ("d5next/fan/power", 0.0), ("d5next/fan/current", 0.0)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     let f = m.forecast(&hold, 120, 120).unwrap();
-    assert!(f.water.is_finite() && f.cpu.is_finite() && f.gpu.is_finite());
+    assert!(f.water.is_finite());
 }
 
 #[test]
 fn z11_stop_and_start_water_must_be_ordered_below_the_plan_limit() {
     for bad in ["fan_stop_water = 36.0", "fan_start_water = 46.0", "fan_stop_water = 35.0", "fan_start_water = 30.0", "water_plan_limit = 48.0", "water_limit = 50.0
-water_top_limit = 49.0", "water_plan_limit = 40.0", "cpu_plan_limit = 0.0"] {
+water_top_limit = 49.0", "water_plan_limit = 40.0"] {
         assert!(toml::from_str::<ControlConfig>(bad).unwrap().validate().is_err(), "{bad}");
     }
     assert!(toml::from_str::<ControlConfig>("fan_stop_water = 30.0\nfan_start_water = 36.0").unwrap().validate().is_ok());

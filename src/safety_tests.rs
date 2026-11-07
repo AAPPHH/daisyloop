@@ -13,7 +13,7 @@ impl Model for Lin {
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, _: u32) -> Result<Forecast, String> {
         let g = |k: &str| hold.get(k).copied().unwrap_or(0.0);
-        Ok(Forecast { water: self.0(g("d5next/fan/rpm"), g("d5next/pump/rpm"), rollout), cpu: 0.0, gpu: 0.0 })
+        Ok(Forecast { water: self.0(g("d5next/fan/rpm"), g("d5next/pump/rpm"), rollout) })
     }
 }
 
@@ -32,7 +32,7 @@ impl Model for Warming {
         self.n
     }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
-        Ok(Forecast { water: 0.0, cpu: 0.0, gpu: 0.0 })
+        Ok(Forecast { water: 0.0 })
     }
 }
 
@@ -314,13 +314,13 @@ fn plan_changes_need_a_margin_and_missing_inputs_are_not_feasible() {
     let (fcal, pcal) = (fc.calibration(), pc.calibration());
     let (fan, pump) = axes(&fc, &pc, &fcal, &pcal);
     let m = Lin(knife);
-    let now = Temps { water: Some(30.0), cpu: Some(50.0), gpu: Some(40.0) };
+    let now = Temps { water: Some(30.0) };
     let planner = Planner { cfg: &cfg };
     let fresh = planner.plan(&m, &fan, &pump, &now, 0.0, None).unwrap();
     assert!((fresh.fan_rpm - fan.cal.rpm(fc.start_duty)).abs() < 1e-9 && fresh.feasible);
     let kept = planner.plan(&m, &fan, &pump, &now, 0.0, Some((fan.rpm_range().1, 4400.0))).unwrap();
     assert!(kept.fan_rpm > fan.rpm_range().0 + 100.0, "{}", kept.fan_rpm);
-    let blind = planner.plan(&m, &fan, &pump, &Temps { cpu: None, ..now }, 0.0, None).unwrap();
+    let blind = planner.plan(&m, &fan, &pump, &Temps { water: None }, 0.0, None).unwrap();
     assert!(!blind.feasible);
 }
 
@@ -339,12 +339,11 @@ fn grid_top_is_always_the_maximum_rpm() {
 }
 
 #[test]
-fn the_cpu_input_is_a_sustained_value_and_the_shown_limit_is_the_one_used() {
+fn the_shown_limit_is_the_weighted_water_plan_limit() {
     let mut rig = Rig::new((false, false), 3.0, |_| {});
     rig.run(60);
     rig.cpu = 100.0;
     rig.tick();
-    assert!(rig.c.temps(rig.now).cpu == Some(100.0) && rig.c.plan_temps(rig.now).cpu.unwrap() < 55.0);
     rig.cpu = 50.0;
     rig.run(35);
     let p = rig.status().predicted.unwrap();
@@ -417,5 +416,5 @@ fn one_missing_sample_at_the_decision_tick_is_forward_filled_through_the_plan() 
     c.observe(&filled, g.k0 + n as i64 - 1);
     let hold: HashMap<String, f64> = HashMap::new();
     let (fb, fc) = (b.forecast(&hold, 120, 120).unwrap(), c.forecast(&hold, 120, 120).unwrap());
-    assert!((fb.cpu - fc.cpu).abs() < 1e-9 && (fb.water - fc.water).abs() < 1e-9 && (fb.gpu - fc.gpu).abs() < 1e-9, "{fb:?} {fc:?}");
+    assert!((fb.water - fc.water).abs() < 1e-9, "{fb:?} {fc:?}");
 }

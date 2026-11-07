@@ -14,7 +14,7 @@ impl Model for Blind {
         5000
     }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
-        Ok(Forecast { water: 0.0, cpu: 0.0, gpu: 0.0 })
+        Ok(Forecast { water: 0.0 })
     }
 }
 
@@ -180,38 +180,33 @@ fn r7_frozen_water_with_moving_load_and_a_stopped_fan_runs_both_channels_at_full
 }
 
 #[test]
-fn r8_cpu_and_gpu_plan_limits_are_not_shifted_by_the_weight_and_a_sustained_excess_raises_cooling() {
+fn r8_only_the_water_plan_limit_exists_and_cpu_gpu_excess_changes_nothing() {
     let cfg = ControlConfig::default();
-    let (cool, quiet) = (Planner::limits(&cfg, 1.0), Planner::limits(&cfg, 0.0));
-    assert_eq!((cool[1], cool[2], quiet[1], quiet[2]), (105.0, 105.0, 105.0, 105.0));
-    assert_eq!((quiet[0], cool[0]), (46.0, 41.0));
+    assert_eq!((Planner::limit(&cfg, 0.0), Planner::limit(&cfg, 1.0)), (46.0, 41.0));
     let mut rig = Rig::new((false, false), 3.0, |_| {});
-    rig.cpu = 100.0;
     rig.run(120);
-    assert!(rig.status().predicted.unwrap().feasible);
     let quiet_fan = rig.ctl("d5.fan").target_rpm.unwrap();
-    rig.cpu = 112.0;
+    rig.cpu = 150.0;
+    rig.gpu = Some(150.0);
     rig.run(150);
     let p = rig.status().predicted.unwrap();
-    assert!(!p.feasible && p.cpu_limit == 105.0);
-    assert!(rig.ctl("d5.fan").target_rpm.unwrap() > quiet_fan);
+    assert!(p.feasible && rig.ctl("d5.fan").target_rpm.unwrap() == quiet_fan);
+    assert!(rig.status().alarms.is_empty());
 }
 
 #[test]
-fn r9_a_stale_cpu_or_gpu_holds_the_plan_with_the_bound_active_and_only_stale_water_takes_over() {
+fn r9_a_stale_cpu_or_gpu_changes_nothing_and_only_stale_water_takes_over() {
     let mut rig = running(34.0, |_| {});
     let held = duty(&rig, 0);
     rig.gpu = None;
+    rig.cpu = f64::NAN;
     rig.run(60);
     let c = rig.ctl("d5.fan");
-    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && c.note.unwrap().contains("GPU"));
-    assert!(duty(&rig, 0) == held && rig.alarm(AlarmKind::Stale));
+    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && !rig.alarm(AlarmKind::Stale));
+    assert!(duty(&rig, 0) == held);
     rig.water = 44.0;
     rig.run(8);
     assert_eq!((duty(&rig, 0), rig.sim.mode(Spec::FAN)), (Some(100.0), 0));
-    rig.cpu = f64::NAN;
-    rig.run(20);
-    assert_eq!(rig.sim.mode(Spec::FAN), 0);
     rig.water = f64::NAN;
     rig.run(14);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
@@ -742,7 +737,7 @@ fn r21_frozen_water_is_detected_by_heat_within_200_s_or_by_the_plain_rule_after_
     for (name, spec) in PlantSpec::NAMED {
         let heat = frozen_run(spec, 30.0, 300.0, true, 0);
         assert!(heat.detect.is_some_and(|t| t < 200), "{name} {:?}", heat.detect);
-        for (f, label) in [(heat, "heat"), (frozen_run(spec, 33.0, 40.0, true, 0), "plain"), (frozen_run(spec, 37.5, 300.0, false, 0), "plain, cpu dead")] {
+        for (f, label) in [(heat, "heat"), (frozen_run(spec, 33.0, 40.0, true, 0), "plain")] {
             assert!(f.detect.is_some() && f.fan == Some(100.0) && f.pump == Some(100.0) && !f.handed_over && f.alarm, "{name} {label}");
             assert!(label == "heat" || f.detect.is_some_and(|t| (590..700).contains(&t)), "{name} {label} {:?}", f.detect);
         }
