@@ -61,9 +61,9 @@ def test_response_term_matches_between_trainer_and_exporter():
             assert abs(a - b) < 1e-12, (prpm, tg, a, b)
 
 
-def run_case(case, seed, threads):
+def run_case(case, seed, threads, **extra):
     root = tempfile.mkdtemp(prefix="steptest-")
-    cfg = dict(S.CFG, store_dir=S.FRESH["store_dir"], threads=threads)
+    cfg = dict(S.CFG, store_dir=S.FRESH["store_dir"], threads=threads, **extra)
     try:
         return S.dry_task({"cfg": cfg, "case": case, "seed": seed, "root": root})
     finally:
@@ -73,9 +73,13 @@ def run_case(case, seed, threads):
 def test_gate_ships_with_a_fan_response_refuses_without_and_repeats():
     if not os.path.exists(os.path.join(S.FRESH["store_dir"], "raw.npy")):
         return
-    a, b = run_case("fan", 2, 1), run_case("fan", 2, 4)
-    assert a["ship"] and a["identified"]["fan"] and 1 / 1.5 < a["ratio"] < 1.5
+    truth = SIM["plant"]["a"]
+    a, b = run_case("fan", 2, 1, a_fixed=truth), run_case("fan", 2, 4, a_fixed=truth)
+    assert a["ship"] and a["identified"]["fan"] and 1 / 1.5 < a["ratio"] < 1.5 and a["a_est"]["source"].startswith("fixed")
     assert a["ship"] == b["ship"] and a["ratio"] == b["ratio"] and a["fit_rmse"] == b["fit_rmse"]
+    d = run_case("fan", 2, 1)
+    assert d["a_est"]["source"] == "history" and 20.0 < d["a_est"]["a"] < 28.0 and d["hist"]["bins"]["1400+"]["n"] > 0 and d["hold"]["ahead"]["variants"].keys() == {"held_power", "held_power_pump"}
+    assert all(x.startswith("history forecast") for x in d["fan_reasons"]) or d["ship"]
     for case in ("nofan", "drift_nofan"):
         assert not run_case(case, 2, 1)["ship"]
 
@@ -94,7 +98,7 @@ def test_dryrun_entry_point_runs_as_documented_and_writes_the_pair():
         return
     root = tempfile.mkdtemp(prefix="steptest-entry-")
     try:
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "python", "steptrain.py"), "dryrun", root, "fan", "1"], capture_output=True, text=True, timeout=900)
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "python", "steptrain.py"), "dryrun", root, "fan", "1", str(SIM["plant"]["a"])], capture_output=True, text=True, timeout=900)
         assert r.returncode == 0, r.stderr[-2000:]
         out = json.loads(r.stdout)
         assert out["summary"]["fan"]["n"] == 1
@@ -174,7 +178,7 @@ def test_gap_rows_leave_the_fit_and_segments_start_after_the_gap():
 
 def test_restart_gap_before_the_fan_test_still_ships_with_the_right_effect():
     if STORE:
-        a = run_case("fan_30.0_gap", 0, 1)
+        a = run_case("fan_30.0_gap", 0, 1, a_fixed=SIM["plant"]["a"])
         assert a["ship"] and 1 / 1.5 < a["ratio"] < 1.5
 
 
@@ -223,18 +227,161 @@ def test_conductance_check_uses_the_lowest_held_running_level_and_can_fail():
     assert ex["levels_held"] == [0.0, 25.0] and abs(ex["level_rpm"]["25.0"] - 395.0) < 1e-9
     low = min(r for l, r in ex["level_rpm"].items() if float(l) > 0.0) / ident.gb.full
     for m, passes in ((1.6, True), (0.1, False)):
-        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"rmse_full": None}}
-        th = np.zeros(10)
-        th[2] = m
+        o = {"fit_rmse_k": 0.01, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": low ** m, "hold_fan": {"ahead": None}, "a_est": {"a": 23.6, "n": 700, "ok": True}, "hist": None}
+        th = np.zeros(11)
+        th[0], th[2] = 12.0, m
         why = ident.fan(o, th, [], ex)["reasons"]
         assert ("conductance drop at the lowest level too small" in why) == (not passes), (m, why)
 
 
-def test_rmse_limits_are_the_dry_run_noise_band_times_the_margin():
+def test_gate_criteria_are_the_pre_registered_ones_and_the_text_says_so():
     g = S.CFG["gate"]["grey"]
-    assert g["fit_rmse_max"] == round(g["band"]["margin"] * g["band"]["fit_max"], 3) and g["hold_rmse_max"] == round(g["band"]["margin"] * g["band"]["hold_max"], 3)
-    res = [{"case": "fan_30.0", "fit_rmse": 0.04, "hold": {"rmse_full": 0.05}}, {"case": "fan_30.5", "fit_rmse": 0.05, "hold": {"rmse_full": 0.06}}, {"case": "alt_fan_30.5", "fit_rmse": 0.2, "hold": {"rmse_full": 0.9}}]
-    assert S.DryRun.band(res) == {"fit_max": 0.05, "hold_max": 0.06, "runs": 2}
+    assert g["fit_rmse_max"] == 0.12 and g["c_range"] == [8.0, 16.0] and g["ahead"] == {"h": 120, "step": 10, "gain": 1.5} and "band" not in g and "hold_rmse_max" not in g
+    assert g["null_bounds"] == {"C": [8.0, 16.0], "Ta": [18.0, 30.0]} and g["boot"] == {"block_s": 240, "n": 5000, "seed": 0, "q": 0.025}
+    h = S.CFG["gate"]["hist"]
+    assert h["a_range"] == [20.0, 28.0] and h["gain"] == 1.5 and h["bias_max"] == 0.10 and h["bias_rpm"] == 1400.0 and h["bins"][:4] == [0.0, 600.0, 1000.0, 1400.0] and h["h"] == 120
+    text = " ".join(S.CFG["gate"]["text"])
+    assert "0.12 K" in text and "8 to 16 kJ/K" in text and "1.5 times better" in text and "persistence" in text and "q0" in text
+    assert "post hoc" in text and "not a planner skill score" in text and "20 to 28 W/K" in text and "0.10 K" in text and "circular 240 s block bootstrap" in text
+
+
+def test_q0_is_a_parameter_free_in_the_null_model_and_not_a_response_input():
+    gb = S.GreyBox()
+    i = gb.NAMES.index("q0")
+    assert (gb.LO[i], gb.HI[i]) == (0.0, 120.0)
+    n = 1800
+    seg = {"w": np.full(n, 30.0), "q": np.full(n, 100.0), "f": np.full(n, 700.0), "p": np.full(n, 3000.0), "t": np.arange(n) / 3600.0}
+    th = np.array(gb.X0)
+    base = gb.simulate(th, seg)
+    th2 = th.copy()
+    th2[i] += 20.0
+    assert gb.simulate(th2, seg)[-1] > base[-1]
+    resp = S.Identifier(S.CFG, None).response(dict(zip(gb.NAMES, th.tolist())))
+    assert "q0" not in resp
+    assert {n.name for n in S.Response(resp).nodes()} == {"step.fr", "step.fm", "step.pr", "step.pf", "step.wt", "step.fp", "step.fx"}
+
+
+def forecast_seg(m, q0, seed):
+    n = 3000
+    fan = np.concatenate([np.full(1200, 100.0), np.full(600, 50.0), np.full(600, 100.0), np.full(600, 60.0)])
+    load = np.concatenate([np.full(1200, 200.0), np.full(600, 70.0), np.full(600, 200.0), np.full(600, 120.0)])
+    c = dict(SIM["plant"], q0=q0, m=m)
+    sim = Plant(c, True).run(fan, np.full(n, 19.8), load * 0.55, load * 0.45, np.random.default_rng(seed))
+    hold = np.arange(n) >= 1800
+    return {"w": sim["water"], "q": 0.96 * load * 0.55 + load * 0.45 + sim["pump_pow"], "f": sim["fan_rpm"], "p": sim["pump_rpm"], "t": np.arange(n) / 3600.0, "fit": ~hold, "hold": hold}
+
+
+def test_grey_box_recovers_a_constant_unmodelled_heat_and_the_forecast_beats_the_references():
+    gb = S.GreyBox()
+    seg = forecast_seg(1.61, 65.0, 3)
+    th, sse, n = gb.fit([seg])
+    th0, _, _ = gb.fit([seg], {"m": 0.0}, th)
+    d = dict(zip(gb.NAMES, th))
+    assert abs(d["q0"] - 65.0) < 30.0 and 8.0 <= d["C"] <= 16.0, d
+    full, per = gb.ahead(th, seg, 120, 10)
+    null, _ = gb.ahead(th0, seg, 120, 10)
+    assert len(full) == len(per) > 50
+    rm = lambda v: float(np.sqrt(np.mean(v ** 2)))
+    assert rm(full) < rm(per) and rm(null) >= 1.5 * rm(full), (rm(full), rm(null), rm(per))
+    held, _, a = gb.ahead_full(th, seg, 120, 10, hold_q=True, hold_p=True)
+    logged, _, a2 = gb.ahead_full(th, seg, 120, 10)
+    assert (a == a2).all() and np.allclose(logged, full) and not np.allclose(held, full)
+
+
+def test_bootstrap_is_circular_seeded_and_the_history_check_reports_bins_and_bias():
+    ident = S.Identifier(S.CFG, None)
+    rng = np.random.default_rng(5)
+    ef = rng.normal(0, 0.3, 74)
+    en = ef * 2.0 + rng.normal(0, 0.05, 74)
+    ci, med = ident.boot(ef, en)
+    assert ci == ident.boot(ef, en)[0] and 1.5 < ci[0] < med < ci[1] < 3.0
+    ci2, _ = ident.boot(ef, ef * 1.0)
+    assert ci2[0] < 1.0 < ci2[1] or abs(ci2[0] - 1.0) < 1e-9
+    seg = forecast_seg(1.61, 65.0, 3)
+    gb = S.GreyBox()
+    th, _, _ = gb.fit([seg])
+    n = len(seg["w"])
+    seg = dict(seg, all=np.ones(n, bool), later=np.arange(n) >= 1800)
+    out = ident.check(th, [seg])
+    assert set(out["bins"]) == {"0-600", "600-1000", "1000-1400", "1400+"} and out["bins"]["1400+"]["n"] > 0 and out["bias_hi"] is not None
+    assert out["n"] == sum(b["n"] for b in out["bins"].values()) and out["gain"] > 1.0
+
+
+def test_forecast_history_heat_capacity_and_conductance_gates_refuse_what_they_should():
+    ident = S.Identifier(S.CFG, None)
+    ex = {"levels_held": [0.0, 25.0, 50.0, 100.0], "span": 100.0}
+    th = np.zeros(11)
+    th[0], th[2] = 12.0, 1.5
+    good = {"full": 0.3, "null": 0.6, "persist": 0.62, "n": 100, "ratio": 2.0, "ratio_ci": [1.2, 3.0]}
+    hist = {"n": 5000, "rmse": 0.2, "persist": 0.4, "gain": 2.0, "bias_hi": 0.05, "bins": {}}
+    base = {"fit_rmse_k": 0.05, "lr_m": 50.0, "lr_threshold": 3.84, "g_ratio_at_lowest": 0.3, "a_est": {"a": 23.6, "n": 700, "ok": True}, "hist": hist}
+    ok = dict(base, hold_fan={"ahead": good})
+    assert ident.fan(ok, th, [], ex)["reasons"] == []
+    assert any("not above 1.0" in r for r in ident.fan(dict(ok, hold_fan={"ahead": dict(good, ratio_ci=[0.98, 3.0])}), th, [], ex)["reasons"])
+    assert any("persistence" in r for r in ident.fan(dict(ok, hold_fan={"ahead": dict(good, persist=0.3)}), th, [], ex)["reasons"])
+    assert any("no hold-out" in r for r in ident.fan(dict(ok, hold_fan={"ahead": None}), th, [], ex)["reasons"])
+    for c in (7.9, 16.1):
+        t = th.copy()
+        t[0] = c
+        assert any("heat capacity" in r for r in ident.fan(ok, t, [], ex)["reasons"])
+    assert any("fit RMSE" in r for r in ident.fan(dict(ok, fit_rmse_k=0.121), th, [], ex)["reasons"])
+    for h, text in ((dict(hist, persist=0.29), "times better than persistence"), (dict(hist, bias_hi=0.11), "bias above 1400"), (dict(hist, bias_hi=-0.11), "bias above 1400"), (dict(hist, bias_hi=None), "bias above 1400"), (None, "no later-half history")):
+        assert any(text in r for r in ident.fan(dict(ok, hist=h), th, [], ex)["reasons"]), h
+    assert ident.fan(dict(ok, hist=dict(hist, persist=0.31, bias_hi=-0.10)), th, [], ex)["reasons"] == []
+    for a in ({"a": 19.9, "n": 700, "ok": False}, {"a": 28.1, "n": 700, "ok": False}, {"a": None, "n": 3, "ok": False}):
+        assert any("conductance estimate" in r for r in ident.fan(dict(ok, a_est=a), th, [], ex)["reasons"]), a
+
+
+def steady_history(a, n=24000, seed=0):
+    gb = S.GreyBox()
+    rng = np.random.default_rng(seed)
+    th = np.array(gb.X0)
+    th[gb.NAMES.index("A")], th[gb.NAMES.index("m")], th[gb.NAMES.index("gamma")], th[gb.NAMES.index("q0")], th[gb.NAMES.index("drift")] = a, 1.0, 0.0, 40.0, 0.0
+    t = np.arange(n)
+    q = 150.0 + 90.0 * np.sin(2 * np.pi * t / 8000.0) + np.cumsum(rng.normal(0, 0.5, n)) * 0.2
+    seg = {"q": q, "f": np.full(n, 1460.0), "p": np.full(n, 4800.0), "t": np.zeros(n), "all": np.ones(n, bool), "early": np.ones(n, bool)}
+    seg["w"] = gb.simulate(th, dict(seg, w=np.full(n, 30.0))) + rng.normal(0, 0.005, n)
+    return seg
+
+
+def test_full_fan_conductance_is_estimated_from_steady_history_blocks_and_out_of_range_refuses():
+    ident = S.Identifier(S.CFG, None)
+    for a in (21.0, 24.0, 27.0):
+        e = ident.conductance([steady_history(a)])
+        assert e["ok"] and abs(e["a"] - a) < 0.01 * a and e["n"] > 100, (a, e)
+    assert not ident.conductance([steady_history(31.0)])["ok"]
+    slow = steady_history(24.0)
+    slow["f"] = np.full(len(slow["w"]), 900.0)
+    assert ident.conductance([slow])["a"] is None
+    late = steady_history(24.0)
+    late["early"] = np.zeros(len(late["w"]), bool)
+    assert ident.conductance([late])["a"] is None
+
+
+def test_the_fit_holds_the_given_conductance_and_bounds_override():
+    gb = S.GreyBox()
+    seg = forecast_seg(1.61, 65.0, 3)
+    th, _, _ = gb.fit([seg], {"A": 23.0})
+    assert abs(th[1] - 23.0) < 1e-6
+    thb, _, _ = gb.fit([seg], {"m": 0.0}, th, bounds={"C": [8.0, 16.0], "Ta": [18.0, 30.0]})
+    assert 8.0 <= thb[0] <= 16.0 and 18.0 <= thb[4] <= 30.0 and abs(thb[2]) < 1e-6
+
+
+def test_dry_verdict_counts_the_correct_plant_as_a_group_and_leaves_wrong_plants_unjudged():
+    rows = lambda ship, ok, n=10: {"n": n, "ship": ship, "ship_ok": ok}
+    sm = {"fan_30.0": rows(10, 10), "fan_30.5": rows(10, 9), "fan_31.0": rows(9, 9), "nofan_30.5": rows(0, 0), "alt_fan_30.5": rows(0, 0), "wrong_air_30.5": rows(5, 5)}
+    v = S.DryRun.verdict(sm, 28)
+    assert v["fan"] and v["nofan_30.5"] and v["alt_fan_30.5"] and not any(k.startswith("wrong") for k in v)
+    assert not S.DryRun.verdict(sm, 30)["fan"]
+    assert not S.DryRun.verdict(dict(sm, **{"nofan_30.5": rows(1, 0)}), 28)["nofan_30.5"]
+
+
+def test_plant_recirculation_raises_the_air_temperature_at_low_fan_and_the_truth_effect_includes_it():
+    base = Plant(SIM["plant"], True)
+    rec = Plant(dict(SIM["plant"], ta_fan=10.0, q0=0.0), True)
+    assert base.air(400.0) == SIM["plant"]["ta"] and abs(rec.air(0.0) - rec.air(1460.0) - 10.0) < 1e-9
+    w = np.full(10, 33.0)
+    assert rec.effect(w, 4800.0, 400.0, 1460.0) > base.effect(w, 4800.0, 400.0, 1460.0)
 
 
 if __name__ == "__main__":
