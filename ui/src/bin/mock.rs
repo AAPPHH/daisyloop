@@ -225,7 +225,7 @@ impl Sim {
             });
         }
         if self.flags.fault {
-            self.controls[0].fallback = Some("CPU-Temperatur veraltet (> 10 s)".into());
+            self.controls[0].fallback = Some("Wassertemperatur veraltet (> 10 s)".into());
         }
     }
 
@@ -295,7 +295,7 @@ impl Sim {
             }
         }
         let gain = 1.0 - (self.controls[0].target_rpm.unwrap_or(0.0) / FAN_MAX_RPM) * 0.8;
-        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), cpu: Some(self.live[self.index[CPU_TEMP]] + 1.0), gpu: Some(self.live[self.index[GPU_TEMP]] + 0.5), water_limit: 43.5, cpu_limit: 105.0, gpu_limit: 105.0, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
+        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), water_limit: 43.5, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
     }
 
     fn tick(&mut self) {
