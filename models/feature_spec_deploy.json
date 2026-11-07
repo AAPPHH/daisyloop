@@ -492,49 +492,47 @@
 "water_minus_wfloor"
 ],
 "deployed_outputs": [
+"cpu_pkg_w",
+"gpu_w",
+"pump_pow",
+"water",
+"water_minus_amb",
 "cpu_core_t",
-"cpupkg_m_water",
-"cpucore_m_water",
-"fan_rpm3.ewm600",
 "gpu_temp",
-"p_cpu_gpu",
-"temperature_P_max",
-"water.ewm600",
-"temperature_all_max",
-"p_excess",
+"cpucore_m_water",
 "gpu_m_water",
-"fan_rpm.ewm1800",
-"p_total.ewm5.d120",
-"r:/gpu-nvidia/0/power/0",
-"water_m_sys.ewm600",
-"fan_rpm.ewm600",
-"fan_duty.ewm1800",
-"gpu_temp.ewm30",
-"water.ewm120",
-"r:/gpu-nvidia/0/load/3",
-"p_excess.int1800",
-"p_total",
-"r:/gpu-nvidia/0/smalldata/0",
-"water_m_sys.ewm30",
-"p_total.int1800",
-"p_excess.ewm1800",
-"cpu_pkg_w.ewm1800",
-"fan_duty.ewm600",
-"gpu_w.ewm120",
-"gpu_util.ewm1800",
-"p_excess.int600",
-"fan_x_dT.ewm30",
-"water_floor",
-"r:/ram/load/0",
-"p_total.ewm1800",
-"gpuhot_m_water",
-"water.ewm5.d10",
-"gpu_temp.ewm30.d300",
-"cpu_load.ewm600",
-"gpu_m_water.ewm600",
-"fan_duty",
-"fan_rpm",
-"pump_duty",
+"ph.q",
+"ph.q.l11",
+"ph.q.l22",
+"ph.q.l33",
+"ph.q.e5",
+"ph.q.e30",
+"ph.q.e120",
+"ph.q.e600",
+"cpu_pkg_w.e5",
+"cpu_pkg_w.e30",
+"gpu_w.e5",
+"gpu_w.e30",
+"water.e5.d10",
+"water.e5.d30",
+"water.e5.d120",
+"cpu_core_t.e5",
+"gpu_temp.e5",
+"cpucore_m_water.e5",
+"gpu_m_water.e5",
+"ph.pl",
+"ph.q.l11*pl",
+"ph.q.l22*pl",
+"ph.q.l33*pl",
+"ph.q.e5*pl",
+"ph.q.e30*pl",
+"ph.q.e120*pl",
+"ph.q.e600*pl",
+"water_minus_amb*pl",
+"water.e5.d10*pl",
+"water.e5.d30*pl",
+"water.e5.d120*pl",
+"step.fx",
 "pump_rpm"
 ]
 },
@@ -545,18 +543,6 @@
 "in": [],
 "p": {
 "channel": "d5next/water/temp",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "water_fan_pump",
-"out": false
-},
-{
-"name": "fan_duty",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "d5next/fan/duty",
 "ffill": 10,
 "zero_nan": false
 },
@@ -573,19 +559,7 @@
 "zero_nan": false
 },
 "group": "water_fan_pump",
-"out": true
-},
-{
-"name": "pump_duty",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "d5next/pump/duty",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "water_fan_pump",
-"out": true
+"out": false
 },
 {
 "name": "pump_rpm",
@@ -609,7 +583,7 @@
 "zero_nan": false
 },
 "group": "water_fan_pump",
-"out": false
+"out": true
 },
 {
 "name": "cpu_pkg_w",
@@ -621,7 +595,7 @@
 "zero_nan": false
 },
 "group": "cpu_raw",
-"out": false
+"out": true
 },
 {
 "name": "gpu_w",
@@ -633,7 +607,7 @@
 "zero_nan": false
 },
 "group": "gpu_raw",
-"out": false
+"out": true
 },
 {
 "name": "gpu_temp",
@@ -658,42 +632,6 @@
 },
 "group": "cpu_raw",
 "out": true
-},
-{
-"name": "cpu_pkg_t",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/26",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "cpu_raw",
-"out": false
-},
-{
-"name": "gpu_hot",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/gpu-nvidia/0/temperature/2",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "gpu_raw",
-"out": false
-},
-{
-"name": "sys_t",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/lpc/nct6687dr/0/temperature/1",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "board_raw",
-"out": false
 },
 {
 "name": "dimm_t",
@@ -732,469 +670,6 @@
 "out": false
 },
 {
-"name": "gpu_util",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "nvml/0/util_gpu",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "gpu_raw",
-"out": false
-},
-{
-"name": "cpu_load",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/load/0",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "cpu_raw",
-"out": false
-},
-{
-"name": "r:/gpu-nvidia/0/load/3",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/gpu-nvidia/0/load/3",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "gpu_raw",
-"out": true
-},
-{
-"name": "r:/gpu-nvidia/0/power/0",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/gpu-nvidia/0/power/0",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "gpu_raw",
-"out": true
-},
-{
-"name": "r:/gpu-nvidia/0/smalldata/0",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/gpu-nvidia/0/smalldata/0",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "gpu_raw",
-"out": true
-},
-{
-"name": "r:/ram/load/0",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/ram/load/0",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "mem_storage_raw",
-"out": true
-},
-{
-"name": "c:/intelcpu/0/temperature/2",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/2",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/3",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/3",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/12",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/12",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/13",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/13",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/14",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/14",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/15",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/15",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/24",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/24",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/25",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/25",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "temperature_P_max",
-"op": "gmax",
-"in": [
-"c:/intelcpu/0/temperature/2",
-"c:/intelcpu/0/temperature/3",
-"c:/intelcpu/0/temperature/12",
-"c:/intelcpu/0/temperature/13",
-"c:/intelcpu/0/temperature/14",
-"c:/intelcpu/0/temperature/15",
-"c:/intelcpu/0/temperature/24",
-"c:/intelcpu/0/temperature/25"
-],
-"p": {},
-"group": "core_agg",
-"out": true
-},
-{
-"name": "c:/intelcpu/0/temperature/4",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/4",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/5",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/5",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/6",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/6",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/7",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/7",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/8",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/8",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/9",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/9",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/10",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/10",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/11",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/11",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/16",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/16",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/17",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/17",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/18",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/18",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/19",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/19",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/20",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/20",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/21",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/21",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/22",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/22",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "c:/intelcpu/0/temperature/23",
-"op": "raw",
-"in": [],
-"p": {
-"channel": "/intelcpu/0/temperature/23",
-"ffill": 10,
-"zero_nan": false
-},
-"group": "_",
-"out": false
-},
-{
-"name": "temperature_all_max",
-"op": "gmax",
-"in": [
-"c:/intelcpu/0/temperature/2",
-"c:/intelcpu/0/temperature/3",
-"c:/intelcpu/0/temperature/12",
-"c:/intelcpu/0/temperature/13",
-"c:/intelcpu/0/temperature/14",
-"c:/intelcpu/0/temperature/15",
-"c:/intelcpu/0/temperature/24",
-"c:/intelcpu/0/temperature/25",
-"c:/intelcpu/0/temperature/4",
-"c:/intelcpu/0/temperature/5",
-"c:/intelcpu/0/temperature/6",
-"c:/intelcpu/0/temperature/7",
-"c:/intelcpu/0/temperature/8",
-"c:/intelcpu/0/temperature/9",
-"c:/intelcpu/0/temperature/10",
-"c:/intelcpu/0/temperature/11",
-"c:/intelcpu/0/temperature/16",
-"c:/intelcpu/0/temperature/17",
-"c:/intelcpu/0/temperature/18",
-"c:/intelcpu/0/temperature/19",
-"c:/intelcpu/0/temperature/20",
-"c:/intelcpu/0/temperature/21",
-"c:/intelcpu/0/temperature/22",
-"c:/intelcpu/0/temperature/23"
-],
-"p": {},
-"group": "core_agg",
-"out": true
-},
-{
-"name": "vrm_est_w",
-"op": "lin",
-"in": [
-"cpu_pkg_w"
-],
-"p": {
-"coef": [
-0.07
-],
-"off": 0.0
-},
-"group": "heat_proxy",
-"out": false
-},
-{
-"name": "p_total",
-"op": "lin",
-"in": [
-"cpu_pkg_w",
-"gpu_w",
-"pump_pow",
-"vrm_est_w"
-],
-"p": {
-"coef": [
-1,
-1,
-1,
-1
-],
-"off": 0.0
-},
-"group": "heat_proxy",
-"out": true
-},
-{
-"name": "p_cpu_gpu",
-"op": "lin",
-"in": [
-"cpu_pkg_w",
-"gpu_w"
-],
-"p": {
-"coef": [
-1,
-1
-],
-"off": 0.0
-},
-"group": "heat_proxy",
-"out": true
-},
-{
 "name": "amb_board",
 "op": "gmin",
 "in": [
@@ -1228,7 +703,7 @@
 "rise": 0.0002777777777777778
 },
 "group": "ambient",
-"out": true
+"out": false
 },
 {
 "name": "amb_est",
@@ -1262,343 +737,13 @@
 "off": 0.0
 },
 "group": "ambient",
-"out": false
-},
-{
-"name": "water.ewm5",
-"op": "ewm",
-"in": [
-"water"
-],
-"p": {
-"tau": 5.0
-},
-"group": "ewm_water",
-"out": false
-},
-{
-"name": "water.ewm120",
-"op": "ewm",
-"in": [
-"water"
-],
-"p": {
-"tau": 120.0
-},
-"group": "ewm_water",
 "out": true
-},
-{
-"name": "water.ewm600",
-"op": "ewm",
-"in": [
-"water"
-],
-"p": {
-"tau": 600.0
-},
-"group": "ewm_water",
-"out": true
-},
-{
-"name": "p_total.ewm5",
-"op": "ewm",
-"in": [
-"p_total"
-],
-"p": {
-"tau": 5.0
-},
-"group": "ewm_power",
-"out": false
-},
-{
-"name": "p_total.ewm1800",
-"op": "ewm",
-"in": [
-"p_total"
-],
-"p": {
-"tau": 1800.0
-},
-"group": "ewm_power",
-"out": true
-},
-{
-"name": "cpu_pkg_w.ewm1800",
-"op": "ewm",
-"in": [
-"cpu_pkg_w"
-],
-"p": {
-"tau": 1800.0
-},
-"group": "ewm_power",
-"out": true
-},
-{
-"name": "gpu_w.ewm120",
-"op": "ewm",
-"in": [
-"gpu_w"
-],
-"p": {
-"tau": 120.0
-},
-"group": "ewm_power",
-"out": true
-},
-{
-"name": "gpu_temp.ewm30",
-"op": "ewm",
-"in": [
-"gpu_temp"
-],
-"p": {
-"tau": 30.0
-},
-"group": "ewm_temp",
-"out": true
-},
-{
-"name": "cpu_load.ewm600",
-"op": "ewm",
-"in": [
-"cpu_load"
-],
-"p": {
-"tau": 600.0
-},
-"group": "ewm_power",
-"out": true
-},
-{
-"name": "gpu_util.ewm1800",
-"op": "ewm",
-"in": [
-"gpu_util"
-],
-"p": {
-"tau": 1800.0
-},
-"group": "ewm_power",
-"out": true
-},
-{
-"name": "fan_duty.ewm600",
-"op": "ewm",
-"in": [
-"fan_duty"
-],
-"p": {
-"tau": 600.0
-},
-"group": "ewm_water",
-"out": true
-},
-{
-"name": "fan_duty.ewm1800",
-"op": "ewm",
-"in": [
-"fan_duty"
-],
-"p": {
-"tau": 1800.0
-},
-"group": "ewm_water",
-"out": true
-},
-{
-"name": "fan_rpm.ewm600",
-"op": "ewm",
-"in": [
-"fan_rpm"
-],
-"p": {
-"tau": 600.0
-},
-"group": "ewm_water",
-"out": true
-},
-{
-"name": "fan_rpm.ewm1800",
-"op": "ewm",
-"in": [
-"fan_rpm"
-],
-"p": {
-"tau": 1800.0
-},
-"group": "ewm_water",
-"out": true
-},
-{
-"name": "water.ewm5.d10",
-"op": "diff",
-"in": [
-"water.ewm5"
-],
-"p": {
-"n": 10
-},
-"group": "deriv",
-"out": true
-},
-{
-"name": "p_total.ewm5.d120",
-"op": "diff",
-"in": [
-"p_total.ewm5"
-],
-"p": {
-"n": 120
-},
-"group": "deriv",
-"out": true
-},
-{
-"name": "gpu_temp.ewm30.d300",
-"op": "diff",
-"in": [
-"gpu_temp.ewm30"
-],
-"p": {
-"n": 300
-},
-"group": "deriv",
-"out": true
-},
-{
-"name": "p_total.int1800",
-"op": "scale",
-"in": [
-"p_total.ewm1800"
-],
-"p": {
-"c": 1800.0
-},
-"group": "integral",
-"out": true
-},
-{
-"name": "p_removed",
-"op": "lin",
-"in": [
-"water_minus_amb"
-],
-"p": {
-"coef": [
-25.0
-],
-"off": 0.0
-},
-"group": "_",
-"out": false
-},
-{
-"name": "p_excess",
-"op": "lin",
-"in": [
-"p_total",
-"p_removed"
-],
-"p": {
-"coef": [
-1,
--1
-],
-"off": 0.0
-},
-"group": "integral",
-"out": true
-},
-{
-"name": "p_excess.ewm600",
-"op": "ewm",
-"in": [
-"p_excess"
-],
-"p": {
-"tau": 600.0
-},
-"group": "integral",
-"out": false
-},
-{
-"name": "p_excess.int600",
-"op": "scale",
-"in": [
-"p_excess.ewm600"
-],
-"p": {
-"c": 600.0
-},
-"group": "integral",
-"out": true
-},
-{
-"name": "p_excess.ewm1800",
-"op": "ewm",
-"in": [
-"p_excess"
-],
-"p": {
-"tau": 1800.0
-},
-"group": "integral",
-"out": true
-},
-{
-"name": "p_excess.int1800",
-"op": "scale",
-"in": [
-"p_excess.ewm1800"
-],
-"p": {
-"c": 1800.0
-},
-"group": "integral",
-"out": true
-},
-{
-"name": "water_m_sys",
-"op": "lin",
-"in": [
-"water",
-"sys_t"
-],
-"p": {
-"coef": [
-1,
--1
-],
-"off": 0.0
-},
-"group": "delta",
-"out": false
 },
 {
 "name": "cpucore_m_water",
 "op": "lin",
 "in": [
 "cpu_core_t",
-"water"
-],
-"p": {
-"coef": [
-1,
--1
-],
-"off": 0.0
-},
-"group": "delta",
-"out": true
-},
-{
-"name": "cpupkg_m_water",
-"op": "lin",
-"in": [
-"cpu_pkg_t",
 "water"
 ],
 "p": {
@@ -1629,133 +774,523 @@
 "out": true
 },
 {
-"name": "gpuhot_m_water",
+"name": "ph.q",
 "op": "lin",
 "in": [
-"gpu_hot",
-"water"
+"cpu_pkg_w",
+"gpu_w",
+"pump_pow"
 ],
 "p": {
 "coef": [
-1,
--1
+0.96,
+1.0,
+1.0
 ],
 "off": 0.0
 },
-"group": "delta",
+"group": "phys",
 "out": true
 },
 {
-"name": "water_m_sys.ewm30",
-"op": "ewm",
+"name": "ph.q.d11",
+"op": "diff",
 "in": [
-"water_m_sys"
+"ph.q"
 ],
 "p": {
-"tau": 30.0
+"n": 11
 },
-"group": "delta",
+"group": "phys",
+"out": false
+},
+{
+"name": "ph.q.l11",
+"op": "lin",
+"in": [
+"ph.q",
+"ph.q.d11"
+],
+"p": {
+"coef": [
+1.0,
+-1.0
+],
+"off": 0.0
+},
+"group": "phys",
 "out": true
 },
 {
-"name": "gpu_m_water.ewm600",
+"name": "ph.q.d22",
+"op": "diff",
+"in": [
+"ph.q"
+],
+"p": {
+"n": 22
+},
+"group": "phys",
+"out": false
+},
+{
+"name": "ph.q.l22",
+"op": "lin",
+"in": [
+"ph.q",
+"ph.q.d22"
+],
+"p": {
+"coef": [
+1.0,
+-1.0
+],
+"off": 0.0
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.d33",
+"op": "diff",
+"in": [
+"ph.q"
+],
+"p": {
+"n": 33
+},
+"group": "phys",
+"out": false
+},
+{
+"name": "ph.q.l33",
+"op": "lin",
+"in": [
+"ph.q",
+"ph.q.d33"
+],
+"p": {
+"coef": [
+1.0,
+-1.0
+],
+"off": 0.0
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e5",
+"op": "ewm",
+"in": [
+"ph.q"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e30",
+"op": "ewm",
+"in": [
+"ph.q"
+],
+"p": {
+"tau": 30
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e120",
+"op": "ewm",
+"in": [
+"ph.q"
+],
+"p": {
+"tau": 120
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e600",
+"op": "ewm",
+"in": [
+"ph.q"
+],
+"p": {
+"tau": 600
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "cpu_pkg_w.e5",
+"op": "ewm",
+"in": [
+"cpu_pkg_w"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "cpu_pkg_w.e30",
+"op": "ewm",
+"in": [
+"cpu_pkg_w"
+],
+"p": {
+"tau": 30
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "gpu_w.e5",
+"op": "ewm",
+"in": [
+"gpu_w"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "gpu_w.e30",
+"op": "ewm",
+"in": [
+"gpu_w"
+],
+"p": {
+"tau": 30
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "water.e5",
+"op": "ewm",
+"in": [
+"water"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": false
+},
+{
+"name": "water.e5.d10",
+"op": "diff",
+"in": [
+"water.e5"
+],
+"p": {
+"n": 10
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "water.e5.d30",
+"op": "diff",
+"in": [
+"water.e5"
+],
+"p": {
+"n": 30
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "water.e5.d120",
+"op": "diff",
+"in": [
+"water.e5"
+],
+"p": {
+"n": 120
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "cpu_core_t.e5",
+"op": "ewm",
+"in": [
+"cpu_core_t"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "gpu_temp.e5",
+"op": "ewm",
+"in": [
+"gpu_temp"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "cpucore_m_water.e5",
+"op": "ewm",
+"in": [
+"cpucore_m_water"
+],
+"p": {
+"tau": 5
+},
+"group": "phys",
+"out": true
+},
+{
+"name": "gpu_m_water.e5",
 "op": "ewm",
 "in": [
 "gpu_m_water"
 ],
 "p": {
-"tau": 600.0
+"tau": 5
 },
-"group": "delta",
+"group": "phys",
 "out": true
 },
 {
-"name": "water_m_sys.ewm600",
-"op": "ewm",
+"name": "ph.pl",
+"op": "gt",
 "in": [
-"water_m_sys"
+"pump_rpm"
 ],
 "p": {
-"tau": 600.0
+"c": 3500.0,
+"inv": true
 },
-"group": "delta",
+"group": "phys",
 "out": true
 },
 {
-"name": "fan_frac",
-"op": "lin",
+"name": "ph.q.l11*pl",
+"op": "mul",
 "in": [
-"fan_duty"
+"ph.q.l11",
+"ph.pl"
 ],
-"p": {
-"coef": [
-0.01
-],
-"off": 0.0
-},
-"group": "_",
-"out": false
+"p": {},
+"group": "phys",
+"out": true
 },
 {
-"name": "fan_rpm_n",
-"op": "lin",
+"name": "ph.q.l22*pl",
+"op": "mul",
+"in": [
+"ph.q.l22",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.l33*pl",
+"op": "mul",
+"in": [
+"ph.q.l33",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e5*pl",
+"op": "mul",
+"in": [
+"ph.q.e5",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e30*pl",
+"op": "mul",
+"in": [
+"ph.q.e30",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e120*pl",
+"op": "mul",
+"in": [
+"ph.q.e120",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "ph.q.e600*pl",
+"op": "mul",
+"in": [
+"ph.q.e600",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "water_minus_amb*pl",
+"op": "mul",
+"in": [
+"water_minus_amb",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "water.e5.d10*pl",
+"op": "mul",
+"in": [
+"water.e5.d10",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "water.e5.d30*pl",
+"op": "mul",
+"in": [
+"water.e5.d30",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "water.e5.d120*pl",
+"op": "mul",
+"in": [
+"water.e5.d120",
+"ph.pl"
+],
+"p": {},
+"group": "phys",
+"out": true
+},
+{
+"name": "step.fr",
+"op": "scale",
 "in": [
 "fan_rpm"
 ],
 "p": {
-"coef": [
-0.0006802721088435374
-],
-"off": 0.0
+"c": 0.0006849315068493151
 },
-"group": "_",
+"group": "step",
 "out": false
 },
 {
-"name": "fan_rpm3",
+"name": "step.fm",
 "op": "pow",
 "in": [
-"fan_rpm_n"
+"step.fr"
 ],
 "p": {
-"e": 3
+"e": 1.077918198736224
 },
-"group": "fan_pump_terms",
+"group": "step",
 "out": false
 },
 {
-"name": "fan_x_dT",
+"name": "step.pr",
+"op": "scale",
+"in": [
+"pump_rpm"
+],
+"p": {
+"c": 0.00020833333333333335
+},
+"group": "step",
+"out": false
+},
+{
+"name": "step.pf",
+"op": "lin",
+"in": [
+"step.pr"
+],
+"p": {
+"coef": [
+0.12126040726031137
+],
+"off": 0.8787395927396886
+},
+"group": "step",
+"out": false
+},
+{
+"name": "step.wt",
+"op": "lin",
+"in": [
+"water"
+],
+"p": {
+"coef": [
+1.0
+],
+"off": -20.70819245329456
+},
+"group": "step",
+"out": false
+},
+{
+"name": "step.fp",
 "op": "mul",
 "in": [
-"fan_frac",
-"water_minus_amb"
+"step.fm",
+"step.pf"
 ],
 "p": {},
-"group": "fan_pump_terms",
+"group": "step",
 "out": false
 },
 {
-"name": "fan_x_dT.ewm30",
-"op": "ewm",
+"name": "step.fx",
+"op": "mul",
 "in": [
-"fan_x_dT"
+"step.fp",
+"step.wt"
 ],
-"p": {
-"tau": 30.0
-},
-"group": "fan_pump_terms",
-"out": true
-},
-{
-"name": "fan_rpm3.ewm600",
-"op": "ewm",
-"in": [
-"fan_rpm3"
-],
-"p": {
-"tau": 600.0
-},
-"group": "fan_pump_terms",
+"p": {},
+"group": "step",
 "out": true
 }
 ]

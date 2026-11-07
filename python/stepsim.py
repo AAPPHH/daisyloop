@@ -135,7 +135,7 @@ class Injector:
         cfg, ic = self.cfg, self.sim["inject"]
         rng = np.random.default_rng(seed)
         meta, X = RawStore({"cache_dir": cfg["store_dir"], "chunk_s": 86400}).load()
-        chans = Spec.load(cfg["deployed_spec"]).raw_channels()
+        chans = list(dict.fromkeys(Spec.load(cfg["deployed_spec"]).raw_channels() + list(ic["loads"]) + ["d5next/water/temp", "d5next/fan/duty", "d5next/fan/rpm", "d5next/pump/duty", "d5next/pump/rpm", "d5next/pump/power", "/intelcpu/0/power/0", "nvml/0/power", "/gpu-nvidia/0/power/0"]))
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
         keep = [meta["channels"][ix[c]] for c in chans if c in ix]
         T0 = X.shape[0]

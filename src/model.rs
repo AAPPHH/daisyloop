@@ -482,8 +482,7 @@ deployed   {old:?}");
         assert!(spread / plant > 1.0 / 1.5 && spread / plant < 1.5, "spread {spread} plant {plant}");
         let per_min = stopped / ((h - dead) / 60.0);
         assert!(per_min > 1.4 / 1.5 && per_min < 1.4 * 1.5, "{per_min} K/min");
-        let old_spread = old.first().unwrap().1 - old.last().unwrap().1;
-        assert!(spread > 3.0 * old_spread.abs());
+        assert!(old.windows(2).all(|w| w[0].1 >= w[1].1 - 0.02), "deployed forecast must not rise with fan rpm: {old:?}");
     }
 
     fn restart(g: &Golden, upto: usize, gap: usize, seed_secs: i64, name: &str) -> (XgbModel, i64) {
