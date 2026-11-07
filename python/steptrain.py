@@ -45,6 +45,7 @@ CFG = {
         "grey": {"hold": {"fan": [6, 7], "pump": [4, 5]}, "se_inflate": 10.0, "z": 1.96, "full_s": 120.0, "fit_rmse_max": 0.12, "c_range": [8.0, 16.0], "ahead": {"h": 120, "step": 10, "gain": 1.5}, "loo": True},
         "fan": {"grid_lo_duty": 27.0, "min_levels": 3, "min_span": 40.0, "min_drop": 0.25, "dwell_s": 120},
         "pump": {"dwell_s": 120, "why": "pump coefficient not identified: the protocol does not separate it from pump heat and dead time (dry run: truth 0 gives a fitted 0.14, flag fired in 2 of 5 runs only at truth 0.6), the pump stays on the firmware PID"},
+        "hist": {"block_s": 60, "min_rpm": 1400.0, "min_pump_rpm": 4000.0, "max_fan_range": 40.0, "max_pump_range": 100.0, "min_blocks": 100, "min_span_k": 3.0, "a_range": [20.0, 28.0]},
         "rmse_targets": ["water_30", "water_120"],
         "hold_targets": ["water_120", "cpu_120", "gpu_120"],
         "required": ["fan"],
@@ -127,17 +128,31 @@ class GreyBox:
         return qd, self.conductance(th, s["f"], p), Ta + drift * s["t"], C * 1000.0 * f1, C * 1000.0 * (1.0 - f1) + 1e-9, K
 
     def ahead(self, th, s, h, step):
-        qd, G, ta, c1, c2, K = self.parts(th, s)
-        w = s["w"]
-        a = np.arange(0, len(w) - h, step)
-        a = a[s["hold"][a + h]]
+        return self.ahead_full(th, s, h, step)[:2]
+
+    def ahead_full(self, th, s, h, step, tkey="hold", okey=None, hold_q=False, hold_p=False):
+        C, A, m, gam, Ta, tau, f1, K, tau_hi, drift, q0 = th
+        w, f, p, q = s["w"], s["f"], s["p"], s["q"]
+        n = len(w)
+        ar = np.arange(n)
+        ta = Ta + drift * s["t"]
+        c1, c2 = C * 1000.0 * f1, C * 1000.0 * (1.0 - f1) + 1e-9
+        a = np.arange(0, n - h, step)
+        a = a[s[tkey][a + h]]
+        if okey:
+            a = a[s[okey][a]]
         t = w[a].copy()
         u = t.copy()
         for j in range(h):
-            f = K * (t - u)
-            t = t + (qd[a + j] - G[a + j] * (t - ta[a + j]) - f) / c1
-            u = u + f / c2
-        return t - w[a + h], w[a] - w[a + h]
+            i = a + j
+            pj = p[a] if hold_p else p[i]
+            x = i - np.interp(pj, [self.pump_lo, self.pump_hi], [tau, tau_hi])
+            qd = np.interp(np.minimum(x, a) if hold_q else x, ar, q) + q0
+            G = A * np.power(np.maximum(f[i], 0.0) / self.full, m) * (1.0 + gam * (pj / self.pump_full - 1.0))
+            fl = K * (t - u)
+            t = t + (qd - G * (t - ta[i]) - fl) / c1
+            u = u + fl / c2
+        return t - w[a + h], w[a] - w[a + h], a
 
     def simulate(self, th, s):
         qd, G, ta, c1, c2, K = (v.tolist() if isinstance(v, np.ndarray) else v for v in self.parts(th, s))
@@ -155,12 +170,17 @@ class GreyBox:
     def residual(self, th, segs, key):
         return np.nan_to_num(np.concatenate([(self.simulate(th, s) - s["w"])[s[key]] for s in segs]), nan=1e3, posinf=1e3, neginf=-1e3)
 
-    def fit(self, segs, fixed=None, x0=None, key="fit"):
+    def fit(self, segs, fixed=None, x0=None, key="fit", bounds=None):
         lo, hi, st = list(self.LO), list(self.HI), list(self.X0 if x0 is None else x0)
+        for k, (a, b) in (bounds or {}).items():
+            i = self.NAMES.index(k)
+            lo[i], hi[i] = a, b
         for k, v in (fixed or {}).items():
             i = self.NAMES.index(k)
             lo[i], hi[i], st[i] = v, v + 1e-9, v
+        st = list(np.clip(st, lo, hi))
         r = least_squares(lambda th: self.residual(th, segs, key), st, bounds=(lo, hi), x_scale=self.SCALE, ftol=1e-7, xtol=1e-7, max_nfev=60)
+        self.info = {"nfev": int(r.nfev), "status": int(r.status)}
         return r.x, float(r.fun @ r.fun), len(r.fun)
 
     def rmse(self, th, segs, key):
@@ -236,27 +256,88 @@ class Identifier:
         self.cfg, self.st, self.g = cfg, st, cfg["gate"]
         self.gb = GreyBox(cfg)
 
+    NAMES = ("d5next/water/temp", "d5next/fan/rpm", "d5next/pump/rpm", "/intelcpu/0/power/0", "nvml/0/power", "d5next/pump/power")
+
+    def columns(self):
+        st = self.st
+        return {c: st.col(c) for c in self.NAMES + ("d5next/fan/duty", "d5next/pump/duty", self.cfg["phase_channel"])}
+
+    def cut(self, cols, lo, hi):
+        w = self.cfg["window"]
+        bad = ~np.all([np.isfinite(cols[c][lo:hi]) for c in self.NAMES], axis=0)
+        gs, ge = Ops.runs(bad)
+        gap = np.zeros(hi - lo, bool)
+        for x, y in zip(gs, ge):
+            gap[x:y] |= y - x >= w["gap_s"]
+        out = []
+        for x, y in zip(*Ops.runs(~gap)):
+            good = np.where(~bad[x:y])[0]
+            if len(good) < w["piece_min_s"] or len(good) < 0.9 * (y - x):
+                continue
+            x, y = x + int(good[0]), x + int(good[-1]) + 1
+            out.append((lo + x, lo + y, ~bad[x:y]))
+        return out
+
     def segments(self):
-        st, w = self.st, self.cfg["window"]
+        st = self.st
         who = st.labels()
-        names = ("d5next/water/temp", "d5next/fan/rpm", "d5next/pump/rpm", "/intelcpu/0/power/0", "nvml/0/power", "d5next/pump/power")
-        cols = {c: st.col(c) for c in names + ("d5next/fan/duty", "d5next/pump/duty", self.cfg["phase_channel"])}
+        cols = self.columns()
         idx0 = st.wins[0][0]
         segs = []
         for i, (lo, hold, hi) in enumerate(st.spans()):
-            bad = ~np.all([np.isfinite(cols[c][lo:hi]) for c in names], axis=0)
-            gs, ge = Ops.runs(bad)
-            gap = np.zeros(hi - lo, bool)
-            for x, y in zip(gs, ge):
-                gap[x:y] |= y - x >= w["gap_s"]
-            ps, pe = Ops.runs(~gap)
-            for x, y in zip(ps, pe):
-                good = np.where(~bad[x:y])[0]
-                if len(good) < w["piece_min_s"] or len(good) < 0.9 * (y - x):
-                    continue
-                x, y = x + int(good[0]), x + int(good[-1]) + 1
-                segs.append(self.piece(cols, who[i], lo + x, lo + y, hold, st.wins[i], idx0, ~bad[x:y]))
+            for x, y, ok in self.cut(cols, lo, hi):
+                segs.append(self.piece(cols, who[i], x, y, hold, st.wins[i], idx0, ok))
         return segs
+
+    def history(self):
+        st, hc = self.st, self.g["hist"]
+        end = st.wins[0][0] - self.cfg["window"]["pre_s"]
+        cols = self.columns()
+        pieces = self.cut(cols, 0, end) if end > 0 else []
+        if not pieces:
+            return None
+        mid = (pieces[0][0] + pieces[-1][1]) // 2
+        sim = self.cfg.get("truth")
+        if sim is not None:
+            sc = dict(cols)
+            ff = lambda v: Ops.ffill(v, 10 ** 9, False)[:end]
+            fill = lambda v: np.where(np.isfinite(v), v, np.nanmedian(v) if np.isfinite(v).any() else 0.0)
+            p = Plant(sim.c, True, 0.0).run(ff(cols["d5next/fan/duty"]), ff(cols["d5next/pump/duty"]), fill(ff(cols["/intelcpu/0/power/0"])), fill(ff(cols["nvml/0/power"])), np.random.default_rng(self.cfg["seed"]))
+            for k, v in (("d5next/water/temp", "water"), ("d5next/fan/rpm", "fan_rpm"), ("d5next/pump/rpm", "pump_rpm"), ("d5next/pump/power", "pump_pow")):
+                sc[k] = np.r_[p[v], np.full(len(cols[k]) - end, np.nan)]
+            cols = sc
+        segs = []
+        for x, y, ok in pieces:
+            s = self.piece(cols, "fan", x, y, y, st.wins[0], 0, ok)
+            s["t"] = np.zeros(y - x)
+            s["later"] = s["all"] & (np.arange(x, y) >= mid)
+            s["early"] = s["all"] & (np.arange(x, y) < mid)
+            segs.append(s)
+        return segs
+
+    def conductance(self, hs):
+        hc, pc = self.g["hist"], self.cfg["plant"]
+        cap, dead, B = pc["c1"] + pc["c2"], pc["dead"][-1][1], int(hc["block_s"])
+        xs, ys = [], []
+        for s in hs:
+            n = len(s["w"])
+            qd = np.interp(np.arange(n) - dead, np.arange(n), s["q"])
+            k = n // B
+            if not k:
+                continue
+            sh = (k, B)
+            r = lambda v: v[: k * B].reshape(sh)
+            ok = r(s["early"]).all(1) & (r(s["f"]).mean(1) >= hc["min_rpm"]) & (np.ptp(r(s["f"]), 1) <= hc["max_fan_range"]) & (r(s["p"]).mean(1) >= hc["min_pump_rpm"]) & (np.ptp(r(s["p"]), 1) <= hc["max_pump_range"])
+            tt = np.arange(B) - (B - 1) / 2.0
+            w = r(s["w"])
+            slope = (w * tt).sum(1) / (tt * tt).sum()
+            xs.append(w.mean(1)[ok])
+            ys.append((r(qd).mean(1) - cap * slope)[ok])
+        x, y = (np.concatenate(v) if v else np.zeros(0) for v in (xs, ys))
+        if len(x) < hc["min_blocks"] or np.ptp(x) < hc["min_span_k"]:
+            return {"a": None, "n": int(len(x)), "ok": False, "span_k": float(np.ptp(x)) if len(x) else 0.0}
+        a = float(np.cov(x, y)[0, 1] / np.var(x, ddof=1))
+        return {"a": a, "n": int(len(x)), "ok": bool(hc["a_range"][0] <= a <= hc["a_range"][1]), "span_k": float(np.ptp(x))}
 
     def piece(self, cols, who, lo, hi, hold, win, idx0, ok):
         sl = slice(lo, hi)
@@ -284,10 +365,13 @@ class Identifier:
         if not segs:
             raise ValueError("no usable step window")
         fan_s = [s for s in segs if s["who"] == "fan"]
-        th, sse, n = gb.fit(segs)
+        hist = self.history()
+        a_est = self.conductance(hist) if hist else {"a": None, "n": 0, "ok": False, "span_k": 0.0}
+        a_est["source"] = "history"
+        th, sse, n = gb.fit(segs, {"A": a_est["a"]} if a_est["a"] is not None else None)
         th0, sse0, _ = gb.fit(segs, {"m": 0.0}, th)
         lr = lambda s0: float(n * math.log(max(s0, sse) / sse) / gc["se_inflate"] ** 2)
-        out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "theta_null": dict(zip(gb.NAMES, th0.tolist()))}
+        out = {"theta_fit": dict(zip(gb.NAMES, th.tolist())), "fit_rmse_k": float(np.sqrt(sse / n)), "n": int(n), "lr_threshold": gc["z"] ** 2, "lr_m": lr(sse0), "theta_null": dict(zip(gb.NAMES, th0.tolist())), "a_est": a_est}
         ex = self.excitation("fan")
         low = [r for l, r in ex["level_rpm"].items() if float(l) > 0.0]
         out["lowest_rpm_ratio"] = min(low) / gb.full if low else None
@@ -314,7 +398,7 @@ class Identifier:
             for s in self.segs:
                 out_ph = (s["who"] == "fan") & (s["phase"] == ph)
                 s["lo_fit"], s["lo_hold"] = s["all"] & ~out_ph, s["all"] & out_ph
-            t, _, _ = gb.fit(self.segs, x0=th, key="lo_fit")
+            t, _, _ = gb.fit(self.segs, {"A": th[1]}, th, key="lo_fit")
             ls = [s for s in fan_s if s["lo_hold"].any()]
             out["phases"][str(ph)] = {**{k: float(t[gb.NAMES.index(k)]) for k in ("C", "m", "q0", "Ta")}, "left_out_rmse": gb.rmse(t, ls, "lo_hold") if ls else None}
         out["range"] = {k: [min(v[k] for v in out["phases"].values()), max(v[k] for v in out["phases"].values())] for k in ("C", "m", "q0", "Ta")}
@@ -326,6 +410,9 @@ class Identifier:
         why = []
         if not (len(ex["levels_held"]) >= c["min_levels"] and ex["span"] >= c["min_span"]):
             why.append("fan not excited enough")
+        ae = o["a_est"]
+        if not ae["ok"]:
+            why.append("full-fan conductance estimate from history " + ("not available" if ae["a"] is None else f"{ae['a']:.1f} W/K") + f" (n {ae['n']}) outside {self.g['hist']['a_range'][0]} to {self.g['hist']['a_range'][1]} W/K")
         if not o["fit_rmse_k"] <= gc["fit_rmse_max"]:
             why.append(f"grey-box fit RMSE {o['fit_rmse_k']:.3f} K above {gc['fit_rmse_max']}")
         if not gc["c_range"][0] <= th[0] <= gc["c_range"][1]:

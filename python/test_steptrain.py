@@ -294,6 +294,41 @@ def test_forecast_gate_and_heat_capacity_gate_refuse_what_they_should():
     assert any("fit RMSE" in r for r in ident.fan(dict(ok, fit_rmse_k=0.121), th, [], ex)["reasons"])
 
 
+def steady_history(a, n=24000, seed=0):
+    gb = S.GreyBox()
+    rng = np.random.default_rng(seed)
+    th = np.array(gb.X0)
+    th[gb.NAMES.index("A")], th[gb.NAMES.index("m")], th[gb.NAMES.index("gamma")], th[gb.NAMES.index("q0")], th[gb.NAMES.index("drift")] = a, 1.0, 0.0, 40.0, 0.0
+    t = np.arange(n)
+    q = 150.0 + 90.0 * np.sin(2 * np.pi * t / 8000.0) + np.cumsum(rng.normal(0, 0.5, n)) * 0.2
+    seg = {"q": q, "f": np.full(n, 1460.0), "p": np.full(n, 4800.0), "t": np.zeros(n), "all": np.ones(n, bool), "early": np.ones(n, bool)}
+    seg["w"] = gb.simulate(th, dict(seg, w=np.full(n, 30.0))) + rng.normal(0, 0.005, n)
+    return seg
+
+
+def test_full_fan_conductance_is_estimated_from_steady_history_blocks_and_out_of_range_refuses():
+    ident = S.Identifier(S.CFG, None)
+    for a in (21.0, 24.0, 27.0):
+        e = ident.conductance([steady_history(a)])
+        assert e["ok"] and abs(e["a"] - a) < 1.5 and e["n"] > 100, (a, e)
+    assert not ident.conductance([steady_history(31.0)])["ok"]
+    slow = steady_history(24.0)
+    slow["f"] = np.full(len(slow["w"]), 900.0)
+    assert ident.conductance([slow])["a"] is None
+    late = steady_history(24.0)
+    late["early"] = np.zeros(len(late["w"]), bool)
+    assert ident.conductance([late])["a"] is None
+
+
+def test_the_fit_holds_the_given_conductance_and_bounds_override():
+    gb = S.GreyBox()
+    seg = forecast_seg(1.61, 65.0, 3)
+    th, _, _ = gb.fit([seg], {"A": 23.0})
+    assert abs(th[1] - 23.0) < 1e-6
+    thb, _, _ = gb.fit([seg], {"m": 0.0}, th, bounds={"C": [8.0, 16.0], "Ta": [18.0, 30.0]})
+    assert 8.0 <= thb[0] <= 16.0 and 18.0 <= thb[4] <= 30.0 and abs(thb[2]) < 1e-6
+
+
 if __name__ == "__main__":
     for f in (test_prep_fits_on_the_given_rows_and_exempts_free_columns, test_plant_bound_lifts_a_low_fan_duty_and_rpm_is_never_negative, test_grey_box_recovers_the_fan_exponent_and_rejects_none,
               test_response_term_matches_between_trainer_and_exporter, test_gate_ships_with_a_fan_response_refuses_without_and_repeats):
