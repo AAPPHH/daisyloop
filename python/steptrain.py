@@ -13,6 +13,7 @@ from scipy.signal import lfilter
 from export import LinearExporter
 from features import FeatureFrame, Node, Ops, PHYS, PhysSpec, Spec, CONFIG as FCFG
 from models import CONFIG as MCFG, FRESH, LIN_CLIP, LinearFit, Metrics, PINT, Prep, local_idx
+from metastore import HistoryStore
 from rawstore import RawStore
 from stepsim import Injector, Plant, SIM
 
@@ -21,6 +22,7 @@ MODELS = os.path.join(HERE, "..", "models")
 ALT = {"m": 1.2, "a": 30.0, "c1": 8500.0, "k": 15.0, "gamma": 0.1, "ta": 22.0, "spool_s": 8.0}
 WRONG = {"recirc12": {"m": 1.2, "ta_fan": 10.0, "q0": 0.0}, "recirc161": {"m": 1.61, "ta_fan": 10.0, "q0": 0.0}, "air": {"m": 0.0, "ta_fan": 8.0, "q0": 40.0}}
 CFG = {
+    "source": "history",
     "store_dir": FCFG["cache_dir"],
     "deployed": os.path.join(MODELS, "model_deploy.json"),
     "deployed_spec": os.path.join(MODELS, "feature_spec_deploy.json"),
@@ -204,10 +206,12 @@ class Store:
 
     def load(self, channels):
         cfg = self.cfg
-        meta, X = RawStore({"cache_dir": cfg["store_dir"], "chunk_s": 86400}).load()
+        want = list(dict.fromkeys(list(channels) + [cfg["phase_channel"]]))
+        src = cfg.get("source", "history")
+        meta, X = RawStore({"cache_dir": cfg["store_dir"], "chunk_s": 86400}).load() if src == "raw" else HistoryStore().load(want) if src == "history" else src.load(want)
         self.meta, self.k0 = meta, meta["k0"]
         ix = {c["channel"]: i for i, c in enumerate(meta["channels"])}
-        have = [c for c in dict.fromkeys(list(channels) + [cfg["phase_channel"]]) if c in ix]
+        have = [c for c in want if c in ix]
         self.X = np.asarray(X[:, [ix[c] for c in have]])
         self.ix = {c: i for i, c in enumerate(have)}
         self.T = self.X.shape[0]
@@ -872,7 +876,7 @@ def dry_task(job):
     dest = os.path.join(root, f"{case}-{seed}")
     info = Injector(cfg, sim).build(cfg["dry"]["protocol"], fr, os.path.join(dest, "store"), seed, drift)
     truth = Plant(sim["plant"], fr, drift)
-    c = dict(cfg, store_dir=os.path.join(dest, "store"), out_dir=os.path.join(dest, "out"), truth=truth, seed=seed, gate=dict(cfg["gate"], grey=dict(cfg["gate"]["grey"], loo=False)))
+    c = dict(cfg, source="raw", store_dir=os.path.join(dest, "store"), out_dir=os.path.join(dest, "out"), truth=truth, seed=seed, gate=dict(cfg["gate"], grey=dict(cfg["gate"]["grey"], loo=False)))
     try:
         rep = StepTrainer(c).run()
     finally:
