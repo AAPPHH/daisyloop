@@ -189,6 +189,7 @@ impl Corrector {
         self.cfg.restart_hold_secs
     }
 
+    #[cfg(test)]
     pub fn state(&self) -> &BTreeMap<u32, Rls> {
         &self.horizons
     }

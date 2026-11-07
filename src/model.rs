@@ -10,6 +10,7 @@ pub struct Forecast {
 }
 
 impl Forecast {
+    #[cfg(test)]
     pub fn plain(water: f64) -> Forecast {
         Forecast { water, response: 0.0 }
     }
