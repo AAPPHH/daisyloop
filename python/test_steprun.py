@@ -486,17 +486,17 @@ def test_pipe_requests_carry_the_version_and_the_command_shapes():
 
     def exchange(req):
         seen.append(req)
-        return {"v": 2, "id": req["id"], "body": {"type": "ack"}}
+        return {"v": 3, "id": req["id"], "body": {"type": "ack"}}
 
     pipe.exchange = exchange
     pipe.command({"cmd": "start_step_test", "id": "d5.fan", "confirmed": True})
     pipe.command({"cmd": "stop_step_test"})
-    assert seen[0] == {"v": 2, "id": 1, "body": {"type": "command", "cmd": "start_step_test", "id": "d5.fan", "confirmed": True}}
+    assert seen[0] == {"v": 3, "id": 1, "body": {"type": "command", "cmd": "start_step_test", "id": "d5.fan", "confirmed": True}}
     assert seen[1]["body"] == {"type": "command", "cmd": "stop_step_test"}
     pipe.exchange = lambda req: {"v": 1, "id": req["id"], "body": {"type": "ack"}}
     with pytest.raises(S.PipeError):
         pipe.command({"cmd": "stop_step_test"})
-    pipe.exchange = lambda req: {"v": 2, "id": req["id"], "body": {"type": "error", "message": "no"}}
+    pipe.exchange = lambda req: {"v": 3, "id": req["id"], "body": {"type": "error", "message": "no"}}
     with pytest.raises(S.Refused):
         pipe.snapshot()
     pipe.exchange = lambda req: (_ for _ in ()).throw(PermissionError(13, "denied"))
@@ -620,7 +620,7 @@ def test_pipe_ids_are_local_and_busy_open_error_is_recognised(monkeypatch):
 
     def exchange(req):
         pipe.n += 5
-        return {"v": 2, "id": req["id"], "body": {"type": "ack"}}
+        return {"v": 3, "id": req["id"], "body": {"type": "ack"}}
 
     pipe.exchange = exchange
     pipe.command({"cmd": "stop_step_test"})
@@ -636,5 +636,5 @@ def test_pipe_ids_are_local_and_busy_open_error_is_recognised(monkeypatch):
     monkeypatch.setattr(S.time, "sleep", lambda s: None)
     pipe2 = S.Pipe(copy.deepcopy(S.CFG))
     with pytest.raises(FileNotFoundError):
-        pipe2.exchange({"v": 2, "id": 1, "body": {}})
+        pipe2.exchange({"v": 3, "id": 1, "body": {}})
     assert len(calls) == 3

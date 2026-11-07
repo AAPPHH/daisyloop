@@ -87,11 +87,11 @@ fn check(golden: &str, spec: &str, model: &str, tol: f64) {
 }
 
 #[test]
-fn shipped_model_is_not_identified_and_bad_files_are_errors() {
+fn shipped_model_is_identified_by_owner_override_and_bad_files_are_errors() {
     let p = Predictor::load(&models("feature_spec_deploy.json"), &models("model_deploy.json")).unwrap();
-    assert!(!p.model.identified.fan && !p.model.identified.pump);
+    assert!(p.model.identified.fan && p.model.identified.pump);
     assert!(p.model.target_names().contains(&"water_120"));
-    let bare = models("model_deploy.json").replace("\"identified\":{\"fan\":false,\"pump\":false},", "");
+    let bare = models("model_deploy.json").replace("\"identified\":{\"fan\":true,\"pump\":true},", "");
     assert!(!Predictor::load(&models("feature_spec_deploy.json"), &bare).unwrap().model.identified.fan);
     assert!(Predictor::load("{}", &models("model_deploy.json")).is_err());
 }
@@ -101,4 +101,18 @@ fn step_model_with_response_term_matches_python_golden() {
     check("fixtures/steptrain/golden_deploy.json", "fixtures/steptrain/feature_spec_deploy.json", "fixtures/steptrain/model_deploy.json", 1e-9);
     let p = Predictor::load(&models("fixtures/steptrain/feature_spec_deploy.json"), &models("fixtures/steptrain/model_deploy.json")).unwrap();
     assert!(p.model.is_linear() && p.model.identified.fan && !p.model.identified.pump);
+}
+
+#[test]
+fn water_only_model_predicts_the_deployed_water_targets() {
+    let (spec, text) = (models("feature_spec_deploy.json"), models("model_deploy.json"));
+    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["targets"].as_object_mut().unwrap().retain(|k, _| k.starts_with("water_"));
+    let (full, only) = (Predictor::load(&spec, &text).unwrap(), Predictor::load(&spec, &v.to_string()).unwrap());
+    assert!(only.model.target_names().iter().all(|n| n.starts_with("water_")) && only.model.is_linear());
+    let x: Vec<f64> = (0..full.model.features.len()).map(|i| 0.1 * i as f64).collect();
+    let (a, b) = (full.model.predict(&x), only.model.predict(&x));
+    for (n, p) in &b {
+        assert!((a.iter().find(|(m, _)| m == n).unwrap().1 - p).abs() < 1e-12);
+    }
 }

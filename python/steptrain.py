@@ -33,7 +33,7 @@ CFG = {
     "blocks": FRESH["blocks"],
     "folds": {"fit": ["train", "oor_pump20", "fresh0", "step_train"], "select": ["val", "fresh1"], "final": ["test", "fresh2", "step_hold"]},
     "stride": MCFG["stride"],
-    "series": MCFG["series"],
+    "series": {"water": MCFG["series"]["water"]},
     "horizons": [30, 60, 90, 120],
     "seed": 0,
     "threads": 1,
@@ -41,7 +41,6 @@ CFG = {
     "families": {"ridge": {"alpha": [100.0, 1000.0, 10000.0, 100000.0]}, "svr": {"C": [0.0001, 0.0003, 0.001], "epsilon": [0.01]}},
     "select_targets": ["water_30", "water_60", "water_120"],
     "trees": {"targets": ["water_30", "water_60", "water_120"], "rounds": 600, "early": 40, "params": {"eta": 0.03, "max_depth": 3, "min_child_weight": 100, "subsample": 0.7, "colsample_bytree": 0.5, "lambda": 10.0, "tree_method": "hist", "objective": "reg:squarederror"}},
-    "die_gain": 1.0,
     "boot": {"block_s": 600, "n": 400},
     "workers": 5,
     "blas_threads": 1,
@@ -51,7 +50,7 @@ CFG = {
         "pump": {"dwell_s": 120, "why": "pump coefficient not identified: the protocol does not separate it from pump heat and dead time (dry run: truth 0 gives a fitted 0.14, flag fired in 2 of 5 runs only at truth 0.6), the pump stays on the firmware PID"},
         "hist": {"block_s": 60, "warm_s": 300, "min_rpm": 1400.0, "min_pump_rpm": 4000.0, "max_fan_range": 40.0, "max_pump_range": 100.0, "min_blocks": 100, "min_span_k": 3.0, "a_range": [20.0, 28.0], "h": 120, "step": 10, "gain": 1.5, "bias_max": 0.10, "bias_rpm": 1400.0, "bins": [0.0, 600.0, 1000.0, 1400.0, 1e9]},
         "rmse_targets": ["water_30", "water_120"],
-        "hold_targets": ["water_120", "cpu_120", "gpu_120"],
+        "hold_targets": ["water_120"],
         "required": ["fan"],
         "z": 1.96,
         "text": [
@@ -63,7 +62,7 @@ CFG = {
             "3. fan exponent m is positive with a one-sided 95 % likelihood-ratio bound (variance inflated for autocorrelation) against the nested model without fan response but with ambient drift (A free in it), and the conductance of the lowest held running duty level (its recorded rpm, not the 0 % test) is at least min_drop below full fan",
             "3b. fitted heat capacity C within 8 to 16 kJ/K (the independently known value is 11.7)",
             "4. check on fan phases 6 and 7, which stay out of the fit and the response term and run at constant full fan: the 120 s ahead forecast, re-initialised from the measured water every 10 s with both lumps set to the measured water, is strictly better than persistence, and the lower bound (2.5 %) of the RMSE ratio no-fan refit over full model, from a circular 240 s block bootstrap (seed 0, 5000 draws), is above 1.0; the no-fan reference refit has q0 and drift free, A free, C bounded to 8 to 16 kJ/K and Ta to 18 to 30 C. The forecast uses the logged power, pump rpm and fan rpm inside the horizon (the planner compares rpm choices under the same load, so this is a physics test, not a planner skill score); the variants with power held at the origin value and with power and pump held are reported, not gated. The free-run hold-out RMSE and the leave-one-fan-phase-out ranges of C, m, q0 and Ta (their fits include the hold-out rows) are reported, not gated",
-            "5. water 30 s and 120 s RMSE of the model on the final fold (test, fresh2, held-out step rows) is not worse than the deployed model's by more than z times the block-bootstrap standard deviation of the paired difference, and on the held-out step rows the 120 s forecasts of water, cpu and gpu are not worse than persistence by more than the same band",
+            "5. water 30 s and 120 s RMSE of the model on the final fold (test, fresh2, held-out step rows) is not worse than the deployed model's by more than z times the block-bootstrap standard deviation of the paired difference, and on the held-out step rows the 120 s forecast of water is not worse than persistence by more than the same band",
             "6. on the later half of the non-step history (not used for A, no step rows) the 120 s re-initialised forecast has RMSE at least 1.5 times better than persistence and an absolute mean bias above 1400 rpm of at most 0.10 K; RMSE and bias per rpm bin (0-600, 600-1000, 1000-1400, 1400+) are reported",
             "the pump flag is not part of the gate: identified.pump is always false, the planner then does not use the model for the pump channel",
         ],
@@ -555,7 +554,7 @@ class Identifier:
     def response(self, th):
         gb = self.gb
         return {"feat": "step.fx", "pump_feat": "pump_rpm", "k": th["A"] / (th["C"] * 1000.0 * th["f1"]), "m": th["m"], "gamma": th["gamma"], "ta": th["Ta"], "pump": [gb.pump_lo, gb.pump_hi],
-                "dead": [th["tau"], th["tau_hi"]], "gain": {"water": 1.0, "cpu": self.cfg["die_gain"], "gpu": self.cfg["die_gain"]}}
+                "dead": [th["tau"], th["tau_hi"]], "gain": {"water": 1.0}}
 
 
 class Response:

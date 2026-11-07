@@ -8,6 +8,8 @@ from features import BatchEngine, PHYS, PhysSpec, Spec, StreamEngine, CONFIG as 
 from models import CONFIG, FRESH, LIN_TARGETS, Dataset, local_idx
 from rawstore import CONFIG as RawCFG, RawStore
 
+EXPORT_TARGETS = [t for t in LIN_TARGETS if t.startswith("water_")]
+
 CFG = {
     "tag": "x44aug",
     "stage": "stage2.pkl",
@@ -60,6 +62,8 @@ class Exporter:
         import xgboost as xgb
         out = {"features": self.feats, "identified": {"fan": False, "pump": False}, "targets": {}}
         for tg, r in self.stage.items():
+            if not tg.startswith("water_"):
+                continue
             b = xgb.Booster()
             b.load_model(os.path.join(CONFIG["out_dir"], f"{self.cfg['tag']}_{tg}.json"))
             n = r["best_iter"] + 1
@@ -167,8 +171,8 @@ class LinearExporter:
         return sub
 
     def model(self):
-        out = {"kind": "linear", "features": self.full["feats"], "identified": {"fan": False, "pump": False}, "clip": self.full["clip"], "targets": self.block(self.full, LIN_TARGETS),
-               "fallback": {"features": self.fb["feats"], "targets": self.block(self.fb, LIN_TARGETS)}}
+        out = {"kind": "linear", "features": self.full["feats"], "identified": {"fan": False, "pump": False}, "clip": self.full["clip"], "targets": self.block(self.full, EXPORT_TARGETS),
+               "fallback": {"features": self.fb["feats"], "targets": self.block(self.fb, EXPORT_TARGETS)}}
         with open(self.cfg["model_out"], "w") as f:
             json.dump(out, f, separators=(",", ":"))
         return out
