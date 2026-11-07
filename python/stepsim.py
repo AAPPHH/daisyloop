@@ -9,7 +9,7 @@ from rawstore import RawStore
 
 SIM = {
     "plant": {
-        "c1": 7100.0, "c2": 4600.0, "k": 24.0, "a": 23.8, "m": 1.61, "gamma": 0.03, "ta": 25.0, "q0": 65.0, "eta_cpu": 0.96, "eta_gpu": 1.0,
+        "c1": 7100.0, "c2": 4600.0, "k": 24.0, "a": 23.8, "m": 1.61, "gamma": 0.03, "ta": 25.0, "ta_fan": 0.0, "q0": 65.0, "eta_cpu": 0.96, "eta_gpu": 1.0,
         "fan_full_rpm": 1460.0, "fan_per_duty": 14.7, "spool_s": 4.5, "pump_cal": [[0.0, 2000.0], [19.8, 2570.0], [100.0, 4800.0]],
         "pump_power": [[0.0, 4.26], [19.8, 4.26], [100.0, 18.32]], "dead": [[2400.0, 33.0], [2570.0, 31.0], [4800.0, 11.0]],
         "sensor_k": 0.005, "quant": 0.01, "load_noise_w": 8.0, "rpm_noise": 2.0, "firmware_fan": 100.0, "firmware_pump": 19.8,
@@ -64,6 +64,10 @@ class Plant:
         c = self.c
         return c["a"] * max(frpm, 0.0) ** c["m"] / c["fan_full_rpm"] ** c["m"] * (1.0 + c["gamma"] * (prpm / 4800.0 - 1.0))
 
+    def air(self, frpm):
+        c = self.c
+        return c["ta"] + c["ta_fan"] * max(0.0, 1.0 - frpm / c["fan_full_rpm"])
+
     def run(self, fan_cmd, pump_cmd, p_cpu, p_gpu, rng):
         c = self.c
         n = len(fan_cmd)
@@ -83,7 +87,7 @@ class Plant:
             x = i - self.dead(prpm)
             j = int(math.floor(x))
             qd = qtot[0] if j < 0 else qtot[i] if j >= i else qtot[j] + (qtot[j + 1] - qtot[j]) * (x - j)
-            ta = c["ta"] + self.drift_k * self.DRIFT[c["drift_shape"]](i / n)
+            ta = self.air(r) + self.drift_k * self.DRIFT[c["drift_shape"]](i / n)
             G = self.conductance(r, prpm)
             out[i] = t1
             fd_rec[i], pd_rec[i], frpm[i], prpm_rec[i], ppow_rec[i] = fd, pd, r, prpm, ppow
@@ -97,7 +101,7 @@ class Plant:
     def effect(self, w, prpm, rpm_lo, rpm_hi, horizon=120.0):
         c = self.c
         g = lambda r: c["a"] * (r / c["fan_full_rpm"]) ** c["m"] * (1.0 + c["gamma"] * (prpm / 4800.0 - 1.0))
-        return float(np.mean((g(rpm_hi) - g(rpm_lo)) * (w - c["ta"])) * horizon / c["c1"])
+        return float(np.mean(g(rpm_hi) * (w - self.air(rpm_hi)) - g(rpm_lo) * (w - self.air(rpm_lo))) * horizon / c["c1"])
 
 
 class Injector:

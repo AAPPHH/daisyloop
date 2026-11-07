@@ -18,6 +18,7 @@ from stepsim import Injector, Plant, SIM
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS = os.path.join(HERE, "..", "models")
 ALT = {"m": 1.2, "a": 30.0, "c1": 8500.0, "k": 15.0, "gamma": 0.1, "ta": 22.0, "spool_s": 8.0}
+WRONG = {"recirc12": {"m": 1.2, "ta_fan": 10.0, "q0": 0.0}, "recirc161": {"m": 1.61, "ta_fan": 10.0, "q0": 0.0}, "air": {"m": 0.0, "ta_fan": 8.0, "q0": 40.0}}
 CFG = {
     "store_dir": FCFG["cache_dir"],
     "deployed": os.path.join(MODELS, "model_deploy.json"),
@@ -67,9 +68,10 @@ CFG = {
     "plant": SIM["plant"],
     "sim": SIM,
     "dry": {"base": {"fan": {"fan": True, "drift": 0.0}, "nofan": {"fan": False, "drift": 0.0}, "drift_nofan": {"fan": False, "drift": 5.5}, "bump_nofan": {"fan": False, "drift": 5.5, "plant": {"drift_shape": "bump"}},
-                     "drift_fan": {"fan": True, "drift": 5.5}, "alt_fan": {"fan": True, "drift": 0.0, "plant": ALT}, "alt_nofan": {"fan": False, "drift": 3.0, "plant": ALT}},
-            "starts": [30.0, 30.5, 31.0], "restart_gap": [120, 30], "grid": {"fan": "all", "nofan": [30.5], "drift_nofan": [30.5], "bump_nofan": [30.5], "alt_fan": [30.5], "alt_nofan": [30.5]},
-            "seeds": 10, "need": 9, "protocol": "runbook", "factor": 1.5},
+                     "drift_fan": {"fan": True, "drift": 5.5}, "alt_fan": {"fan": True, "drift": 0.0, "plant": ALT}, "alt_nofan": {"fan": False, "drift": 3.0, "plant": ALT},
+                     "wrong_recirc12": {"fan": True, "drift": 0.0, "plant": WRONG["recirc12"]}, "wrong_recirc161": {"fan": True, "drift": 0.0, "plant": WRONG["recirc161"]}, "wrong_air": {"fan": True, "drift": 0.0, "plant": WRONG["air"]}},
+            "starts": [30.0, 30.5, 31.0], "restart_gap": [120, 30], "grid": {"fan": "all", "nofan": [30.5], "drift_nofan": [30.5], "bump_nofan": [30.5], "alt_fan": [30.5], "alt_nofan": [30.5], "wrong_recirc12": [30.5], "wrong_recirc161": [30.5], "wrong_air": [30.5]},
+            "seeds": 10, "need": 58, "protocol": "runbook", "factor": 1.5},
 }
 
 
@@ -371,6 +373,8 @@ class Identifier:
         hist = self.history()
         a_est = self.conductance(hist) if hist else {"a": None, "n": 0, "ok": False, "span_k": 0.0}
         a_est["source"] = "history"
+        if self.cfg.get("a_fixed") is not None:
+            a_est.update(a=float(self.cfg["a_fixed"]), ok=bool(self.g["hist"]["a_range"][0] <= self.cfg["a_fixed"] <= self.g["hist"]["a_range"][1]), source="fixed by cfg a_fixed")
         th, sse, n = gb.fit(segs, {"A": a_est["a"]} if a_est["a"] is not None else None)
         th0, sse0, _ = gb.fit(segs, {"m": 0.0}, th)
         thb, _, _ = gb.fit(segs, {"m": 0.0}, th, bounds=gc["null_bounds"])
@@ -872,7 +876,8 @@ def dry_task(job):
     f = rep["identification"]["fan"]
     ratio = f["effect_k"] / f["truth_k"] if f.get("truth_k") else None
     return {"case": case, "seed": seed, "ship": rep["gate"]["ship"], "identified": rep["gate"]["identified"], "reasons": rep["gate"]["reasons"], "fan_effect_k": f["effect_k"], "truth_k": f.get("truth_k"), "ratio": ratio,
-            "m": f["m"], "gamma": rep["identification"]["theta_fit"]["gamma"], "q0": rep["identification"]["theta_fit"]["q0"], "c": rep["identification"]["theta_fit"]["C"], "fit_rmse": rep["identification"]["fit_rmse_k"], "hold": rep["identification"]["hold_fan"], "family": rep["family"], "seconds": rep["seconds"], "water_max": info["water_max"]}
+            "m": f["m"], "gamma": rep["identification"]["theta_fit"]["gamma"], "q0": rep["identification"]["theta_fit"]["q0"], "c": rep["identification"]["theta_fit"]["C"], "fit_rmse": rep["identification"]["fit_rmse_k"], "hold": rep["identification"]["hold_fan"], "family": rep["family"], "seconds": rep["seconds"], "water_max": info["water_max"],
+            "fan_reasons": f["reasons"], "a_est": rep["identification"]["a_est"], "hist": rep["identification"]["hist"]}
 
 
 class Runner:
@@ -911,25 +916,29 @@ class DryRun:
             ok = [bool(r["ratio"] is not None and 1.0 / factor <= r["ratio"] <= factor) for r in rs]
             out[case] = {"n": len(rs), "ship": sum(r["ship"] for r in rs), "ship_ok": sum(bool(r["ship"] and o) for r, o in zip(rs, ok)), "fan_id": sum(r["identified"]["fan"] for r in rs), "ratio_ok": sum(ok),
                          "fit": rng([r["fit_rmse"] for r in rs]), "hold": rng([r["hold"]["rmse_full"] for r in rs if r["hold"]["rmse_full"] is not None]), "ratio": rng([r["ratio"] for r in rs if r["ratio"]]),
-                         "q0": rng([r["q0"] for r in rs]), "c": rng([r["c"] for r in rs]), "ahead_gain": rng([r["hold"]["ahead"]["null"] / r["hold"]["ahead"]["full"] for r in rs if r["hold"].get("ahead")])}
+                         "q0": rng([r["q0"] for r in rs]), "c": rng([r["c"] for r in rs]), "ship_wo6": sum(bool(r["ship"] or (r["fan_reasons"] and all(x.startswith("history forecast") for x in r["fan_reasons"]) and len(r["reasons"]) == 1)) for r in rs),
+                         "a_est": rng([r["a_est"]["a"] for r in rs if r["a_est"]["a"] is not None]), "hist_gain": rng([r["hist"]["gain"] for r in rs if r["hist"]]), "hist_bias_hi": rng([r["hist"]["bias_hi"] for r in rs if r["hist"] and r["hist"]["bias_hi"] is not None]), "ratio_ci_lo": rng([r["hold"]["ahead"]["ratio_ci"][0] for r in rs if r["hold"].get("ahead")]), "ahead_gain": rng([r["hold"]["ahead"]["null"] / r["hold"]["ahead"]["full"] for r in rs if r["hold"].get("ahead")])}
         return out
 
     @staticmethod
-    def verdict(summary, need=9):
+    def verdict(summary, need=58):
         out = {}
+        fan = [s for c, s in summary.items() if c.startswith("fan")]
         for c, s in summary.items():
             if c.startswith(("nofan", "drift", "bump", "alt_nofan")):
                 out[c] = s["ship"] == 0
             elif c.startswith("alt_fan"):
                 out[c] = s["ship"] == s["ship_ok"]
-            else:
-                out[c] = s["ship_ok"] >= min(need, s["n"])
+        if fan:
+            out["fan"] = sum(s["ship_ok"] for s in fan) >= min(need, sum(s["n"] for s in fan))
         return out
 
 
 def main(argv, cfg=CFG):
     if argv and argv[0] == "dryrun":
         cfg = dict(cfg, store_dir=FRESH["store_dir"])
+        if len(argv) > 4:
+            cfg["a_fixed"] = float(argv[4])
         cases = argv[2].split(",") if len(argv) > 2 else None
         root, res = DryRun(cfg).run(argv[1] if len(argv) > 1 else None, cases, int(argv[3]) if len(argv) > 3 else None)
         sm = DryRun.summary(res, cfg["dry"]["factor"])

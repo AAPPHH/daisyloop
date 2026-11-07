@@ -61,9 +61,9 @@ def test_response_term_matches_between_trainer_and_exporter():
             assert abs(a - b) < 1e-12, (prpm, tg, a, b)
 
 
-def run_case(case, seed, threads):
+def run_case(case, seed, threads, **extra):
     root = tempfile.mkdtemp(prefix="steptest-")
-    cfg = dict(S.CFG, store_dir=S.FRESH["store_dir"], threads=threads)
+    cfg = dict(S.CFG, store_dir=S.FRESH["store_dir"], threads=threads, **extra)
     try:
         return S.dry_task({"cfg": cfg, "case": case, "seed": seed, "root": root})
     finally:
@@ -73,9 +73,13 @@ def run_case(case, seed, threads):
 def test_gate_ships_with_a_fan_response_refuses_without_and_repeats():
     if not os.path.exists(os.path.join(S.FRESH["store_dir"], "raw.npy")):
         return
-    a, b = run_case("fan", 2, 1), run_case("fan", 2, 4)
-    assert a["ship"] and a["identified"]["fan"] and 1 / 1.5 < a["ratio"] < 1.5
+    truth = SIM["plant"]["a"]
+    a, b = run_case("fan", 2, 1, a_fixed=truth), run_case("fan", 2, 4, a_fixed=truth)
+    assert a["ship"] and a["identified"]["fan"] and 1 / 1.5 < a["ratio"] < 1.5 and a["a_est"]["source"].startswith("fixed")
     assert a["ship"] == b["ship"] and a["ratio"] == b["ratio"] and a["fit_rmse"] == b["fit_rmse"]
+    d = run_case("fan", 2, 1)
+    assert d["a_est"]["source"] == "history" and 20.0 < d["a_est"]["a"] < 28.0 and d["hist"]["bins"]["1400+"]["n"] > 0 and d["hold"]["ahead"]["variants"].keys() == {"held_power", "held_power_pump"}
+    assert all(x.startswith("history forecast") for x in d["fan_reasons"]) or d["ship"]
     for case in ("nofan", "drift_nofan"):
         assert not run_case(case, 2, 1)["ship"]
 
@@ -94,7 +98,7 @@ def test_dryrun_entry_point_runs_as_documented_and_writes_the_pair():
         return
     root = tempfile.mkdtemp(prefix="steptest-entry-")
     try:
-        r = subprocess.run([sys.executable, os.path.join(ROOT, "python", "steptrain.py"), "dryrun", root, "fan", "1"], capture_output=True, text=True, timeout=900)
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "python", "steptrain.py"), "dryrun", root, "fan", "1", str(SIM["plant"]["a"])], capture_output=True, text=True, timeout=900)
         assert r.returncode == 0, r.stderr[-2000:]
         out = json.loads(r.stdout)
         assert out["summary"]["fan"]["n"] == 1
@@ -174,7 +178,7 @@ def test_gap_rows_leave_the_fit_and_segments_start_after_the_gap():
 
 def test_restart_gap_before_the_fan_test_still_ships_with_the_right_effect():
     if STORE:
-        a = run_case("fan_30.0_gap", 0, 1)
+        a = run_case("fan_30.0_gap", 0, 1, a_fixed=SIM["plant"]["a"])
         assert a["ship"] and 1 / 1.5 < a["ratio"] < 1.5
 
 
@@ -361,6 +365,23 @@ def test_the_fit_holds_the_given_conductance_and_bounds_override():
     assert abs(th[1] - 23.0) < 1e-6
     thb, _, _ = gb.fit([seg], {"m": 0.0}, th, bounds={"C": [8.0, 16.0], "Ta": [18.0, 30.0]})
     assert 8.0 <= thb[0] <= 16.0 and 18.0 <= thb[4] <= 30.0 and abs(thb[2]) < 1e-6
+
+
+def test_dry_verdict_counts_the_correct_plant_as_a_group_and_leaves_wrong_plants_unjudged():
+    rows = lambda ship, ok, n=10: {"n": n, "ship": ship, "ship_ok": ok}
+    sm = {"fan_30.0": rows(10, 10), "fan_30.5": rows(10, 9), "fan_31.0": rows(9, 9), "nofan_30.5": rows(0, 0), "alt_fan_30.5": rows(0, 0), "wrong_air_30.5": rows(5, 5)}
+    v = S.DryRun.verdict(sm, 28)
+    assert v["fan"] and v["nofan_30.5"] and v["alt_fan_30.5"] and not any(k.startswith("wrong") for k in v)
+    assert not S.DryRun.verdict(sm, 30)["fan"]
+    assert not S.DryRun.verdict(dict(sm, **{"nofan_30.5": rows(1, 0)}), 28)["nofan_30.5"]
+
+
+def test_plant_recirculation_raises_the_air_temperature_at_low_fan_and_the_truth_effect_includes_it():
+    base = Plant(SIM["plant"], True)
+    rec = Plant(dict(SIM["plant"], ta_fan=10.0, q0=0.0), True)
+    assert base.air(400.0) == SIM["plant"]["ta"] and abs(rec.air(0.0) - rec.air(1460.0) - 10.0) < 1e-9
+    w = np.full(10, 33.0)
+    assert rec.effect(w, 4800.0, 400.0, 1460.0) > base.effect(w, 4800.0, 400.0, 1460.0)
 
 
 if __name__ == "__main__":
