@@ -113,6 +113,56 @@ class Forest:
 
 
 
+class LinearDeployed:
+    def __init__(self, model):
+        self.m = model
+        self.features = model["features"]
+        self.identified = model.get("identified", {"fan": False, "pump": False})
+        self.targets = model["targets"]
+        self.free = np.array([n in model.get("free", []) for n in self.features])
+
+    @staticmethod
+    def dot(t, V, clip, free):
+        z = np.where(np.isfinite(V), (V - np.array(t["lin"]["mean"])) / np.array(t["lin"]["std"]), 0.0)
+        return t["base"] + np.where(free, z, np.clip(z, -clip, clip)) @ np.array(t["lin"]["w"])
+
+    def term(self, X, tg):
+        r = self.m.get("response")
+        series, h = tg.split("_")
+        if not r or series not in r["gain"]:
+            return 0.0
+        f = self.features
+        u = np.clip((X[:, f.index(r["pump_feat"])] - r["pump"][0]) / (r["pump"][1] - r["pump"][0]), 0.0, 1.0)
+        dead = r["dead"][0] + (r["dead"][1] - r["dead"][0]) * u
+        return r["gain"][series] * r["k"] * np.maximum(float(h) - dead, 0.0) * X[:, f.index(r["feat"])]
+
+    def predict(self, X, targets=None):
+        X = np.asarray(X, dtype=np.float64)
+        m, clip = self.m, self.m["clip"]
+        need = np.zeros(len(self.features), bool)
+        for t in m["targets"].values():
+            need |= np.array(t["lin"]["w"]) != 0.0
+        primary = np.isfinite(X[:, need]).all(axis=1)
+        fb = m.get("fallback")
+        if fb:
+            idx = [self.features.index(n) if n in self.features else -1 for n in fb["features"]]
+            V = np.where(np.array(idx) >= 0, X[:, idx], np.nan)
+        out = {}
+        for tg in m["targets"]:
+            if targets is not None and tg not in targets:
+                continue
+            p = self.dot(m["targets"][tg], X, clip, self.free)
+            if fb and not primary.all():
+                p = np.where(primary, p, self.dot(fb["targets"][tg], V, clip, self.free[idx]))
+            out[tg] = p - self.term(X, tg)
+        return out
+
+
+def load_deployed(path):
+    m = json.load(open(path))
+    return LinearDeployed(m) if m.get("kind") == "linear" else Forest(m)
+
+
 class GreyBox:
     NAMES = ["C", "A", "m", "gamma", "Ta", "tau", "f1", "K", "tau_hi", "drift", "q0"]
     LO = [3.0, 1.0, 0.0, -1.0, 10.0, 5.0, 0.3, 5.0, 3.0, -8.0, 0.0]
@@ -540,7 +590,8 @@ class Corpus:
         self.full = ps.build()
         self.backbone = [n for n in dict.fromkeys(ps.names()) if not n.startswith(self.FANPUMP)]
         self.free = [n for n in self.backbone if n == "ph.pl" or n.endswith("*pl")]
-        self.dep = Forest(json.load(open(cfg["deployed"])))
+        self.dep = load_deployed(cfg["deployed"])
+        self.dspec = Spec.load(cfg["deployed_spec"])
 
     def build(self, resp):
         cfg, st = self.cfg, self.st
@@ -551,6 +602,9 @@ class Corpus:
         T, stride = st.T, cfg["stride"]
         self.rows = np.arange(0, T, stride)
         self.F = F[self.rows]
+        dn, DF, _ = FeatureFrame().compute(self.dspec.subset(set(self.dep.features)), st.X, st.ix, st.k0)
+        dc = {n: i for i, n in enumerate(dn)}
+        self.D = DF[self.rows][:, [dc[n] for n in self.dep.features]]
         self.Y = {}
         for k, ch in cfg["series"].items():
             s = Ops.ffill(st.col(ch), FCFG["ffill_s"], False)
@@ -764,7 +818,7 @@ class Evaluator:
                     preds[fam] = bb.predict(g, pr, fr, rows, tg)
                 base = ["persist"]
                 if tg in co.dep.targets:
-                    preds["deployed"] = co.dep.predict(co.F[rows][:, fj], [tg])[tg]
+                    preds["deployed"] = co.dep.predict(co.D[rows], [tg])[tg]
                     base.append("deployed")
                 if name == "final" and tg in trees:
                     import xgboost as xgb
