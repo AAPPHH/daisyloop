@@ -12,7 +12,7 @@ fn num(v: &Value) -> f64 {
 
 #[test]
 fn matches_python_golden() {
-    check("golden.json", "feature_spec_deploy.json", "model_deploy.json", 1e-4);
+    check("golden_deploy.json", "feature_spec_deploy.json", "model_deploy.json", 1e-9);
 }
 
 #[test]

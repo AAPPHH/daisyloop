@@ -12,6 +12,6 @@ fn trainer_output_dir_loads_and_the_old_spec_does_not() {
     let (spec, model) = (read(&format!("{dir}/feature_spec_deploy.json")), read(&format!("{dir}/model_deploy.json")));
     let p = Predictor::load(&spec, &model).unwrap();
     assert!(p.model.is_linear() && p.model.target_names().contains(&"water_120"));
-    let old = read(&format!("{}/../../models/feature_spec_deploy.json", env!("CARGO_MANIFEST_DIR")));
+    let old = read(&format!("{}/../../models/feature_spec_linear.json", env!("CARGO_MANIFEST_DIR")));
     assert!(Predictor::load(&old, &model).is_err());
 }
