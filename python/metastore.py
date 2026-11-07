@@ -342,8 +342,20 @@ class HistoryStore:
         first_build = self.watermark is None
         all_p, all_g = [], []
         step = cfg["chunk_s"]
-        for a in range(start, end + 1, step):
-            b = min(a + step, end + 1)
+        total = [0, 0]
+
+        def flush():
+            if all_p:
+                pts = tuple(np.concatenate([p[j] for p in all_p]) for j in range(3))
+                gaps = tuple(np.concatenate([g[j] for g in all_g]) for j in range(3))
+                self.append(pts, gaps)
+                total[0] += len(pts[0])
+                total[1] += len(gaps[0])
+                all_p.clear()
+                all_g.clear()
+        a = start
+        while a <= end:
+            b = min((a // step + 1) * step, end + 1)
             rows, meta = reader.read(a - cfg["context_s"], b)
             keep = rows["k"] >= a
             rows = {k: v[keep] for k, v in rows.items()}
@@ -356,11 +368,12 @@ class HistoryStore:
             p, g = self.door.run(self.matrix(rows, a, b), a, self.tol())
             all_p.append(p)
             all_g.append(g)
-        pts = tuple(np.concatenate([p[j] for p in all_p]) for j in range(3))
-        gaps = tuple(np.concatenate([g[j] for g in all_g]) for j in range(3))
-        self.append(pts, gaps)
+            if b % cfg["day_s"] == 0:
+                flush()
+            a = b
+        flush()
         self.watermark = end
-        info.update(new_s=end - start + 1, points=len(pts[0]), gaps=len(gaps[0]))
+        info.update(new_s=end - start + 1, points=total[0], gaps=total[1])
         return self.finish(info)
 
     def finish(self, info):
