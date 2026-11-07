@@ -933,7 +933,7 @@ mod tests {
 
     #[test]
     fn restart_copy_survives_the_commit_and_keeps_the_newest_files_only() {
-        let d = dir("hot-tail");
+        let d = dir("hot-tail-copy");
         let mut hot = HotStore::open(&d, Duration::from_secs(1)).unwrap();
         let base = crate::now_micros() / 1_000_000 - 100;
         for round in 0..(TAIL_KEEP as i64 + 2) {
