@@ -16,4 +16,4 @@ The software is provided without warranty (see `LICENSE`). The models were fitte
 
 ## Reporting issues
 
-Report security or safety problems by opening an issue in the project's repository. Do not include serial numbers or personal data. For problems that could damage hardware, describe the configuration and the log lines, and say clearly that it is safety-relevant.
+Report security or safety problems by opening an issue at https://github.com/AAPPHH/daisyloop/issues (for anything that could make the software unsafe, use GitHub private vulnerability reporting under the Security tab). Do not include serial numbers or personal data. For problems that could damage hardware, describe the configuration and the log lines, and say clearly that it is safety-relevant.
