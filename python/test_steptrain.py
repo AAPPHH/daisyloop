@@ -52,10 +52,10 @@ def test_grey_box_recovers_the_fan_exponent_and_rejects_none():
 
 
 def test_response_term_matches_between_trainer_and_exporter():
-    r = S.Response({"feat": "step.fx", "pump_feat": "pump_rpm", "k": 0.003, "m": 1.6, "gamma": 0.03, "ta": 25.0, "pump": [2570.0, 4800.0], "dead": [31.0, 11.0], "gain": {"water": 1.0, "cpu": 0.5, "gpu": 0.5}})
+    r = S.Response({"feat": "step.fx", "pump_feat": "pump_rpm", "k": 0.003, "m": 1.6, "gamma": 0.03, "ta": 25.0, "pump": [2570.0, 4800.0], "dead": [31.0, 11.0], "gain": {"water": 1.0}})
     model = {"features": ["pump_rpm", "step.fx"], "response": r.block()}
     for prpm in (1800.0, 2570.0, 3400.0, 4800.0):
-        for tg in ("water_30", "water_120", "cpu_60"):
+        for tg in ("water_30", "water_120", "water_60"):
             a = float(r.term(np.array([prpm]), np.array([3.0]), tg)[0])
             b = LinearExporter.term(model, [prpm, 3.0], tg)
             assert abs(a - b) < 1e-12, (prpm, tg, a, b)
@@ -106,6 +106,8 @@ def test_dryrun_entry_point_runs_as_documented_and_writes_the_pair():
         assert out["summary"]["fan"]["ship"] == 1
         assert {*NAMES, "report.json"} <= set(os.listdir(d))
         assert not (set(os.listdir(d)) & {"golden_deploy.json", "candidate_golden_deploy.json"})
+        mj = json.load(open(os.path.join(d, "model_deploy.json")))
+        assert all(t.startswith("water_") for t in mj["targets"]) and all(t.startswith("water_") for t in mj["fallback"]["targets"]) and list(mj["response"]["gain"]) == ["water"]
         assert copy_steps(d, os.path.join(root, "models"), os.path.join(root, "install"))
         cargo = subprocess.run(["cargo", "test", "--manifest-path", os.path.join(ROOT, "tools", "model_infer", "Cargo.toml"), "--test", "load_dir", "--", "--ignored"], env=dict(os.environ, STEPTRAIN_OUT=os.path.join(root, "install")), capture_output=True, text=True, timeout=900)
         assert cargo.returncode == 0 and "1 passed" in cargo.stdout, cargo.stdout[-2000:] + cargo.stderr[-2000:]

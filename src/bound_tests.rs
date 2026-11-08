@@ -14,7 +14,7 @@ impl Model for Blind {
         5000
     }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
-        Ok(Forecast { water: 0.0, cpu: 0.0, gpu: 0.0 })
+        Ok(Forecast::plain(0.0))
     }
 }
 
@@ -22,7 +22,7 @@ fn blind_rig(tweak: impl Fn(&mut Config)) -> Rig {
     rig_with(Box::new(Blind), tweak)
 }
 
-fn rig_with(model: Box<dyn Model>, tweak: impl Fn(&mut Config)) -> Rig {
+pub(super) fn rig_with(model: Box<dyn Model>, tweak: impl Fn(&mut Config)) -> Rig {
     let cfg = base_cfg(tweak);
     let sim = Sim::new();
     let s = sim.clone();
@@ -180,38 +180,33 @@ fn r7_frozen_water_with_moving_load_and_a_stopped_fan_runs_both_channels_at_full
 }
 
 #[test]
-fn r8_cpu_and_gpu_plan_limits_are_not_shifted_by_the_weight_and_a_sustained_excess_raises_cooling() {
+fn r8_only_the_water_plan_limit_exists_and_cpu_gpu_excess_changes_nothing() {
     let cfg = ControlConfig::default();
-    let (cool, quiet) = (Planner::limits(&cfg, 1.0), Planner::limits(&cfg, 0.0));
-    assert_eq!((cool[1], cool[2], quiet[1], quiet[2]), (105.0, 105.0, 105.0, 105.0));
-    assert_eq!((quiet[0], cool[0]), (46.0, 41.0));
+    assert_eq!((Planner::limit(&cfg, 0.0), Planner::limit(&cfg, 1.0)), (46.0, 41.0));
     let mut rig = Rig::new((false, false), 3.0, |_| {});
-    rig.cpu = 100.0;
     rig.run(120);
-    assert!(rig.status().predicted.unwrap().feasible);
     let quiet_fan = rig.ctl("d5.fan").target_rpm.unwrap();
-    rig.cpu = 112.0;
+    rig.cpu = 150.0;
+    rig.gpu = Some(150.0);
     rig.run(150);
     let p = rig.status().predicted.unwrap();
-    assert!(!p.feasible && p.cpu_limit == 105.0);
-    assert!(rig.ctl("d5.fan").target_rpm.unwrap() > quiet_fan);
+    assert!(p.feasible && rig.ctl("d5.fan").target_rpm.unwrap() == quiet_fan);
+    assert!(rig.status().alarms.is_empty());
 }
 
 #[test]
-fn r9_a_stale_cpu_or_gpu_holds_the_plan_with_the_bound_active_and_only_stale_water_takes_over() {
+fn r9_a_stale_channel_the_model_does_not_weight_changes_nothing_and_only_stale_water_takes_over() {
     let mut rig = running(34.0, |_| {});
     let held = duty(&rig, 0);
     rig.gpu = None;
+    rig.cpu = f64::NAN;
     rig.run(60);
     let c = rig.ctl("d5.fan");
-    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && c.note.unwrap().contains("GPU"));
-    assert!(duty(&rig, 0) == held && rig.alarm(AlarmKind::Stale));
+    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && !rig.alarm(AlarmKind::Stale));
+    assert!(duty(&rig, 0) == held);
     rig.water = 44.0;
     rig.run(8);
     assert_eq!((duty(&rig, 0), rig.sim.mode(Spec::FAN)), (Some(100.0), 0));
-    rig.cpu = f64::NAN;
-    rig.run(20);
-    assert_eq!(rig.sim.mode(Spec::FAN), 0);
     rig.water = f64::NAN;
     rig.run(14);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
@@ -256,11 +251,12 @@ struct PlantSpec {
     exponent: f64,
     c_scale: f64,
     g_full: f64,
+    cold_w: f64,
 }
 
 impl PlantSpec {
-    const MEASURED: PlantSpec = PlantSpec { ambient: 25.0, p0: 0.0, g_stop: 0.5, exponent: 1.61, c_scale: 1.0, g_full: 24.0 };
-    const ALTERNATIVE: PlantSpec = PlantSpec { ambient: 20.0, p0: 119.0, g_stop: 5.0, exponent: 0.865, c_scale: 1.0, g_full: 24.0 };
+    const MEASURED: PlantSpec = PlantSpec { ambient: 25.0, p0: 0.0, g_stop: 0.5, exponent: 1.61, c_scale: 1.0, g_full: 24.0, cold_w: 0.0 };
+    const ALTERNATIVE: PlantSpec = PlantSpec { ambient: 20.0, p0: 119.0, g_stop: 5.0, exponent: 0.865, c_scale: 1.0, g_full: 24.0, cold_w: 0.0 };
     const NAMED: [(&'static str, PlantSpec); 2] = [("measured", Self::MEASURED), ("alternative", Self::ALTERNATIVE)];
 }
 
@@ -291,7 +287,7 @@ impl Plant {
     fn step(&mut self, power: f64, fan_rpm: f64) -> f64 {
         let g = self.spec.g_stop + (self.spec.g_full - self.spec.g_stop) * (fan_rpm / 1470.0).powf(self.spec.exponent);
         let flow = Self::K * (self.t1 - self.t2);
-        self.t1 += (power + self.spec.p0 - g * (self.t1 - self.spec.ambient) - flow) / (Self::C1 * self.spec.c_scale);
+        self.t1 += (power + self.spec.p0 + if fan_rpm < 1000.0 { self.spec.cold_w } else { 0.0 } - g * (self.t1 - self.spec.ambient) - flow) / (Self::C1 * self.spec.c_scale);
         self.t2 += flow / (Self::C2 * self.spec.c_scale);
         self.seen.push_back(self.t1);
         if self.seen.len() > Self::DELAY + 1 {
@@ -742,7 +738,7 @@ fn r21_frozen_water_is_detected_by_heat_within_200_s_or_by_the_plain_rule_after_
     for (name, spec) in PlantSpec::NAMED {
         let heat = frozen_run(spec, 30.0, 300.0, true, 0);
         assert!(heat.detect.is_some_and(|t| t < 200), "{name} {:?}", heat.detect);
-        for (f, label) in [(heat, "heat"), (frozen_run(spec, 33.0, 40.0, true, 0), "plain"), (frozen_run(spec, 37.5, 300.0, false, 0), "plain, cpu dead")] {
+        for (f, label) in [(heat, "heat"), (frozen_run(spec, 33.0, 40.0, true, 0), "plain")] {
             assert!(f.detect.is_some() && f.fan == Some(100.0) && f.pump == Some(100.0) && !f.handed_over && f.alarm, "{name} {label}");
             assert!(label == "heat" || f.detect.is_some_and(|t| (590..700).contains(&t)), "{name} {label} {:?}", f.detect);
         }
@@ -1056,6 +1052,9 @@ fn r26_hold_and_coarse_down_step_table() {
 #[path = "plan_tests.rs"]
 mod plan;
 
+#[path = "online_tests.rs"]
+mod online;
+
 fn scan_env(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -1106,4 +1105,41 @@ fn r42_ambient_scan_swings_and_writes_per_24_h() {
     }
     eprintln!("{table}worst swings {worst_swings} worst writes {worst_writes}");
     assert!(worst_swings <= 2 && worst_writes <= 250);
+}
+
+#[test]
+fn r9c_a_stale_input_outside_the_fallback_block_does_not_hold_the_plan() {
+    let mut rig = running(34.0, |_| {});
+    rig.live = true;
+    rig.c.inputs = vec!["nvml/0/temp".into(), "/intelcpu/0/temperature/0".into()];
+    rig.c.fallback_inputs = vec!["/intelcpu/0/temperature/0".into()];
+    rig.run(20);
+    rig.gpu = None;
+    rig.run(60);
+    let st = rig.status();
+    assert!(st.alarms.iter().any(|a| a.kind == AlarmKind::Stale && a.channel == "nvml/0/temp"));
+    assert!(st.predicted.is_some_and(|p| p.water.is_some()) && st.controls[0].note.as_deref().is_none_or(|n| !n.contains("veraltet")));
+    assert!(rig.ctl("d5.fan").fallback.is_none());
+}
+
+#[test]
+fn r9b_a_stale_model_input_raises_an_alarm_and_holds_the_plan_without_a_fallback() {
+    let mut rig = running(34.0, |_| {});
+    rig.live = true;
+    rig.c.inputs = vec!["nvml/0/temp".into(), "/intelcpu/0/temperature/0".into()];
+    rig.c.fallback_inputs = rig.c.inputs.clone();
+    rig.run(20);
+    assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some_and(|p| p.water.is_some()));
+    rig.gpu = None;
+    rig.run(12);
+    let (held, sets) = (duty(&rig, 0), rig.sim.sets());
+    rig.heat.set(40.0);
+    rig.run(60);
+    let st = rig.status();
+    assert!(st.alarms.iter().any(|a| a.kind == AlarmKind::Stale && a.channel == "nvml/0/temp"));
+    assert!(st.predicted.is_none() && st.controls[0].note.as_deref().is_some_and(|n| n.contains("nvml/0/temp")));
+    assert!(duty(&rig, 0) == held && rig.sim.sets() == sets && rig.ctl("d5.fan").fallback.is_none() && rig.sim.mode(Spec::FAN) == 0, "{:?} {:?} {} {} {:?}", duty(&rig, 0), held, rig.sim.sets(), sets, rig.ctl("d5.fan").fallback);
+    rig.gpu = Some(40.0);
+    rig.run(40);
+    assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some());
 }

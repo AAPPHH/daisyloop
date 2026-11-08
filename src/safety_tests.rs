@@ -13,7 +13,7 @@ impl Model for Lin {
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, _: u32) -> Result<Forecast, String> {
         let g = |k: &str| hold.get(k).copied().unwrap_or(0.0);
-        Ok(Forecast { water: self.0(g("d5next/fan/rpm"), g("d5next/pump/rpm"), rollout), cpu: 0.0, gpu: 0.0 })
+        Ok(Forecast::plain(self.0(g("d5next/fan/rpm"), g("d5next/pump/rpm"), rollout)))
     }
 }
 
@@ -32,7 +32,7 @@ impl Model for Warming {
         self.n
     }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
-        Ok(Forecast { water: 0.0, cpu: 0.0, gpu: 0.0 })
+        Ok(Forecast::plain(0.0))
     }
 }
 
@@ -314,13 +314,13 @@ fn plan_changes_need_a_margin_and_missing_inputs_are_not_feasible() {
     let (fcal, pcal) = (fc.calibration(), pc.calibration());
     let (fan, pump) = axes(&fc, &pc, &fcal, &pcal);
     let m = Lin(knife);
-    let now = Temps { water: Some(30.0), cpu: Some(50.0), gpu: Some(40.0) };
+    let now = Temps { water: Some(30.0) };
     let planner = Planner { cfg: &cfg };
     let fresh = planner.plan(&m, &fan, &pump, &now, 0.0, None).unwrap();
     assert!((fresh.fan_rpm - fan.cal.rpm(fc.start_duty)).abs() < 1e-9 && fresh.feasible);
     let kept = planner.plan(&m, &fan, &pump, &now, 0.0, Some((fan.rpm_range().1, 4400.0))).unwrap();
     assert!(kept.fan_rpm > fan.rpm_range().0 + 100.0, "{}", kept.fan_rpm);
-    let blind = planner.plan(&m, &fan, &pump, &Temps { cpu: None, ..now }, 0.0, None).unwrap();
+    let blind = planner.plan(&m, &fan, &pump, &Temps { water: None }, 0.0, None).unwrap();
     assert!(!blind.feasible);
 }
 
@@ -339,12 +339,11 @@ fn grid_top_is_always_the_maximum_rpm() {
 }
 
 #[test]
-fn the_cpu_input_is_a_sustained_value_and_the_shown_limit_is_the_one_used() {
+fn the_shown_limit_is_the_weighted_water_plan_limit() {
     let mut rig = Rig::new((false, false), 3.0, |_| {});
     rig.run(60);
     rig.cpu = 100.0;
     rig.tick();
-    assert!(rig.c.temps(rig.now).cpu == Some(100.0) && rig.c.plan_temps(rig.now).cpu.unwrap() < 55.0);
     rig.cpu = 50.0;
     rig.run(35);
     let p = rig.status().predicted.unwrap();
@@ -417,5 +416,46 @@ fn one_missing_sample_at_the_decision_tick_is_forward_filled_through_the_plan() 
     c.observe(&filled, g.k0 + n as i64 - 1);
     let hold: HashMap<String, f64> = HashMap::new();
     let (fb, fc) = (b.forecast(&hold, 120, 120).unwrap(), c.forecast(&hold, 120, 120).unwrap());
-    assert!((fb.cpu - fc.cpu).abs() < 1e-9 && (fb.water - fc.water).abs() < 1e-9 && (fb.gpu - fc.gpu).abs() < 1e-9, "{fb:?} {fc:?}");
+    assert!((fb.water - fc.water).abs() < 1e-9, "{fb:?} {fc:?}");
+}
+
+struct Flat(f64);
+
+impl Model for Flat {
+    fn observe(&mut self, _: &HashMap<String, f64>, _: i64) {}
+    fn identified(&self) -> (bool, bool) {
+        (true, true)
+    }
+    fn warm_secs(&self) -> i64 {
+        5000
+    }
+    fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
+        Ok(Forecast::plain(self.0))
+    }
+}
+
+#[test]
+fn d_the_pump_decision_depends_only_on_the_water_forecast_and_sits_at_its_floor_when_that_is_flat_below_the_plan() {
+    let cfg = ControlConfig::default();
+    let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
+    let (fcal, pcal) = (fc.calibration(), pc.calibration());
+    let (fan, pump) = axes(&fc, &pc, &fcal, &pcal);
+    let pump = Axis { free: true, ..pump };
+    for water in [20.0, 30.0, 33.0] {
+        let plan = Planner { cfg: &cfg }.plan(&Flat(0.5), &fan, &pump, &Temps { water: Some(water) }, 0.5, Some((fan.rpm_range().1, pump.rpm_range().1))).unwrap();
+        assert!(plan.feasible && (plan.pump_rpm - pump.rpm_range().0).abs() < 1e-9 && (pump.rpm_range().0 - pcal.rpm(15.0)).abs() < 1e-9, "{water} {plan:?}");
+    }
+    let mut rig = super::bound::rig_with(Box::new(Flat(0.5)), |_| {});
+    rig.live = true;
+    rig.water = 30.0;
+    rig.run(5);
+    rig.active("d5.pump");
+    for (cpu, gpu, w) in [(40.0, 40.0, 500.0), (99.0, 99.0, 900.0), (20.0, 5.0, 0.0)] {
+        rig.cpu = cpu;
+        rig.gpu = Some(gpu);
+        rig.extra = vec![("/intelcpu/0/power/0", w), ("nvml/0/power", w), ("nvml/0/temp", gpu)];
+        rig.run(300);
+        assert!((rig.ctl("d5.pump").commanded_duty.unwrap() - 15.0).abs() < 1e-6, "{cpu} {gpu} {:?} {:?}", rig.ctl("d5.pump"), rig.status().alarms);
+        assert!((rig.ctl("d5.pump").target_rpm.unwrap() - pcal.rpm(15.0)).abs() < 1.0);
+    }
 }

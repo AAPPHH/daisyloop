@@ -109,7 +109,7 @@ impl Model for Fake {
             return Err("boom".into());
         }
         let (f, p) = (hold.get("d5next/fan/rpm").copied().unwrap_or(1470.0), hold.get("d5next/pump/rpm").copied().unwrap_or(4800.0));
-        Ok(crate::model::Forecast { water: self.heat.get() - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0, cpu: 0.0, gpu: 0.0 })
+        Ok(crate::model::Forecast::plain(self.heat.get() - 4.0 * f / 1470.0 - (p - 2000.0) / 2800.0))
     }
 }
 
@@ -352,7 +352,11 @@ fn active_is_refused_with_a_reason() {
     assert!(ok.c.set_mode("d5.nope", Mode::Active, true, ok.now).is_err());
     ok.gpu = None;
     ok.run(12);
-    assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).unwrap_err().contains("GPU"));
+    assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).is_ok());
+    ok.c.set_mode("d5.fan", Mode::Shadow, true, ok.now).unwrap();
+    ok.water = f64::NAN;
+    ok.run(12);
+    assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).unwrap_err().contains("Wasser"));
     assert_eq!(ok.sim.sets(), 0);
     let mut cold = Rig::new((true, true), 6.0, |_| {});
     cold.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(60)), heat: Rc::new(Cell::new(6.0)), fail: Rc::new(Cell::new(false)) }));
@@ -473,7 +477,7 @@ fn water_at_the_limit_releases_every_active_channel() {
 }
 
 #[test]
-fn cpu_and_gpu_spikes_and_heat_never_release_the_fan_and_only_the_smoothed_value_alarms() {
+fn cpu_and_gpu_spikes_and_heat_never_release_the_fan_and_never_alarm() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(5);
     rig.active("d5.fan");
@@ -485,13 +489,12 @@ fn cpu_and_gpu_spikes_and_heat_never_release_the_fan_and_only_the_smoothed_value
     rig.cpu = 60.0;
     rig.gpu = Some(60.0);
     rig.run(30);
-    assert!(!rig.alarm(AlarmKind::CpuHigh) && !rig.alarm(AlarmKind::GpuHigh));
+    assert!(rig.status().alarms.is_empty());
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    assert!(rig.c.plan_temps(rig.now).cpu.unwrap() < 61.0);
     rig.cpu = 110.0;
     rig.gpu = Some(110.0);
     rig.run(300);
-    assert!(rig.alarm(AlarmKind::CpuHigh) && rig.alarm(AlarmKind::GpuHigh));
+    assert!(rig.status().alarms.is_empty());
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
     assert!(rig.ctl("d5.fan").fallback.is_none() && !rig.alarm(AlarmKind::Fallback) && !rig.alarm(AlarmKind::WaterHigh));
     assert!(rig.sim.sets() >= sets);
@@ -698,8 +701,11 @@ fn alarms_cover_pump_fan_and_stale_sources() {
     assert!(rig.status().alarms.is_empty());
     rig.gpu = None;
     rig.run(12);
+    assert!(rig.status().alarms.is_empty());
+    rig.water = f64::NAN;
+    rig.run(12);
     let a = rig.status().alarms;
-    assert!(a.len() == 1 && a[0].kind == AlarmKind::Stale && a[0].channel == "nvml/0/temp");
+    assert!(a.iter().any(|x| x.kind == AlarmKind::Stale && x.channel == "d5next/water/temp"));
 }
 
 #[path = "safety_tests.rs"]

@@ -1,6 +1,7 @@
 use crate::d5::{Actuator, Ownership, Setting, Spec};
+use crate::correct::{Corrected, Corrector, CorrectionConfig};
 use crate::model::{Axis, Model, Operating, Plan, Planner, Temps};
-use crate::protocol::{Alarm, AlarmKind, Control as PControl, ControlKind, Drive, Limit, Mode, ModelInfo, Predicted, StepStatus};
+use crate::protocol::{Alarm, AlarmKind, Control as PControl, ControlKind, Drive, Limit, Mode, ModelInfo, Predicted, StepStatus, Correction};
 use crate::{Config, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -182,10 +183,9 @@ pub struct ControlConfig {
     pub weight_span_k: f64,
     pub pump_noise: f64,
     pub plan_hysteresis_k: f64,
-    pub cpu_smooth_secs: f64,
+    pub refine_steps: usize,
+    pub refine_min_rpm: f64,
     pub water_plan_limit: f64,
-    pub cpu_plan_limit: f64,
-    pub gpu_plan_limit: f64,
     pub water_limit: f64,
     pub water_top_limit: f64,
     pub stale_secs: f64,
@@ -202,10 +202,9 @@ pub struct ControlConfig {
     pub follow_settle_secs: f64,
     pub follow_secs: f64,
     pub water_channel: String,
-    pub cpu_channel: String,
-    pub gpu_channel: String,
     pub model_spec: String,
     pub model_file: String,
+    pub correction: CorrectionConfig,
     pub history_secs: u64,
     pub seed_secs: i64,
     pub seed_max_gap_secs: i64,
@@ -228,10 +227,9 @@ impl Default for ControlConfig {
             weight_span_k: 5.0,
             pump_noise: 0.5,
             plan_hysteresis_k: 0.3,
-            cpu_smooth_secs: 30.0,
+            refine_steps: 6,
+            refine_min_rpm: 50.0,
             water_plan_limit: 46.0,
-            cpu_plan_limit: 105.0,
-            gpu_plan_limit: 105.0,
             water_limit: 48.0,
             water_top_limit: 50.0,
             stale_secs: 10.0,
@@ -248,10 +246,9 @@ impl Default for ControlConfig {
             follow_settle_secs: 15.0,
             follow_secs: 60.0,
             water_channel: "d5next/water/temp".into(),
-            cpu_channel: "/intelcpu/0/temperature/0".into(),
-            gpu_channel: "nvml/0/temp".into(),
             model_spec: "feature_spec_deploy.json".into(),
             model_file: "model_deploy.json".into(),
+            correction: CorrectionConfig::default(),
             history_secs: 6 * 3600,
             seed_secs: 7200,
             seed_max_gap_secs: 300,
@@ -266,7 +263,7 @@ impl ControlConfig {
         water.is_some_and(|w| w < if stopped { self.fan_start_water } else { self.fan_stop_water })
     }
     pub fn validate(&self) -> Result<(), String> {
-        let nums = [self.plan_secs, self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.cpu_smooth_secs, self.water_plan_limit, self.cpu_plan_limit, self.gpu_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.bound_drop_k, self.bound_hold_secs, self.bound_raise_step, self.follow_settle_secs, self.follow_secs];
+        let nums = [self.plan_secs, self.decision_secs, self.weight, self.weight_span_k, self.pump_noise, self.plan_hysteresis_k, self.water_plan_limit, self.water_limit, self.water_top_limit, self.stale_secs, self.pump_low_secs, self.fan_stop_secs, self.fan_stop_water, self.fan_start_water, self.bound_drop_k, self.bound_hold_secs, self.bound_raise_step, self.follow_settle_secs, self.follow_secs];
         if nums.iter().any(|v| !v.is_finite() || *v < 0.0) || self.plan_secs < 1.0 || self.plan_secs > self.decision_secs || self.decision_secs < 5.0 || self.stale_secs < 2.0 {
             return Err("timing or limit value out of range".into());
         }
@@ -287,9 +284,7 @@ impl ControlConfig {
         if self.bound_raise_cap == 0 {
             return Err("bound_raise_cap must be at least 1".into());
         }
-        if self.cpu_plan_limit <= 0.0 || self.gpu_plan_limit <= 0.0 {
-            return Err("cpu_plan_limit and gpu_plan_limit must be positive".into());
-        }
+        self.correction.validate()?;
         for (kind, o, steps) in [(ControlKind::Fan, &self.fan, &self.step_test.fan), (ControlKind::Pump, &self.pump, &self.step_test.pump)] {
             let c = ChannelConfig::resolve(kind, o)?;
             if steps.iter().any(|s| !s[0].is_finite() || !s[1].is_finite() || s[0] < c.floor_duty || s[0] > c.max_duty || s[1] < self.decision_secs) {
@@ -373,22 +368,6 @@ impl Chan {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct Smooth(Option<(i64, f64)>);
-
-impl Smooth {
-    fn push(&mut self, now: i64, v: f64, tau_ms: f64, stale_ms: i64) {
-        let next = match self.0.filter(|(t, _)| now - t <= stale_ms) {
-            Some((t, a)) => a + (v - a) * (1.0 - (-((now - t) as f64) / tau_ms).exp()),
-            None => v,
-        };
-        self.0 = Some((now, next));
-    }
-    fn get(&self, now: i64, stale_ms: i64) -> Option<f64> {
-        self.0.filter(|(t, _)| now - t <= stale_ms).map(|a| a.1)
-    }
-}
-
 struct Frozen {
     since: i64,
     water: f64,
@@ -448,9 +427,12 @@ pub struct Control {
     foreign: Vec<ControlKind>,
     model: Option<Box<dyn Model>>,
     model_error: Option<String>,
+    corr: Corrector,
+    inputs: Vec<String>,
+    fallback_inputs: Vec<String>,
+    fed_water: bool,
+    shown_raw: Option<f64>,
     last: HashMap<String, (i64, f64)>,
-    cpu_avg: Smooth,
-    gpu_avg: Smooth,
     frozen: Option<Frozen>,
     frozen_slow_ms: i64,
     heat: VecDeque<(i64, f64)>,
@@ -459,7 +441,7 @@ pub struct Control {
     weight: f64,
     plan: Option<(Plan, i64)>,
     plan_prev: Option<(f64, f64)>,
-    shown: Option<[Option<f64>; 3]>,
+    shown: Option<f64>,
     last_decision: Option<i64>,
     last_write: i64,
     last_release: i64,
@@ -509,9 +491,12 @@ impl Control {
             Err(e) => (None, Some(e)),
         };
         let chans = vec![Chan::new(ControlKind::Fan, &cc.fan), Chan::new(ControlKind::Pump, &cc.pump)];
+        let corr = Corrector::new(&cc.correction, &cfg.data_dir, model.as_ref().map_or(0, |m| m.digest()));
+        let inputs = model.as_ref().map_or_else(Vec::new, |m| m.inputs());
+        let fallback_inputs = model.as_ref().map_or_else(Vec::new, |m| m.fallback_inputs());
         let store = Ownership::new(cfg.state_dir());
         let owned = store.read();
-        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, last: HashMap::new(), cpu_avg: Smooth::default(), gpu_avg: Smooth::default(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, frozen_slow_ms: Self::FROZEN_SLOW_MS, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
+        Control { weight: cc.weight, cfg: cc, writes: cfg.writes_enabled, chans, act, store, owned, booted: false, boot_next: 0, foreign: vec![], model, model_error, corr, inputs, fallback_inputs, fed_water: false, shown_raw: None, last: HashMap::new(), start: 0, started: false, plan: None, plan_prev: None, shown: None, last_decision: None, last_write: i64::MIN / 2, last_release: i64::MIN / 2, release_gap: Self::RELEASE_GAP_MS, test: None, since: BTreeMap::new(), frozen: None, frozen_slow_ms: Self::FROZEN_SLOW_MS, heat: VecDeque::new(), pump_low: None, fan_stop: None, alarms: vec![], wall_off: 0, restarted: false }
     }
 
     pub fn seed(&mut self, history: &[(i64, HashMap<String, f64>)], now_epoch: i64) -> usize {
@@ -537,17 +522,17 @@ impl Control {
         now - self.last.get(ch).map_or(self.start, |x| x.0)
     }
     fn temps(&self, now: i64) -> Temps {
-        Temps { water: self.fresh(&self.cfg.water_channel, now), cpu: self.fresh(&self.cfg.cpu_channel, now), gpu: self.fresh(&self.cfg.gpu_channel, now) }
-    }
-    fn plan_temps(&self, now: i64) -> Temps {
-        let t = self.temps(now);
-        let ms = self.stale_ms();
-        Temps { cpu: t.cpu.map(|c| self.cpu_avg.get(now, ms).unwrap_or(c)), gpu: t.gpu.map(|g| self.gpu_avg.get(now, ms).unwrap_or(g)), ..t }
+        Temps { water: self.fresh(&self.cfg.water_channel, now) }
     }
     fn watched(&self) -> Vec<String> {
-        let mut w = vec![self.cfg.water_channel.clone(), self.cfg.cpu_channel.clone(), self.cfg.gpu_channel.clone()];
+        let mut w = vec![self.cfg.water_channel.clone()];
         for c in &self.chans {
             w.extend([c.rpm_channel(), c.duty_channel()]);
+        }
+        for i in &self.inputs {
+            if !w.contains(i) {
+                w.push(i.clone());
+            }
         }
         w
     }
@@ -574,8 +559,7 @@ impl Control {
     }
 
     fn sensor_fault(&self, now: i64) -> Option<(String, bool)> {
-        let t = self.temps(now);
-        self.water_fault(now).or_else(|| self.frozen_fault(now)).or_else(|| [(t.cpu, "CPU-Temperatur"), (t.gpu, "GPU-Temperatur")].iter().find(|x| x.0.is_none()).map(|x| (format!("{} veraltet (> {:.0} s)", x.1, self.cfg.stale_secs), false)))
+        self.water_fault(now).or_else(|| self.frozen_fault(now))
     }
 
     fn water_fault(&self, now: i64) -> Option<(String, bool)> {
@@ -702,13 +686,6 @@ impl Control {
                 self.last.insert(w, (now, *v));
             }
         }
-        let (tau, ms) = ((self.cfg.cpu_smooth_secs * 1000.0).max(1.0), self.stale_ms());
-        if let Some(v) = map.get(&self.cfg.cpu_channel) {
-            self.cpu_avg.push(now, *v, tau, ms);
-        }
-        if let Some(v) = map.get(&self.cfg.gpu_channel) {
-            self.gpu_avg.push(now, *v, tau, ms);
-        }
         let mut extra = vec![self.cfg.cpu_power_channel.clone(), self.cfg.gpu_power_channel.clone()];
         for c in &self.chans {
             extra.extend(["power", "current"].iter().map(|s| format!("d5next/{}/{s}", c.spec.name)));
@@ -719,9 +696,30 @@ impl Control {
             }
         }
         self.track_frozen(&map, now);
+        self.fed_water = map.contains_key(&self.cfg.water_channel);
         if let Some(m) = self.model.as_mut() {
             m.observe(&map, epoch);
         }
+    }
+
+    fn stale_input(&self, now: i64) -> Option<&String> {
+        self.inputs.iter().find(|c| self.fresh(c, now).is_none())
+    }
+
+    fn stale_fallback_input(&self, now: i64) -> Option<&String> {
+        self.fallback_inputs.iter().find(|c| self.fresh(c, now).is_none())
+    }
+
+    fn correct(&mut self, now: i64, epoch: i64) {
+        if !self.corr.enabled() {
+            return;
+        }
+        let live = self.model.as_ref().map_or_else(Vec::new, |m| m.live());
+        let ok = self.fed_water && self.stale_input(now).is_none() && self.frozen_hit(now).is_none() && self.test.is_none() && now - self.start >= self.corr.hold_secs() * 1000 && self.operating(&self.chans[0], now).is_some() && self.operating(&self.chans[1], now).is_some();
+        let water = self.temps(now).water.filter(|_| self.fed_water);
+        let rpm = |i: usize| self.fresh(&self.chans[i].rpm_channel(), now).unwrap_or(f64::NAN);
+        self.corr.feed(epoch, ok, water, [rpm(0), rpm(1), self.heat_watts(now)], &live);
+        self.corr.save(epoch, false);
     }
 
     fn raise(&mut self, out: &mut Vec<Alarm>, kind: AlarmKind, channel: &str, message: String, value: Option<f64>, limit: Option<f64>, now: i64) {
@@ -740,12 +738,6 @@ impl Control {
         }
         if let Some(w) = t.water.filter(|w| *w >= cfg.water_top_limit) {
             self.raise(&mut out, AlarmKind::WaterTop, &cfg.water_channel, format!("Wasser {w:.1} °C über der Obergrenze {:.0} °C", cfg.water_top_limit), Some(w), Some(cfg.water_top_limit), now);
-        }
-        let ms = self.stale_ms();
-        for (avg, kind, ch, name, limit) in [(self.cpu_avg.get(now, ms), AlarmKind::CpuHigh, &cfg.cpu_channel, "CPU", cfg.cpu_plan_limit), (self.gpu_avg.get(now, ms), AlarmKind::GpuHigh, &cfg.gpu_channel, "GPU", cfg.gpu_plan_limit)] {
-            if let Some(v) = avg.filter(|v| *v >= limit) {
-                self.raise(&mut out, kind, ch, format!("{name} im Mittel {v:.0} °C über {limit:.0} °C (nur Anzeige)"), Some(v), Some(limit), now);
-            }
         }
         if let Some((w, since, why)) = self.frozen_hit(now) {
             self.raise(&mut out, AlarmKind::WaterFrozen, &cfg.water_channel, format!("Wasserwert {w:.2} °C seit {} s unverändert {why}, Messung unglaubwürdig", (now - since) / 1000), Some(w), None, now);
@@ -798,6 +790,9 @@ impl Control {
         let over: Vec<(String, u32)> = self.chans.iter().filter(|c| c.over).map(|c| (c.rpm_channel(), c.cfg.daily_writes)).collect();
         for (ch, n) in over {
             self.raise(&mut out, AlarmKind::Budget, &ch, format!("Tagesbudget von {n} Schreibvorgängen erreicht, Duty bleibt auf dem letzten Wert"), None, None, now);
+        }
+        for h in self.corr.drifting() {
+            self.raise(&mut out, AlarmKind::ModelDrift, &format!("correction/{h}"), format!("Modell driftet, Neutraining empfohlen ({h} s)"), None, None, now);
         }
         let active: Vec<(String, String)> = out.iter().map(|a| (format!("{:?}", a.kind), a.channel.clone())).collect();
         self.since.retain(|k, _| active.contains(k));
@@ -1015,6 +1010,7 @@ impl Control {
         self.last_decision = Some(now);
         self.plan = None;
         self.shown = None;
+        self.shown_raw = None;
         let outlook = self.outlook(now);
         if !matches!(outlook, Outlook::Failed) {
             let open = forced || now >= gate;
@@ -1031,21 +1027,25 @@ impl Control {
             return Outlook::Held("Messwerte von Lüfter oder Pumpe veraltet".into());
         };
         let t = self.temps(now);
-        if !t.all() {
-            let missing: Vec<&str> = [(t.water, "Wasser"), (t.cpu, "CPU"), (t.gpu, "GPU")].iter().filter(|x| x.0.is_none()).map(|x| x.1).collect();
-            return Outlook::Held(format!("{}-Temperatur fehlt, Plan wird gehalten", missing.join(" und ")));
+        if t.water.is_none() {
+            return Outlook::Held("Wassertemperatur fehlt, Plan wird gehalten".into());
+        }
+        if let Some(ch) = self.stale_fallback_input(now) {
+            return Outlook::Held(format!("Modelleingang {ch} veraltet (> {:.0} s), Plan wird gehalten", self.cfg.stale_secs));
         }
         let any_active = self.chans.iter().any(|c| c.mode == Mode::Active);
         let free = |c: &Chan| if any_active { c.mode == Mode::Active } else { c.mode != Mode::Off };
         let (fan_c, pump_c) = (&self.chans[0], &self.chans[1]);
-        let plan_t = self.plan_temps(now);
+        let plan_t = t;
         let stopped = if fan_c.mode == Mode::Active { fan_c.duty_cmd == Some(0.0) } else { fan_c.shadow_stop };
         let zero_ok = self.cfg.fan_may_stop(plan_t.water, stopped) && !self.dwelling(0, now);
         let fan = Axis { name: "fan", cfg: &fan_c.cfg, cal: &fan_c.cal, free: free(fan_c), base: fb, zero_ok };
         let pump = Axis { name: "pump", cfg: &pump_c.cfg, cal: &pump_c.cal, free: free(pump_c), base: pb, zero_ok: false };
-        let result = Planner { cfg: &self.cfg }.plan(model.as_ref(), &fan, &pump, &plan_t, self.weight, self.plan_prev);
+        let corrected = Corrected { inner: model.as_ref(), corr: &self.corr };
+        let result = Planner { cfg: &self.cfg }.plan(&corrected, &fan, &pump, &plan_t, self.weight, self.plan_prev);
         let fits = [fan.fit(result.as_ref().map_or(fb.rpm, |p| p.fan_rpm)), pump.fit(result.as_ref().map_or(pb.rpm, |p| p.pump_rpm))];
-        let direct = model.forecast(&HashMap::new(), 0, self.cfg.horizon_secs).ok();
+        let raw = model.forecast(&HashMap::new(), 0, self.cfg.horizon_secs).ok();
+        let direct = corrected.forecast(&HashMap::new(), 0, self.cfg.horizon_secs).ok();
         let warm = self.warm_left() == 0;
         let plan = match result {
             Ok(p) => p,
@@ -1062,7 +1062,8 @@ impl Control {
         self.model_error = None;
         self.plan = Some((plan, now));
         self.plan_prev = Some((plan.fan_rpm, plan.pump_rpm));
-        self.shown = direct.map(|d| [t.water.map(|x| x + d.water), t.cpu.map(|x| x + d.cpu), t.gpu.map(|x| x + d.gpu)]);
+        self.shown = direct.and_then(|d| t.water.map(|x| x + d.water));
+        self.shown_raw = raw.and_then(|d| t.water.map(|x| x + d.water));
         Outlook::Ready(Wants { fits, zero_ok, bases: [fb, pb], warm })
     }
 
@@ -1236,6 +1237,7 @@ impl Control {
             c.release_due |= c.driving();
         }
         self.try_release(now, true);
+        self.corr.save(self.wall_off / 1000 + now / 1000, true);
     }
 
     fn autostart(&mut self, now: i64) {
@@ -1262,6 +1264,7 @@ impl Control {
         self.wall_off = epoch * 1000 - now;
         self.boot_check(now);
         self.absorb(rows, now, epoch);
+        self.correct(now, epoch);
         self.refresh_alarms(now);
         self.check_faults(now);
         self.progress_test(now);
@@ -1291,20 +1294,25 @@ impl Control {
         }
         if let Some((p, _)) = &self.plan {
             let ahead = self.cfg.rollout_secs + self.cfg.horizon_secs;
-            for (ch, v) in [("water", p.water), ("cpu", p.cpu), ("gpu", p.gpu)] {
-                if let Some(v) = v {
-                    rows.push(row(format!("plan/{ch}"), format!("plan estimate of {ch} temperature, rpm held {} s then {} s change", self.cfg.rollout_secs, self.cfg.horizon_secs), "degC", v, "aux"));
-                }
+            if let Some(v) = p.water {
+                rows.push(row("plan/water".into(), format!("plan estimate of water temperature, rpm held {} s then {} s change", self.cfg.rollout_secs, self.cfg.horizon_secs), "degC", v, "aux"));
             }
             rows.push(row("plan/feasible".into(), "plan within limits".into(), "", p.feasible as u8 as f64, "aux"));
             rows.push(row("plan/ahead".into(), "plan estimate lookahead".into(), "s", ahead as f64, "aux"));
         }
         if let Some(s) = &self.shown {
-            for (ch, v) in [("water", s[0]), ("cpu", s[1]), ("gpu", s[2])] {
-                if let Some(v) = v {
-                    rows.push(row(format!("forecast/{ch}"), format!("direct forecast of {ch} temperature in {} s", self.cfg.horizon_secs), "degC", v, "aux"));
-                }
-            }
+            rows.push(row("forecast/water".into(), format!("direct forecast of water temperature in {} s", self.cfg.horizon_secs), "degC", *s, "aux"));
+        }
+        if let Some(s) = &self.shown_raw {
+            rows.push(row("forecast/water_raw".into(), format!("direct forecast of water temperature in {} s without the online correction", self.cfg.horizon_secs), "degC", *s, "aux"));
+        }
+        for s in self.corr.shown() {
+            let h = s.h;
+            rows.push(row(format!("correction/{h}/bias"), format!("online correction bias at {h} s"), "K", s.bias, "aux"));
+            rows.push(row(format!("correction/{h}/scale"), format!("online correction scale of the fan and pump response term at {h} s"), "", s.scale, "aux"));
+            rows.push(row(format!("correction/{h}/delta"), format!("online correction added to the {h} s forecast now (0 until enough updates)"), "K", s.delta, "aux"));
+            rows.push(row(format!("correction/{h}/updates"), format!("online correction updates at {h} s"), "", s.updates as f64, "aux"));
+            rows.push(row(format!("correction/{h}/drift"), format!("online correction at {h} s sat at its bias or scale bound for more than the drift time (1 yes, retraining recommended)"), "", s.drift as u8 as f64, "aux"));
         }
         if let Some(t) = &self.test {
             rows.push(row("step/phase".into(), "step test phase".into(), "", (t.idx + 1) as f64, "input"));
@@ -1348,8 +1356,7 @@ impl Control {
         let left = self.warm_left();
         let model = ModelInfo { loaded: self.model.is_some(), warm: self.model.is_some() && left == 0, warmup_left_s: left as u32, fan_identified: self.identified(0), pump_identified: self.identified(1), error: self.model_error.clone() };
         let predicted = self.plan.as_ref().map(|(p, at)| {
-            let s = self.shown.unwrap_or_default();
-            Predicted { horizon_s: self.cfg.horizon_secs, water: s[0], cpu: s[1], gpu: s[2], water_limit: p.limits[0], cpu_limit: p.limits[1], gpu_limit: p.limits[2], feasible: p.feasible, age_ms: now - at }
+            Predicted { horizon_s: self.cfg.horizon_secs, water: self.shown, raw: self.shown_raw, correction: self.corr.shown().into_iter().map(|s| Correction { horizon_s: s.h, bias: s.bias, scale: s.scale, delta: s.delta, updates: s.updates, acting: s.acting, drift: s.drift }).collect(), water_limit: p.limit, feasible: p.feasible, age_ms: now - at }
         });
         let step = self.test.as_ref().map(|t| StepStatus { id: format!("d5.{}", self.chans[t.chan].spec.name), phase: t.idx as u32 + 1, phases: t.steps.len() as u32, duty: self.step_duty(t, now), overridden: self.step_overridden(t, now), left_s: ((t.steps[t.idx][1] * 1000.0 - (now - t.since) as f64) / 1000.0).max(0.0) as u32 });
         let limits = vec![

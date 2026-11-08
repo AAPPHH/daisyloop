@@ -6,8 +6,21 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug)]
 pub struct Forecast {
     pub water: f64,
-    pub cpu: f64,
-    pub gpu: f64,
+    pub response: f64,
+}
+
+impl Forecast {
+    #[cfg(test)]
+    pub fn plain(water: f64) -> Forecast {
+        Forecast { water, response: 0.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Live {
+    pub h: u32,
+    pub pred: f64,
+    pub response: f64,
 }
 
 pub trait Model {
@@ -18,6 +31,18 @@ pub trait Model {
         0
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout_s: u32, horizon_s: u32) -> Result<Forecast, String>;
+    fn live(&self) -> Vec<Live> {
+        Vec::new()
+    }
+    fn inputs(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn fallback_inputs(&self) -> Vec<String> {
+        self.inputs()
+    }
+    fn digest(&self) -> u64 {
+        0
+    }
 }
 
 pub struct XgbModel {
@@ -31,6 +56,9 @@ pub struct XgbModel {
     epoch: i64,
     since: i64,
     bridge: i64,
+    inputs: Vec<String>,
+    fallback_inputs: Vec<String>,
+    digest: u64,
 }
 
 impl XgbModel {
@@ -60,7 +88,10 @@ impl XgbModel {
             return Err("feature spec has no water channel".into());
         }
         let n = channels.len();
-        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0 })
+        let inputs = p.weighted_channels("water_");
+        let fallback_inputs = if p.model.has_fallback() { p.fallback_channels("water_") } else { inputs.clone() };
+        let digest = spec.bytes().chain([0u8]).chain(model.bytes()).fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0, inputs, fallback_inputs, digest })
     }
 
     pub fn load(dirs: &[PathBuf], spec: &str, file: &str) -> Result<XgbModel, String> {
@@ -105,7 +136,7 @@ impl XgbModel {
 
     #[cfg(test)]
     fn clone_for_observe(&self) -> XgbModel {
-        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since, bridge: self.bridge }
+        XgbModel { p: self.p.clone(), fresh: self.fresh.clone(), channels: self.channels.clone(), last: self.last.clone(), fill: self.fill.clone(), fill_at: self.fill_at.clone(), x: self.x.clone(), epoch: self.epoch, since: self.since, bridge: self.bridge, inputs: self.inputs.clone(), fallback_inputs: self.fallback_inputs.clone(), digest: self.digest }
     }
 
     fn filled(&self) -> Vec<f64> {
@@ -164,12 +195,28 @@ impl Model for XgbModel {
         for k in 1..=rollout_s as i64 {
             x = p.features(&raw, self.epoch + k);
         }
-        let out = p.model.predict(&x);
-        let get = |prefix: &str| {
-            let name = format!("{prefix}_{horizon_s}");
-            out.iter().find(|(n, _)| *n == name).map(|(_, v)| *v).filter(|v| v.is_finite()).ok_or_else(|| format!("model has no finite target {name}"))
-        };
-        Ok(Forecast { water: get("water")?, cpu: get("cpu")?, gpu: get("gpu")? })
+        let out = p.model.predict_parts(&x);
+        let name = format!("water_{horizon_s}");
+        out.iter().find(|(n, ..)| *n == name).filter(|(_, v, t)| v.is_finite() && t.is_finite()).map(|(_, v, t)| Forecast { water: *v, response: -*t }).ok_or_else(|| format!("model has no finite target {name}"))
+    }
+
+    fn live(&self) -> Vec<Live> {
+        if self.warm_secs() == 0 {
+            return Vec::new();
+        }
+        self.p.model.predict_parts(&self.x).into_iter().filter_map(|(n, v, t)| Some(Live { h: n.strip_prefix("water_")?.parse().ok()?, pred: v, response: -t })).filter(|l| l.pred.is_finite() && l.response.is_finite()).collect()
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.inputs.clone()
+    }
+
+    fn fallback_inputs(&self) -> Vec<String> {
+        self.fallback_inputs.clone()
+    }
+
+    fn digest(&self) -> u64 {
+        self.digest
     }
 }
 
@@ -244,14 +291,6 @@ impl Axis<'_> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Temps {
     pub water: Option<f64>,
-    pub cpu: Option<f64>,
-    pub gpu: Option<f64>,
-}
-
-impl Temps {
-    pub fn all(&self) -> bool {
-        self.water.is_some() && self.cpu.is_some() && self.gpu.is_some()
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,9 +298,7 @@ pub struct Plan {
     pub fan_rpm: f64,
     pub pump_rpm: f64,
     pub water: Option<f64>,
-    pub cpu: Option<f64>,
-    pub gpu: Option<f64>,
-    pub limits: [f64; 3],
+    pub limit: f64,
     pub feasible: bool,
 }
 
@@ -270,9 +307,8 @@ pub struct Planner<'a> {
 }
 
 impl Planner<'_> {
-    pub fn limits(cfg: &ControlConfig, weight: f64) -> [f64; 3] {
-        let shift = weight.clamp(0.0, 1.0) * cfg.weight_span_k;
-        [cfg.water_plan_limit - shift, cfg.cpu_plan_limit, cfg.gpu_plan_limit]
+    pub fn limit(cfg: &ControlConfig, weight: f64) -> f64 {
+        cfg.water_plan_limit - weight.clamp(0.0, 1.0) * cfg.weight_span_k
     }
 
     fn noise(&self, fan: &Axis, pump: &Axis, f: f64, p: f64) -> f64 {
@@ -281,17 +317,17 @@ impl Planner<'_> {
     }
 
     fn within(plan: &Plan, margin: f64) -> bool {
-        [plan.water, plan.cpu, plan.gpu].iter().zip(plan.limits).all(|(t, l)| t.is_some_and(|t| t <= l - margin))
+        plan.water.is_some_and(|t| t <= plan.limit - margin)
     }
 
     pub fn plan(&self, model: &dyn Model, fan: &Axis, pump: &Axis, now: &Temps, weight: f64, prev: Option<(f64, f64)>) -> Result<Plan, String> {
-        let limits = Self::limits(self.cfg, weight);
+        let limit = Self::limit(self.cfg, weight);
         let eval = |f: f64, p: f64| -> Result<Plan, String> {
             let mut hold = HashMap::new();
             fan.hold(f, &mut hold);
             pump.hold(p, &mut hold);
             let fc = model.forecast(&hold, self.cfg.rollout_secs, self.cfg.horizon_secs)?;
-            Ok(Plan { fan_rpm: f, pump_rpm: p, water: now.water.map(|t| t + fc.water), cpu: now.cpu.map(|t| t + fc.cpu), gpu: now.gpu.map(|t| t + fc.gpu), limits, feasible: true })
+            Ok(Plan { fan_rpm: f, pump_rpm: p, water: now.water.map(|t| t + fc.water), limit, feasible: true })
         };
         let (fans, pumps) = (fan.candidates(self.cfg.fan_candidates), pump.candidates(self.cfg.pump_candidates));
         let mut all: Vec<(f64, Plan)> = Vec::new();
@@ -307,16 +343,43 @@ impl Planner<'_> {
         }
         let cheapest = |margin: f64| all.iter().filter(|(_, p)| Self::within(p, margin)).min_by(|a, b| a.0.total_cmp(&b.0));
         let stay = match prev {
-            Some((f, p)) if now.all() => {
+            Some((f, p)) if now.water.is_some() => {
                 let (f, p) = (fan.fit(f).1, pump.fit(p).1);
                 let plan = eval(f, p)?;
                 Self::within(&plan, 0.0).then(|| (self.noise(fan, pump, f, p), plan))
             }
             _ => None,
         };
+        let refine = |plan: Plan| -> Result<Plan, String> {
+            let below = fans.iter().copied().filter(|&f| f < plan.fan_rpm).fold(None, |a: Option<f64>, f| Some(a.map_or(f, |a| a.max(f))));
+            let Some(mut lo) = below else { return Ok(plan) };
+            let mut best = plan;
+            for _ in 0..self.cfg.refine_steps {
+                let mid = fan.fit(0.5 * (lo + best.fan_rpm)).1;
+                if (best.fan_rpm - mid).abs() < 1.0 || (mid - lo).abs() < 1.0 {
+                    break;
+                }
+                let p = eval(mid, plan.pump_rpm)?;
+                if Self::within(&p, 0.5 * self.cfg.plan_hysteresis_k) {
+                    best = p;
+                } else {
+                    lo = mid;
+                }
+            }
+            Ok(best)
+        };
         match stay {
-            Some((cost, plan)) => Ok(cheapest(self.cfg.plan_hysteresis_k).filter(|b| b.0 < cost).map_or(plan, |b| b.1)),
-            None => cheapest(0.0).map(|b| b.1).or(hottest).ok_or_else(|| "no candidates".to_string()),
+            Some((cost, plan)) => match cheapest(self.cfg.plan_hysteresis_k).filter(|b| b.0 < cost) {
+                Some(b) => refine(b.1),
+                None => {
+                    let r = refine(plan)?;
+                    Ok(if plan.fan_rpm - r.fan_rpm >= self.cfg.refine_min_rpm { r } else { plan })
+                }
+            },
+            None => match cheapest(0.0) {
+                Some(b) => refine(b.1),
+                None => hottest.ok_or_else(|| "no candidates".to_string()),
+            },
         }
     }
 }
@@ -368,15 +431,32 @@ mod tests {
     }
 
     #[test]
-    fn shipped_model_loads_is_not_identified_and_forecasts_finite_values() {
+    fn shipped_model_loads_is_identified_by_owner_override_and_forecasts_finite_values() {
         let m = real();
-        assert_eq!(m.identified(), (false, false));
+        assert_eq!(m.identified(), (true, true));
+        assert!(m.inputs().len() >= 6 && m.inputs().iter().any(|c| c == "nvml/0/power") && m.digest() != 0);
         assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
-        assert!(f.water.is_finite() && f.cpu.is_finite() && f.gpu.is_finite());
+        assert!(f.water.is_finite());
         assert!(m.forecast(&hold, 120, 77).is_err());
         assert!(XgbModel::load(&[PathBuf::from("nowhere")], "a", "b").is_err());
+    }
+
+    #[test]
+    fn a_water_only_model_loads_and_forecasts_like_the_deployed_one() {
+        let dir = Golden::dir();
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("model_deploy.json")).unwrap()).unwrap();
+        v["targets"].as_object_mut().unwrap().retain(|k, _| k.starts_with("water_"));
+        let spec = std::fs::read_to_string(dir.join("feature_spec_deploy.json")).unwrap();
+        let g = Golden::load();
+        let (mut only, mut full) = (XgbModel::from_text(&spec, &v.to_string()).unwrap(), g.model());
+        for t in 3000..3400 {
+            only.observe(&g.row(t), g.k0 + t as i64);
+            full.observe(&g.row(t), g.k0 + t as i64);
+        }
+        let hold: HashMap<String, f64> = HashMap::new();
+        assert!((only.forecast(&hold, 120, 120).unwrap().water - full.forecast(&hold, 120, 120).unwrap().water).abs() < 1e-9);
     }
 
     #[test]
@@ -389,7 +469,7 @@ mod tests {
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
         let t0 = std::time::Instant::now();
-        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0) }, 0.5, None).unwrap();
         assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
         assert!(plan.fan_rpm >= fan.rpm_range().0 && plan.fan_rpm <= fan.rpm_range().1 && plan.pump_rpm >= pump.rpm_range().0);
     }
@@ -403,7 +483,7 @@ mod tests {
         let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
-        let temps = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+        let temps = Temps { water: Some(31.0) };
         let runs = 10;
         let t0 = std::time::Instant::now();
         for _ in 0..runs {
@@ -430,7 +510,7 @@ mod tests {
                 (rpm, m.forecast(&hold, cfg.rollout_secs, cfg.horizon_secs).unwrap().water)
             })
             .collect();
-        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) }, 0.5, None).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0) }, 0.5, None).unwrap();
         assert!(plan.water.is_some_and(f64::is_finite));
         out
     }
@@ -584,7 +664,7 @@ mod cost {
         let op = Operating { duty: 80.0, rpm: 1200.0, power: None, current: None };
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
-        let temps = Temps { water: Some(31.0), cpu: Some(70.0), gpu: Some(55.0) };
+        let temps = Temps { water: Some(31.0) };
         let planner = Planner { cfg: &cfg };
         let mut ts: Vec<f64> = (0..reps)
             .map(|_| {
@@ -625,7 +705,7 @@ mod cost {
         assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
-        assert!(f.water.is_finite() && f.cpu.is_finite() && f.gpu.is_finite());
+        assert!(f.water.is_finite());
         assert!(m.forecast(&hold, 120, 77).is_err());
         assert!(plan_ms(&m, 1).0 < 5000.0);
     }

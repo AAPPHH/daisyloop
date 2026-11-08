@@ -5,6 +5,7 @@ use crate::model::{Forecast, Golden, XgbModel};
 pub(super) enum Kind {
     Blind,
     Informed,
+    Biased,
     Xgb,
 }
 
@@ -33,6 +34,58 @@ impl Model for Shipped {
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, horizon: u32) -> Result<Forecast, String> {
         self.0.forecast(hold, rollout, horizon)
     }
+    fn live(&self) -> Vec<crate::model::Live> {
+        self.0.live()
+    }
+    fn inputs(&self) -> Vec<String> {
+        self.0.inputs()
+    }
+    fn digest(&self) -> u64 {
+        self.0.digest()
+    }
+}
+
+struct Biased {
+    plant: Rc<RefCell<Plant>>,
+    feed: Rc<Cell<(f64, f64)>>,
+}
+
+impl Biased {
+    fn delta(&self, rpm: f64, steps: u32) -> f64 {
+        let (power, _) = self.feed.get();
+        let mut p = self.plant.borrow().clone();
+        p.spec.cold_w = 0.0;
+        let now = p.reading();
+        for _ in 0..steps {
+            p.step(power, rpm);
+        }
+        p.reading() - now
+    }
+}
+
+impl Model for Biased {
+    fn observe(&mut self, _: &HashMap<String, f64>, _: i64) {}
+    fn identified(&self) -> (bool, bool) {
+        (true, true)
+    }
+    fn warm_secs(&self) -> i64 {
+        5000
+    }
+    fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, horizon: u32) -> Result<Forecast, String> {
+        let rpm = hold.get("d5next/fan/rpm").copied().unwrap_or(self.feed.get().1);
+        let (d, off) = (self.delta(rpm, rollout + horizon), self.delta(0.0, rollout + horizon));
+        Ok(Forecast { water: d, response: d - off })
+    }
+    fn live(&self) -> Vec<crate::model::Live> {
+        let rpm = self.feed.get().1;
+        [30u32, 60, 90, 120].iter().map(|h| {
+            let d = self.delta(rpm, *h);
+            crate::model::Live { h: *h, pred: d, response: d - self.delta(0.0, *h) }
+        }).collect()
+    }
+    fn digest(&self) -> u64 {
+        0x5eed
+    }
 }
 
 struct Informed {
@@ -57,7 +110,7 @@ impl Model for Informed {
             p.step(power, rpm);
         }
         let d = p.reading() - now;
-        Ok(Forecast { water: d, cpu: d, gpu: 0.0 })
+        Ok(Forecast::plain(d))
     }
 }
 
@@ -71,6 +124,7 @@ pub(super) fn rig(kind: Kind, plant: &Rc<RefCell<Plant>>, feed: &Rc<Cell<(f64, f
     match kind {
         Kind::Blind => (blind_rig(tweak), None),
         Kind::Informed => (rig_with(Box::new(Informed { plant: plant.clone(), feed: feed.clone() }), tweak), None),
+        Kind::Biased => (rig_with(Box::new(Biased { plant: plant.clone(), feed: feed.clone() }), tweak), None),
         Kind::Xgb => {
             let g = Golden::load();
             let mut r = rig_with(Box::new(Shipped(g.model())), tweak);

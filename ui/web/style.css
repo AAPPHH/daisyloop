@@ -277,7 +277,7 @@ body.stale .cue span { animation: none; }
 .fc-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; color: var(--dim); font-size: 0.9rem; margin-bottom: 0.7rem; }
 .fc-head span { font-weight: 560; color: var(--text); }
 .fc-head em { font-style: normal; font-size: 0.78rem; color: var(--amber); text-align: right; }
-.fc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; }
+.fc-grid { display: grid; grid-template-columns: 1fr; gap: 0.6rem; }
 .fc-grid .k { display: block; font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
 .fc-grid b { font-size: 1.45rem; font-weight: 450; letter-spacing: -0.02em; }
 .fc-grid b.over { color: #ff8a82; }
@@ -360,7 +360,7 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
 .node.still .big small { display: none; }
 .ch.still .rpm { color: var(--dim); font-weight: 300; font-size: 2.1rem; }
 .ch.still .rpm + small { display: none; }
-.alarm-bar .al.cpu_high, .alarm-bar .al.gpu_high, .alarm-bar .al.water_frozen { color: var(--amber); background: rgba(38, 28, 8, 0.96); }
+.alarm-bar .al.water_frozen { color: var(--amber); background: rgba(38, 28, 8, 0.96); }
 @media (max-width: 760px) {
   html { font-size: 15px; }
   .top { gap: 0.8rem; padding: 0 1rem; }

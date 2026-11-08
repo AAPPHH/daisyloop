@@ -19,7 +19,7 @@ CFG = {
     "log_dir": os.path.join(LOCAL, "daisyloop", "steprun"),
     "abort_exe": [os.path.join(HERE, "..", "tools", "d5_probe", "target", "release", "d5_abort.exe"), r"C:\clones\daisyloop\tools\d5_probe\target\release\d5_abort.exe"],
     "abort_timeout_s": 150,
-    "pipe": {"name": r"\\.\pipe\daisyloop", "version": 2, "timeout_s": 8.0, "busy_retries": 5},
+    "pipe": {"name": r"\\.\pipe\daisyloop", "version": 3, "timeout_s": 8.0, "busy_retries": 5},
     "channels": {
         "water": ["d5next/water/temp"],
         "fan_rpm": ["d5next/fan/rpm"],
