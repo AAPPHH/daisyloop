@@ -520,13 +520,13 @@ mod tests {
     }
 
     const INSTALL: &str = r"C:\Program Files\daisyloop";
-    const DATA: &str = r"C:\Users\user\AppData\Local\daisyloop";
+    const DATA: &str = r"C:\Local\daisyloop";
     const ADMIN_FILE: &str = r"C:\Program Files\daisyloop\config.toml";
-    const USER_FILE: &str = r"C:\Users\user\AppData\Local\daisyloop\config.toml";
+    const USER_FILE: &str = r"C:\Local\daisyloop\config.toml";
 
     #[test]
     fn installed_ignores_security_keys_from_the_user_config() {
-        let admin = "data_dir = 'C:\\Users\\user\\AppData\\Local\\daisyloop'\nwrites_enabled = true\n[control.fan]\nfloor_duty = 35.0\n";
+        let admin = "data_dir = 'C:\\Local\\daisyloop'\nwrites_enabled = true\n[control.fan]\nfloor_duty = 35.0\n";
         let user = "keep_versions = 3\nwrites_enabled = false\ndata_dir = 'C:\\evil'\nsidecar = 'C:/evil.exe'\n[control.fan]\nautostart_active = true\n";
         let cfg = Config::resolve(Some(Path::new(INSTALL)), Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\SYSTEM")), &reader(vec![(ADMIN_FILE, admin), (USER_FILE, user)])).unwrap();
         assert_eq!(cfg.keep_versions, 3);
@@ -581,11 +581,11 @@ mod tests {
     #[test]
     fn dev_run_uses_env_or_localappdata_and_keeps_everything_from_the_user_config() {
         let files = vec![(r"C:\env\config.toml", "writes_enabled = true\nsidecar = 'C:/x.exe'"), (USER_FILE, "keep_versions = 7")];
-        let env = Config::resolve(None, Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files.clone())).unwrap();
+        let env = Config::resolve(None, Some(PathBuf::from(r"C:\env")), Some(PathBuf::from(r"C:\Local")), &reader(files.clone())).unwrap();
         assert_eq!(env.data_dir, PathBuf::from(r"C:\env"));
         assert!(env.writes_enabled && env.sidecar.is_some() && env.install_dir.is_none());
         assert_eq!(env.state_dir(), PathBuf::from(r"C:\env"));
-        let local = Config::resolve(None, None, Some(PathBuf::from(r"C:\Users\user\AppData\Local")), &reader(files)).unwrap();
+        let local = Config::resolve(None, None, Some(PathBuf::from(r"C:\Local")), &reader(files)).unwrap();
         assert_eq!(local.data_dir, PathBuf::from(DATA));
         assert_eq!(local.keep_versions, 7);
     }
@@ -595,7 +595,7 @@ mod tests {
         let pf = Path::new(INSTALL);
         assert!(Config::is_install_dir(Path::new(r"c:\program files\DAISYLOOP\"), pf));
         assert!(Config::is_install_dir(Path::new("C:/Program Files/daisyloop"), pf));
-        for other in [r"C:\Program Files\daisyloop\bin", r"C:\Program Files", r"C:\Users\user\AppData\Local\daisyloop\bin", r"C:\Program Files\daisyloop2", r"D:\Program Files\daisyloop"] {
+        for other in [r"C:\Program Files\daisyloop\bin", r"C:\Program Files", r"C:\Local\daisyloop\bin", r"C:\Program Files\daisyloop2", r"D:\Program Files\daisyloop"] {
             assert!(!Config::is_install_dir(Path::new(other), pf), "{other}");
         }
     }

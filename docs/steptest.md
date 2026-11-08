@@ -68,7 +68,7 @@ pump = [[15.0, 120.0]]
 ```
 
    This is the plan for the duty test (step 3). `control` is an admin key, a user config cannot set it.
-2. Clean restart: `New-Item C:\Users\user\AppData\Local\daisyloop\stop -ItemType File`. The daemon stops (it releases its channels, seals and commits the hot store); the watchdog task relaunches it within about 2 min. Because the model is seeded from the hot store, the restart no longer costs the 30 min warm-up: the UI shows the model warm again as soon as the daemon is back (if the gap was longer than 300 s the old warm-up applies).
+2. Clean restart: `New-Item %LOCALAPPDATA%\daisyloop\stop -ItemType File`. The daemon stops (it releases its channels, seals and commits the hot store); the watchdog task relaunches it within about 2 min. Because the model is seeded from the hot store, the restart no longer costs the 30 min warm-up: the UI shows the model warm again as soon as the daemon is back (if the gap was longer than 300 s the old warm-up applies).
 3. Expected: UI shows `Schreiben erlaubt` on both channels, mode `shadow`, drive `firmware`, model warm. If the UI shows `Schreiben ist deaktiviert`, the config was not saved.
 - Watch: water temperature, both channels on `firmware`. Abort: set `writes_enabled = false` again (UAC) and restart; nothing was written.
 - Restore: same edit, `writes_enabled = false`, stop file, wait for the watchdog.
@@ -166,7 +166,7 @@ Result of the second retraining on the same real data, after the estimator of A 
 ```
 Copy-Item C:\clones\daisyloop\models\steptrain\model_deploy.json, C:\clones\daisyloop\models\steptrain\feature_spec_deploy.json C:\clones\daisyloop\models\
 Start-Process powershell -Verb RunAs -ArgumentList "-Command Copy-Item C:\clones\daisyloop\models\model_deploy.json,C:\clones\daisyloop\models\feature_spec_deploy.json 'C:\Program Files\daisyloop\models' -Force"
-New-Item C:\Users\user\AppData\Local\daisyloop\stop -ItemType File
+New-Item %LOCALAPPDATA%\daisyloop\stop -ItemType File
 ```
 
 The two files exist only when the gate passed; after a refusal the directory holds `candidate_*` files and nothing is copied. After the relaunch the UI shows the model loaded and warm (seeded) and `fan identified` (`pump identified` is always off). Active mode still needs `writes_enabled = true`, which stays false until the owner decides.

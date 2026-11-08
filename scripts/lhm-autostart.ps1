@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
-$exe = 'C:\Users\user\AppData\Local\LibreHardwareMonitor\LibreHardwareMonitor.exe'
-$log = 'C:\Users\user\AppData\Local\daisyloop\lhm-autostart.log'
-$user = 'user'
+$exe = Join-Path $env:LOCALAPPDATA 'LibreHardwareMonitor\LibreHardwareMonitor.exe'
+$log = Join-Path $env:LOCALAPPDATA 'daisyloop\lhm-autostart.log'
+$user = $env:USERNAME
 Start-Transcript -Path $log -Force | Out-Null
 try {
     if (-not (Test-Path $exe)) { throw "missing $exe" }
