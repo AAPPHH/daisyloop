@@ -10,6 +10,7 @@ struct Run {
     plant: Rc<RefCell<Plant>>,
     feed: Rc<Cell<(f64, f64)>>,
     rng: Noise,
+    noise: f64,
     fan_cal: Calibration,
     profile: Profile,
     t: usize,
@@ -27,7 +28,7 @@ impl Run {
         }
         rig.active("d5.fan");
         rig.active("d5.pump");
-        Run { rig, world, plant, feed, rng: Noise(88172645463325252), fan_cal: ChannelConfig::defaults(ControlKind::Fan).calibration(), profile, t: 0 }
+        Run { rig, world, plant, feed, rng: Noise(88172645463325252), noise: SENSOR_NOISE, fan_cal: ChannelConfig::defaults(ControlKind::Fan).calibration(), profile, t: 0 }
     }
 
     fn tick(&mut self, garbage: impl Fn(usize, f64) -> Option<f64>) -> f64 {
@@ -38,7 +39,7 @@ impl Run {
         self.feed.set((power, fan_rpm));
         self.plant.borrow_mut().step(power, fan_rpm);
         self.rig.extra = vec![(CPU_POWER, power), (GPU_POWER, 0.0), (PUMP_POWER, 5.0)];
-        let clean = ((self.plant.borrow().reading() + self.rng.gauss(SENSOR_NOISE)) * 100.0).round() / 100.0;
+        let clean = ((self.plant.borrow().reading() + self.rng.gauss(self.noise)) * 100.0).round() / 100.0;
         self.rig.water = garbage(self.t, clean).unwrap_or(clean);
         self.rig.cpu = self.rig.water + 15.0 + 0.1 * power;
         plan::advance(&mut self.rig, &mut self.world, fan_rpm);
@@ -169,37 +170,83 @@ fn c_after_a_clean_learning_phase_garbage_keeps_bias_and_scale_inside_their_boun
     assert!(peak < a.rig.c.cfg.water_limit);
 }
 
+const OWNER_NOISE: f64 = 0.01;
+
+fn owner_set(c: &mut Config) {
+    c.control.water_plan_limit = 34.5;
+    c.control.weight_span_k = 1.0;
+    c.control.fan_start_water = 33.0;
+    c.control.fan_stop_water = 31.5;
+    c.control.plan_secs = 5.0;
+}
+
+struct Owner {
+    writes: usize,
+    swings: usize,
+    late: usize,
+    changes: usize,
+    mean: f64,
+    peak: f64,
+    fallback: bool,
+}
+
+fn owner_day(spec: PlantSpec, profile: Profile, on: bool) -> Owner {
+    let mut run = Run::new(spec, profile, move |c| {
+        owner_set(c);
+        c.control.correction.enabled = on;
+    });
+    run.noise = OWNER_NOISE;
+    let (mut tail, mut peak) = (vec![], 0.0f64);
+    let (mut last, mut dir, mut swings, mut late, mut changes) = (None::<f64>, 0.0f64, 0usize, 0usize, 0usize);
+    for t in 0..24 * 3600 {
+        changes += (t >= 12 * 3600 && profile.power(t) != profile.power(t - 1)) as usize;
+        run.tick(no_garbage);
+        peak = peak.max(run.plant.borrow().t1);
+        if t >= 12 * 3600 {
+            tail.push(run.plant.borrow().reading());
+        }
+        if let Some(d) = run.rig.c.chans[0].duty_cmd {
+            match last {
+                Some(l) if (d - l).abs() >= 10.0 => {
+                    if dir != 0.0 && (d - l).signum() != dir {
+                        swings += 1;
+                        if t >= 12 * 3600 {
+                            late += 1;
+                        }
+                    }
+                    dir = (d - l).signum();
+                    last = Some(d);
+                }
+                None => last = Some(d),
+                _ => {}
+            }
+        }
+    }
+    Owner { writes: run.rig.sim.duty_sets().len(), swings, late, changes, mean: tail.iter().sum::<f64>() / tail.len() as f64, peak, fallback: run.rig.c.chans.iter().any(|c| c.fallback.is_some()) }
+}
+
 #[test]
-fn owner_config_values_validate_and_hold_the_water_near_the_target_in_simulation() {
-    let cfg_text = "water_plan_limit = 34.5\nweight_span_k = 1.0\nfan_start_water = 33.0\nfan_stop_water = 31.5\n";
+fn owner_config_values_validate_and_hold_the_water_near_the_target_without_chatter_in_simulation() {
+    let cfg_text = "water_plan_limit = 34.5
+weight_span_k = 1.0
+fan_start_water = 33.0
+fan_stop_water = 31.5
+";
     let cc: ControlConfig = toml::from_str(cfg_text).unwrap();
     assert!(cc.validate().is_ok());
     assert!((Planner::limit(&cc, 0.5) - 34.0).abs() < 1e-9 && (Planner::limit(&cc, 1.0) - 33.5).abs() < 1e-9 && (Planner::limit(&cc, 0.0) - 34.5).abs() < 1e-9);
-    let set = |c: &mut Config| {
-        c.control.water_plan_limit = 34.5;
-        c.control.weight_span_k = 1.0;
-        c.control.fan_start_water = 33.0;
-        c.control.fan_stop_water = 31.5;
-        c.control.plan_secs = 5.0;
-    };
-    let rig = Rig::new((true, true), 3.0, set);
+    let rig = Rig::new((true, true), 3.0, owner_set);
     assert_eq!((rig.c.cfg.water_plan_limit, rig.c.cfg.fan_start_water, rig.c.cfg.fan_stop_water, rig.c.cfg.weight_span_k), (34.5, 33.0, 31.5, 1.0));
-    let mut run = Run::new(PlantSpec::MEASURED, Profile::Constant(120.0), move |c| {
-        set(c);
-        c.control.correction.enabled = true;
-    });
-    let mut tail: Vec<f64> = vec![];
-    let mut peak: f64 = 0.0;
-    for t in 0..3 * 3600 {
-        run.tick(no_garbage);
-        peak = peak.max(run.plant.borrow().t1);
-        if t >= 2 * 3600 {
-            tail.push(run.plant.borrow().reading());
+    for (name, spec, profile) in [("60 W", PlantSpec::MEASURED, Profile::Constant(60.0)), ("120 W", PlantSpec::MEASURED, Profile::Constant(120.0)), ("square 60/160 W", PlantSpec::MEASURED, Profile::Square(60.0, 160.0, 900, 900)), ("17 W bias, 120 W", biased_spec(), Profile::Constant(120.0))] {
+        for on in [false, true] {
+            let o = owner_day(spec, profile, on);
+            println!("owner config {name} correction {on}: writes {} fan swings {} late swings {} load changes {} mean water second half {:.2} peak {:.2}", o.writes, o.swings, o.late, o.changes, o.mean, o.peak);
+            assert!(o.writes <= 250 && o.late <= o.changes + 2 && o.peak <= 34.5 && !o.fallback, "{name} {on}");
+            if on && (name == "60 W" || name == "120 W") {
+                assert!((33.5..=34.2).contains(&o.mean), "{name} {on} mean {}", o.mean);
+            }
         }
     }
-    let mean = tail.iter().sum::<f64>() / tail.len() as f64;
-    println!("owner config 120 W constant: mean water in hour 3 {mean:.2}, peak {peak:.2}");
-    assert!(peak < 35.5 && mean < 34.6 && run.rig.c.chans.iter().all(|c| c.fallback.is_none()));
 }
 
 struct History {

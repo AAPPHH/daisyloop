@@ -350,9 +350,36 @@ impl Planner<'_> {
             }
             _ => None,
         };
+        let refine = |plan: Plan| -> Result<Plan, String> {
+            let below = fans.iter().copied().filter(|&f| f < plan.fan_rpm).fold(None, |a: Option<f64>, f| Some(a.map_or(f, |a| a.max(f))));
+            let Some(mut lo) = below else { return Ok(plan) };
+            let mut best = plan;
+            for _ in 0..self.cfg.refine_steps {
+                let mid = fan.fit(0.5 * (lo + best.fan_rpm)).1;
+                if (best.fan_rpm - mid).abs() < 1.0 || (mid - lo).abs() < 1.0 {
+                    break;
+                }
+                let p = eval(mid, plan.pump_rpm)?;
+                if Self::within(&p, 0.5 * self.cfg.plan_hysteresis_k) {
+                    best = p;
+                } else {
+                    lo = mid;
+                }
+            }
+            Ok(best)
+        };
         match stay {
-            Some((cost, plan)) => Ok(cheapest(self.cfg.plan_hysteresis_k).filter(|b| b.0 < cost).map_or(plan, |b| b.1)),
-            None => cheapest(0.0).map(|b| b.1).or(hottest).ok_or_else(|| "no candidates".to_string()),
+            Some((cost, plan)) => match cheapest(self.cfg.plan_hysteresis_k).filter(|b| b.0 < cost) {
+                Some(b) => refine(b.1),
+                None => {
+                    let r = refine(plan)?;
+                    Ok(if plan.fan_rpm - r.fan_rpm >= self.cfg.refine_min_rpm { r } else { plan })
+                }
+            },
+            None => match cheapest(0.0) {
+                Some(b) => refine(b.1),
+                None => hottest.ok_or_else(|| "no candidates".to_string()),
+            },
         }
     }
 }

@@ -183,6 +183,8 @@ pub struct ControlConfig {
     pub weight_span_k: f64,
     pub pump_noise: f64,
     pub plan_hysteresis_k: f64,
+    pub refine_steps: usize,
+    pub refine_min_rpm: f64,
     pub water_plan_limit: f64,
     pub water_limit: f64,
     pub water_top_limit: f64,
@@ -225,6 +227,8 @@ impl Default for ControlConfig {
             weight_span_k: 5.0,
             pump_noise: 0.5,
             plan_hysteresis_k: 0.3,
+            refine_steps: 6,
+            refine_min_rpm: 50.0,
             water_plan_limit: 46.0,
             water_limit: 48.0,
             water_top_limit: 50.0,
@@ -787,15 +791,15 @@ impl Control {
         for (ch, n) in over {
             self.raise(&mut out, AlarmKind::Budget, &ch, format!("Tagesbudget von {n} Schreibvorgängen erreicht, Duty bleibt auf dem letzten Wert"), None, None, now);
         }
+        for h in self.corr.drifting() {
+            self.raise(&mut out, AlarmKind::ModelDrift, &format!("correction/{h}"), format!("Modell driftet, Neutraining empfohlen ({h} s)"), None, None, now);
+        }
         let active: Vec<(String, String)> = out.iter().map(|a| (format!("{:?}", a.kind), a.channel.clone())).collect();
         self.since.retain(|k, _| active.contains(k));
         self.alarms = out;
     }
 
     fn fall_back(&mut self, i: usize, why: &str, limit: bool) {
-        for h in self.corr.drifting() {
-            self.raise(&mut out, AlarmKind::ModelDrift, &format!("correction/{h}"), format!("Modell driftet, Neutraining empfohlen ({h} s)"), None, None, now);
-        }
         if self.chans[i].mode == Mode::Active || self.chans[i].driving() {
             self.trip(i, why, limit);
         }
@@ -1308,13 +1312,13 @@ impl Control {
             rows.push(row(format!("correction/{h}/scale"), format!("online correction scale of the fan and pump response term at {h} s"), "", s.scale, "aux"));
             rows.push(row(format!("correction/{h}/delta"), format!("online correction added to the {h} s forecast now (0 until enough updates)"), "K", s.delta, "aux"));
             rows.push(row(format!("correction/{h}/updates"), format!("online correction updates at {h} s"), "", s.updates as f64, "aux"));
+            rows.push(row(format!("correction/{h}/drift"), format!("online correction at {h} s sat at its bias or scale bound for more than the drift time (1 yes, retraining recommended)"), "", s.drift as u8 as f64, "aux"));
         }
         if let Some(t) = &self.test {
             rows.push(row("step/phase".into(), "step test phase".into(), "", (t.idx + 1) as f64, "input"));
             rows.push(row("step/duty".into(), "step test duty".into(), "%", self.step_duty(t, now), "input"));
             rows.push(row("step/overridden".into(), "step test duty raised by the rule bound (1 yes)".into(), "", self.step_overridden(t, now) as u8 as f64, "aux"));
         }
-            rows.push(row(format!("correction/{h}/drift"), format!("online correction at {h} s sat at its bias or scale bound for more than the drift time (1 yes, retraining recommended)"), "", s.drift as u8 as f64, "aux"));
         rows
     }
 
