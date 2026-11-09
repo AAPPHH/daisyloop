@@ -65,7 +65,6 @@ fn main() {
             let slot = shared_slot.clone();
             let link = Link::start(move |ev| {
                 let Some(shared) = slot.lock().unwrap().clone() else { return };
-                let visible = shared.visible.load(Ordering::Relaxed);
                 match ev {
                     LinkEvent::Snapshot(s) => {
                         let n = s.alarms.len();
@@ -74,20 +73,14 @@ fn main() {
                                 let _ = t.set_tooltip(Some(if n > 0 { format!("daisyloop: {n} Alarm(e)") } else { "daisyloop".to_string() }));
                             }
                         }
-                        if visible {
-                            let _ = handle.emit("snapshot", &s);
-                        }
+                        let _ = handle.emit("snapshot", &s);
                         *shared.last.lock().unwrap() = Some(s);
                     }
                     LinkEvent::History(tag, h) => {
-                        if visible {
-                            let _ = handle.emit("history", serde_json::json!({ "tag": tag, "response": h }));
-                        }
+                        let _ = handle.emit("history", serde_json::json!({ "tag": tag, "response": h }));
                     }
                     LinkEvent::Down(e) => {
-                        if visible {
-                            let _ = handle.emit("link-down", e);
-                        }
+                        let _ = handle.emit("link-down", e);
                     }
                     LinkEvent::Error(e) => {
                         let _ = handle.emit("link-error", e);

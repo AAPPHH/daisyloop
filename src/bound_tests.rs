@@ -10,9 +10,6 @@ impl Model for Blind {
     fn identified(&self) -> (bool, bool) {
         (true, true)
     }
-    fn warm_secs(&self) -> i64 {
-        5000
-    }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
         Ok(Forecast::plain(0.0))
     }
@@ -180,9 +177,9 @@ fn r7_frozen_water_with_moving_load_and_a_stopped_fan_runs_both_channels_at_full
 }
 
 #[test]
-fn r8_only_the_water_plan_limit_exists_and_cpu_gpu_excess_changes_nothing() {
+fn r8_only_the_water_target_exists_and_cpu_gpu_excess_changes_nothing() {
     let cfg = ControlConfig::default();
-    assert_eq!((Planner::limit(&cfg, 0.0), Planner::limit(&cfg, 1.0)), (46.0, 41.0));
+    assert_eq!(cfg.target, ControlConfig::DEFAULT_TARGET);
     let mut rig = Rig::new((false, false), 3.0, |_| {});
     rig.run(120);
     let quiet_fan = rig.ctl("d5.fan").target_rpm.unwrap();
@@ -1142,4 +1139,26 @@ fn r9b_a_stale_model_input_raises_an_alarm_and_holds_the_plan_without_a_fallback
     rig.gpu = Some(40.0);
     rig.run(40);
     assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some());
+}
+
+#[test]
+fn slow_storage_temperature_tolerates_a_longer_gap_but_other_inputs_do_not() {
+    assert!(Control::slow_channel("/ssd/0/temperature/0") && Control::slow_channel("/nvme/1/temperature/0") && Control::slow_channel("/memory/dimm/1/temperature/0"));
+    assert!(!Control::slow_channel("/intelcpu/0/temperature/0") && !Control::slow_channel("nvml/0/temp") && !Control::slow_channel("d5next/water/temp") && !Control::slow_channel("/ssd/0/load/0"));
+    let mut rig = running(34.0, |_| {});
+    rig.live = true;
+    rig.c.inputs = vec!["/ssd/0/temperature/0".into(), "/intelcpu/0/temperature/0".into()];
+    rig.c.fallback_inputs = rig.c.inputs.clone();
+    rig.extra = vec![("/ssd/0/temperature/0", 35.0)];
+    rig.run(20);
+    assert!(!rig.alarm(AlarmKind::Stale) && rig.status().predicted.is_some_and(|p| p.water.is_some()));
+    rig.extra.clear();
+    rig.run(40);
+    assert!(!rig.alarm(AlarmKind::Stale) && rig.status().controls[0].note.as_deref().is_none_or(|n| !n.contains("veraltet")));
+    rig.run(30);
+    assert!(rig.alarm(AlarmKind::Stale) && rig.status().controls[0].note.as_deref().is_some_and(|n| n.contains("/ssd/0/temperature/0")));
+    rig.extra = vec![("/ssd/0/temperature/0", 35.0)];
+    rig.cpu = f64::NAN;
+    rig.run(30);
+    assert!(rig.status().controls[0].note.as_deref().is_some_and(|n| n.contains("/intelcpu/0/temperature/0")));
 }

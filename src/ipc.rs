@@ -106,19 +106,22 @@ impl Hub {
     pub fn snapshot(&self) -> Snapshot {
         let wall = crate::now_micros() / 1000;
         let stale_ms = (self.cfg.stale_secs * 1000.0) as i64;
+        let slow_ms = (self.cfg.slow_stale_secs.max(self.cfg.stale_secs) * 1000.0) as i64;
         let channels = self
             .latest
             .values()
             .map(|(seen, r)| {
                 let e = self.extremes.get(&r.channel).copied();
                 let age = (wall - seen).max(0);
-                Channel { id: r.channel.clone(), label: r.label.clone(), hardware: Self::hardware(&r.source, &r.channel), kind: Self::kind(&r.kind), unit: Self::unit(&r.unit), value: Some(r.value), min: e.map(|x| x.0), max: e.map(|x| x.1), age_ms: age, stale: age > stale_ms }
+                Channel { id: r.channel.clone(), label: r.label.clone(), hardware: Self::hardware(&r.source, &r.channel), kind: Self::kind(&r.kind), unit: Self::unit(&r.unit), value: Some(r.value), min: e.map(|x| x.0), max: e.map(|x| x.1), age_ms: age, stale: age > if Controller::slow_channel(&r.channel) { slow_ms } else { stale_ms } }
             })
             .collect();
         Snapshot {
             ts_ms: self.ts_ms,
             seq: self.seq,
-            weight: self.status.weight,
+            target: self.status.target,
+            target_min: self.status.target_min,
+            target_max: self.status.target_max,
             model: self.status.model.clone(),
             predicted: self.status.predicted.clone(),
             step_test: self.status.step.clone(),
@@ -266,7 +269,7 @@ impl Ipc {
 pub fn apply(control: &mut Controller, cmd: Command, now: i64) -> Result<(), String> {
     match cmd {
         Command::SetMode { id, mode, confirmed } => control.set_mode(&id, mode, confirmed, now),
-        Command::SetWeight { weight } => control.set_weight(weight),
+        Command::SetWaterTarget { celsius } => control.set_target(celsius),
         Command::StartStepTest { id, confirmed } => control.start_test(&id, confirmed, now),
         Command::StopStepTest => control.stop_test(now),
     }
@@ -280,7 +283,9 @@ mod tests {
     use crate::Config;
 
     fn control(writes: bool) -> Controller {
-        let cfg = Config { writes_enabled: writes, ..Config::default() };
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!("daisyloop-ipc-test-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        let cfg = Config { writes_enabled: writes, data_dir: dir, install_dir: None, ..Config::default() };
         let factory: Factory = Box::new(|| Err("no device in tests".into()));
         Controller::new(&cfg, Box::new(D5Actuator::new(factory, &cfg.control)), Err("no model in tests".into()))
     }
@@ -293,15 +298,15 @@ mod tests {
     fn commands_surface_their_refusals() {
         let mut c = control(false);
         let set = |id: &str, mode, confirmed| Command::SetMode { id: id.into(), mode, confirmed };
-        assert!(apply(&mut c, set("d5.fan", Mode::Active, true), 0).unwrap_err().contains("writes_enabled"));
-        assert!(apply(&mut c, set("board.1", Mode::Off, false), 0).is_err());
-        assert!(apply(&mut c, set("d5.pump", Mode::Off, false), 0).is_ok());
-        assert!(apply(&mut c, Command::SetWeight { weight: 2.0 }, 0).is_err());
-        assert!(apply(&mut c, Command::SetWeight { weight: 0.25 }, 0).is_ok());
+        assert!(apply(&mut c, set("d5.fan", Mode::Model, true), 0).unwrap_err().contains("writes_enabled"));
+        assert!(apply(&mut c, set("board.1", Mode::Pid, false), 0).is_err());
+        assert!(apply(&mut c, set("d5.pump", Mode::Pid, false), 0).is_ok());
+        assert!(apply(&mut c, Command::SetWaterTarget { celsius: f64::NAN }, 0).is_err());
+        assert!(apply(&mut c, Command::SetWaterTarget { celsius: 35.0 }, 0).is_ok());
         assert!(apply(&mut c, Command::StartStepTest { id: "d5.fan".into(), confirmed: true }, 0).unwrap_err().contains("writes_enabled"));
         assert!(apply(&mut c, Command::StopStepTest, 0).is_ok());
         let mut w = control(true);
-        assert!(apply(&mut w, set("d5.pump", Mode::Active, false), 0).unwrap_err().contains("Bestätigung"));
+        assert!(apply(&mut w, set("d5.pump", Mode::Model, false), 0).unwrap_err().contains("Bestätigung"));
     }
 
     #[test]

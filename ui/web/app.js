@@ -81,6 +81,7 @@ new ResizeObserver(() => document.documentElement.style.setProperty('--alarm-h',
 
 function render() {
   if (!S.visible) return;
+  document.body.dataset.seq = S.lastSeq;
   setLive(true);
   gaming.ingest();
   alarmBar();
@@ -108,21 +109,31 @@ function paintPage() {
 }
 
 function setVisible(v) {
+  if (S.visible === v) return;
   S.visible = v;
   motion.paused = !v;
   document.body.classList.toggle('paused', !v);
   if (v) {
     S.snap && render();
     motion.kick();
+    resync();
   } else {
     cancelAnimationFrame(raf);
     raf = 0;
   }
 }
 
+async function resync() {
+  const snap = await tauri.core.invoke('last_snapshot');
+  if (!snap || snap.seq === S.lastSeq) return;
+  ingest(snap);
+  S.visible ? render() : heat.feed(true);
+}
+
 tauri.event.listen('snapshot', (e) => {
   ingest(e.payload);
-  render();
+  if (S.visible) render();
+  else heat.feed(true);
 });
 tauri.event.listen('history', (e) => history.onHistory(e.payload));
 tauri.event.listen('link-down', (e) => {
@@ -131,7 +142,6 @@ tauri.event.listen('link-down', (e) => {
 });
 tauri.event.listen('link-error', (e) => ((S.err = e.payload), toast(String(e.payload))));
 tauri.event.listen('visibility', (e) => setVisible(e.payload));
-document.addEventListener('visibilitychange', () => setVisible(!document.hidden));
 initControls();
 
 const links = [...document.querySelectorAll('.index a')];
@@ -182,7 +192,7 @@ setInterval(() => {
   if (!S.visible) return;
   alarmAge();
   const a = age();
-  if (S.snap && a > STALE_AFTER) setLive(false);
+  if (S.snap && a > STALE_AFTER) resync().then(() => age() > STALE_AFTER && setLive(false));
   else if (!S.live && S.snap && a <= STALE_AFTER) setLive(true);
 }, 1000);
 

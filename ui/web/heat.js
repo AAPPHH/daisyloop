@@ -124,17 +124,23 @@ export class Heat {
   }
 
   update(live) {
+    const miss = this.feed(live);
+    if (miss) return this.paint(null, null, miss);
+    this.paint(this.hb.compute(), value(KEYS.water));
+  }
+
+  feed(live = S.live) {
     const ts = S.snap?.ts_ms;
     const miss = live && S.snap ? (ts === this.deadTs ? 'Keine aktuellen Werte' : this.missing()) : 'Keine aktuellen Werte';
     if (!live) this.deadTs = ts;
     if (miss) {
       this.hb.reset();
-      return this.paint(null, null, miss);
+      return miss;
     }
     const rpm = S.ctl.get(KEYS.pump)?.rpm_channel;
     const pump = value(HEAT.pumpPower) == null || isStale(HEAT.pumpPower) ? HEAT.pumpFallback : value(HEAT.pumpPower);
     this.hb.push(ts / 1000, { w: value(KEYS.water), cpu: value(KEYS.cpuPower), gpu: value(KEYS.gpuPower), pump, rpm: (rpm && value(rpm)) ?? HEAT.delay.highRpm });
-    this.paint(this.hb.compute(), value(KEYS.water));
+    return null;
   }
 
   paint(c, water, note = '') {

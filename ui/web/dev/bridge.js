@@ -9,11 +9,11 @@ let test = null;
 state.controls.forEach((c) => {
   c.allowed = q.get('writes') === '1';
   c.identified = q.get('identified') === '1';
-  if (q.get('mode')) c.mode = q.get('mode');
-  if (c.mode === 'active') Object.assign(c, { drive: 'duty', commanded_duty: c.duty, note: null });
+  if (q.get('mode')) c.mode = c.chosen = q.get('mode');
+  if (c.mode === 'model') Object.assign(c, { drive: 'duty', commanded_duty: c.duty, note: null });
 });
 if (q.get('fault')) {
-  Object.assign(state.controls[0], { mode: 'active', drive: 'firmware', fallback: q.get('fault') });
+  Object.assign(state.controls[0], { mode: 'pid', chosen: 'model', drive: 'firmware', fallback: q.get('fault') });
 }
 const still = q.get('still') === '1';
 const water = parseFloat(q.get('water'));
@@ -26,6 +26,8 @@ function snapshot() {
   const t = Date.now() / 1000;
   const s = JSON.parse(JSON.stringify(state));
   s.seq = ++seq;
+  if (s.predicted) s.predicted.water_limit = s.target;
+  s.limits.filter((l) => l.plan != null).forEach((l) => (l.plan = s.target));
   s.ts_ms = speed === 1 ? Date.now() : t00 + seq * 1000;
   s.channels.forEach((c, i) => {
     const b = base.channels[i].value;
@@ -73,21 +75,21 @@ function history(qy) {
 
 function command(c) {
   const ctl = state.controls.find((x) => x.id === c.id);
-  if (c.cmd === 'set_weight') state.weight = c.weight;
+  if (c.cmd === 'set_water_target') state.target = Math.min(state.target_max, Math.max(state.target_min, c.celsius));
   if (c.cmd === 'start_step_test') test = c.id;
   if (c.cmd === 'stop_step_test') test = null;
   if (c.cmd !== 'set_mode') return;
-  if (c.mode === 'active') {
-    if (!ctl.allowed) throw new Error('Aktiv abgelehnt: writes_enabled ist in der Admin-Konfiguration aus.');
-    if (!ctl.identified) throw new Error('Aktiv abgelehnt: das Modell kennt die Antwort dieses Kanals nicht (nicht identifiziert).');
+  if (c.mode === 'model') {
+    if (!ctl.allowed) throw new Error('Modell abgelehnt: writes_enabled ist in der Admin-Konfiguration aus.');
+    if (!ctl.identified) throw new Error('Modell abgelehnt: das Modell kennt die Antwort dieses Kanals nicht (nicht identifiziert).');
     if (ctl.kind === 'pump' && !c.confirmed) throw new Error('Pumpe braucht eine Bestätigung.');
   }
-  ctl.mode = c.mode;
+  ctl.mode = ctl.chosen = c.mode;
   ctl.fallback = null;
-  ctl.drive = c.mode === 'active' ? 'duty' : 'firmware';
-  ctl.commanded_duty = c.mode === 'active' ? ctl.duty : null;
-  ctl.target_rpm = c.mode === 'off' ? null : base.controls.find((x) => x.id === c.id).target_rpm;
-  ctl.note = c.mode === 'shadow' ? 'nur berechnet' : null;
+  ctl.drive = c.mode === 'model' ? 'duty' : 'firmware';
+  ctl.commanded_duty = c.mode === 'model' ? ctl.duty : null;
+  ctl.target_rpm = base.controls.find((x) => x.id === c.id).target_rpm;
+  ctl.note = null;
 }
 
 export default {
@@ -104,7 +106,30 @@ export default {
   },
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const hiddenDoc = (on) => {
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => on });
+  document.dispatchEvent(new Event('visibilitychange'));
+};
+
 window.__dev = {
+  seq: () => seq,
+  reopenCheck: async (hiddenMs = 4000) => {
+    const heatBefore = document.querySelector('#heat')?.dataset.state;
+    emit('visibility', false);
+    hiddenDoc(true);
+    await sleep(hiddenMs);
+    emit('visibility', true);
+    const target = seq;
+    const t0 = performance.now();
+    let ms = null;
+    while (performance.now() - t0 < 3000 && ms == null) {
+      if (+document.body.dataset.seq >= target && document.querySelector('#status').classList.contains('live')) ms = Math.round(performance.now() - t0);
+      else await sleep(25);
+    }
+    await sleep(1200);
+    return { heatBefore, heatAfter: document.querySelector('#heat')?.dataset.state, liveAfterMs: ms, ok: ms != null && ms <= 1000 && +document.body.dataset.seq > target };
+  },
   down: () => ((down = true), emit('link-down', 'Daemon nicht erreichbar (Demo)')),
   up: () => (down = false),
   emit,

@@ -19,7 +19,7 @@ CFG = {
     "log_dir": os.path.join(LOCAL, "daisyloop", "steprun"),
     "abort_exe": [os.path.join(HERE, "..", "tools", "d5_probe", "target", "release", "d5_abort.exe"), r"C:\clones\daisyloop\tools\d5_probe\target\release\d5_abort.exe"],
     "abort_timeout_s": 150,
-    "pipe": {"name": r"\\.\pipe\daisyloop", "version": 3, "timeout_s": 8.0, "busy_retries": 5},
+    "pipe": {"name": r"\\.\pipe\daisyloop", "version": 5, "timeout_s": 8.0, "busy_retries": 5},
     "channels": {
         "water": ["d5next/water/temp"],
         "fan_rpm": ["d5next/fan/rpm"],
@@ -772,8 +772,8 @@ class Session:
                 c = st.control(self.cfg["controls"][part["kind"]])
                 if c is not None and not c["allowed"]:
                     out.append(f"writes not allowed for {c['id']}")
-                if c is not None and c["mode"] == "active":
-                    out.append(f"{c['id']} is in active mode")
+                if c is not None and c["mode"] == "model":
+                    out.append(f"{c['id']} is in model mode")
         if stage in ("duty", "fan", "pump", "heat", "rehearse"):
             cpu, gpu = self.tele.value("cpu_power", 10), self.tele.value("gpu_power", 10)
             foreign = None if cpu is None or gpu is None else cpu + gpu - self.load.own_watts()

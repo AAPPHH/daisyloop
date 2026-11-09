@@ -314,8 +314,8 @@ impl Model for Corrected<'_> {
     fn identified(&self) -> (bool, bool) {
         self.inner.identified()
     }
-    fn warm_secs(&self) -> i64 {
-        self.inner.warm_secs()
+    fn ready(&self) -> bool {
+        self.inner.ready()
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout_s: u32, horizon_s: u32) -> Result<Forecast, String> {
         let f = self.inner.forecast(hold, rollout_s, horizon_s)?;

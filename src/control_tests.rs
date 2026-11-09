@@ -101,8 +101,8 @@ impl Model for Fake {
     fn identified(&self) -> (bool, bool) {
         self.ident
     }
-    fn warm_secs(&self) -> i64 {
-        self.warm.get()
+    fn ready(&self) -> bool {
+        self.warm.get() > 0
     }
     fn forecast(&self, hold: &HashMap<String, f64>, _: u32, _: u32) -> Result<crate::model::Forecast, String> {
         if self.fail.get() {
@@ -149,6 +149,10 @@ fn base_cfg(tweak: impl Fn(&mut Config)) -> Config {
     let mut cfg = Config { writes_enabled: true, data_dir: dir, ..Config::default() };
     cfg.control.decision_secs = 30.0;
     cfg.control.plan_secs = 30.0;
+    (cfg.control.target_min, cfg.control.target_max) = (30.0, 44.0);
+    cfg.control.water_target = Some(43.5);
+    cfg.control.fan_start_water = Some(35.0);
+    cfg.control.fan_stop_water = Some(33.0);
     tweak(&mut cfg);
     cfg
 }
@@ -165,6 +169,14 @@ impl Rig {
         if !owned.is_empty() {
             Ownership::new(cfg.state_dir()).store(owned).unwrap();
         }
+        Rig::build(cfg, sim, ident, heat)
+    }
+    fn reborn(&self, ident: (bool, bool), tweak: impl Fn(&mut Config)) -> Rig {
+        let mut cfg = base_cfg(tweak);
+        cfg.data_dir = self.dir.clone();
+        Rig::build(cfg, self.sim.clone(), ident, 3.0)
+    }
+    fn build(cfg: Config, sim: Sim, ident: (bool, bool), heat: f64) -> Rig {
         let s = sim.clone();
         let factory: Factory = Box::new(move || {
             s.0.borrow_mut().opens += 1;
@@ -211,7 +223,12 @@ impl Rig {
         }
     }
     fn active(&mut self, id: &str) {
-        self.c.set_mode(id, Mode::Active, true, self.now).unwrap();
+        self.c.set_mode(id, Mode::Model, true, self.now).unwrap();
+    }
+    fn once(&mut self, id: &str) {
+        self.active(id);
+        let i = self.c.ix(id).unwrap();
+        self.c.chans[i].chosen = Mode::Pid;
     }
     fn status(&self) -> Status {
         self.c.status(self.now)
@@ -244,7 +261,7 @@ fn channel_config_defaults_are_per_channel_and_invalid_values_are_rejected() {
     let pump = ChannelConfig::resolve(ControlKind::Pump, &cfg.pump).unwrap();
     assert_eq!((pump.floor_duty, pump.alarm_rpm), (15.0, 1800.0));
     assert!(cfg.validate().is_ok() && ControlConfig::default().validate().is_ok());
-    for bad in ["[fan]\nfloor_duty = 90.0\nmax_duty = 50.0", "[pump]\nstep_down_rpm = -1.0", "[fan]\ncurve = [[0.0, 5.0]]", "decision_secs = 1.0", "weight = 2.0", "[step_test]\nfan = [[100.0, 5.0]]", "[step_test]\npump = [[10.0, 60.0]]"] {
+    for bad in ["[fan]\nfloor_duty = 90.0\nmax_duty = 50.0", "[pump]\nstep_down_rpm = -1.0", "[fan]\ncurve = [[0.0, 5.0]]", "decision_secs = 1.0", "target_max = 46.0", "target_min = 40.0", "water_target = 50.0", "start_offset = 3.0", "fan_stop_water = 36.0\nfan_start_water = 35.0", "[step_test]\nfan = [[100.0, 5.0]]", "[step_test]\npump = [[10.0, 60.0]]"] {
         let c: ControlConfig = toml::from_str(bad).unwrap();
         assert!(c.validate().is_err(), "{bad}");
     }
@@ -322,51 +339,45 @@ fn shadow_is_the_default_and_writes_nothing() {
     rig.run(100);
     assert_eq!(rig.sim.sets(), 0);
     let st = rig.status();
-    assert!(st.controls.iter().all(|c| c.mode == Mode::Shadow && c.drive == Drive::Firmware && c.target_rpm.is_some()));
+    assert!(st.controls.iter().all(|c| c.mode == Mode::Pid && c.drive == Drive::Firmware && c.target_rpm.is_some()));
     let p = st.predicted.unwrap();
     assert!(p.water.is_some() && p.horizon_s == 120);
-    assert!(st.controls[0].note.as_deref().unwrap().contains("nur berechnet"));
+    assert!(st.controls[0].note.as_deref().unwrap().contains("nicht identifiziert"));
     let rows = rig.tick();
     assert!(rows.iter().any(|r| r.channel == "daisyloop/fan/target_rpm") && rows.iter().any(|r| r.channel == "daisyloop/plan/water"));
-}
-
-#[test]
-fn off_channel_has_no_target_and_is_held() {
-    let mut rig = Rig::new((true, true), 6.0, |_| {});
-    rig.c.set_mode("d5.pump", Mode::Off, false, 0).unwrap();
-    rig.run(40);
-    assert!(rig.ctl("d5.pump").target_rpm.is_none() && rig.ctl("d5.fan").target_rpm.is_some());
 }
 
 #[test]
 fn active_is_refused_with_a_reason() {
     let mut rig = Rig::new((false, false), 6.0, |_| {});
     rig.run(5);
-    assert!(rig.c.set_mode("d5.fan", Mode::Active, true, rig.now).unwrap_err().contains("nicht identifiziert"));
+    assert!(rig.c.set_mode("d5.fan", Mode::Model, true, rig.now).unwrap_err().contains("nicht identifiziert"));
     let mut off = Rig::new((true, true), 6.0, |c| c.writes_enabled = false);
     off.run(5);
-    assert!(off.c.set_mode("d5.fan", Mode::Active, true, off.now).unwrap_err().contains("writes_enabled"));
+    assert!(off.c.set_mode("d5.fan", Mode::Model, true, off.now).unwrap_err().contains("writes_enabled"));
     let mut ok = Rig::new((true, true), 6.0, |_| {});
     ok.run(5);
-    assert!(ok.c.set_mode("d5.pump", Mode::Active, false, ok.now).unwrap_err().contains("Bestätigung"));
-    assert!(ok.c.set_mode("d5.nope", Mode::Active, true, ok.now).is_err());
+    assert!(ok.c.set_mode("d5.pump", Mode::Model, false, ok.now).unwrap_err().contains("Bestätigung"));
+    assert!(ok.c.set_mode("d5.nope", Mode::Model, true, ok.now).is_err());
     ok.gpu = None;
     ok.run(12);
-    assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).is_ok());
-    ok.c.set_mode("d5.fan", Mode::Shadow, true, ok.now).unwrap();
+    assert!(ok.c.set_mode("d5.fan", Mode::Model, true, ok.now).is_ok());
+    ok.c.set_mode("d5.fan", Mode::Pid, true, ok.now).unwrap();
     ok.water = f64::NAN;
     ok.run(12);
-    assert!(ok.c.set_mode("d5.fan", Mode::Active, true, ok.now).unwrap_err().contains("Wasser"));
+    assert!(ok.c.set_mode("d5.fan", Mode::Model, true, ok.now).unwrap_err().contains("Wasser"));
     assert_eq!(ok.sim.sets(), 0);
     let mut cold = Rig::new((true, true), 6.0, |_| {});
-    cold.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(60)), heat: Rc::new(Cell::new(6.0)), fail: Rc::new(Cell::new(false)) }));
+    cold.c.model = Some(Box::new(Fake { ident: (true, true), warm: Rc::new(Cell::new(0)), heat: Rc::new(Cell::new(6.0)), fail: Rc::new(Cell::new(false)) }));
     cold.run(5);
-    assert!(cold.c.set_mode("d5.fan", Mode::Active, true, cold.now).unwrap_err().contains("wärmt"));
+    assert!(cold.c.set_mode("d5.fan", Mode::Model, true, cold.now).is_ok());
+    let c = cold.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Model && c.note.unwrap().contains("Keine Verlaufsdaten"));
     let mut none = Rig::new((true, true), 6.0, |_| {});
     none.c.model = None;
     none.c.model_error = Some("missing".into());
     none.run(5);
-    assert!(none.c.set_mode("d5.fan", Mode::Active, true, none.now).unwrap_err().contains("missing"));
+    assert!(none.c.set_mode("d5.fan", Mode::Model, true, none.now).unwrap_err().contains("missing"));
 }
 
 #[test]
@@ -429,23 +440,76 @@ fn infeasible_plan_takes_maximum() {
 }
 
 #[test]
-fn weight_shifts_the_limits_toward_cooling() {
-    let mut cool = Rig::new((true, true), 15.5, |c| c.control.weight = 1.0);
-    let mut quiet = Rig::new((true, true), 15.5, |c| c.control.weight = 0.0);
+fn a_higher_water_target_lets_the_planner_choose_less_cooling_and_the_range_clamps() {
+    let mut cool = Rig::new((true, true), 15.5, |c| c.control.water_target = Some(41.0));
+    let mut quiet = Rig::new((true, true), 15.5, |c| c.control.water_target = Some(44.0));
     cool.water = 30.0;
     quiet.water = 30.0;
     cool.run(35);
     quiet.run(35);
     let (a, b) = (cool.ctl("d5.fan").target_rpm.unwrap() + cool.ctl("d5.pump").target_rpm.unwrap(), quiet.ctl("d5.fan").target_rpm.unwrap() + quiet.ctl("d5.pump").target_rpm.unwrap());
     assert!(a > b, "{a} {b}");
-    assert!(cool.c.set_weight(1.5).is_err() && cool.c.set_weight(0.2).is_ok());
+    assert!(cool.c.set_target(f64::NAN).is_err() && cool.c.set_target(f64::INFINITY).is_err());
+    assert!(cool.c.set_target(80.0).is_ok() && cool.c.cfg.target == 44.0 && cool.status().target == 44.0);
+    assert!(cool.c.set_target(-5.0).is_ok() && cool.c.cfg.target == 30.0);
+    assert!(cool.c.set_target(35.5).is_ok() && cool.status().target == 35.5 && (cool.status().target_min, cool.status().target_max) == (30.0, 44.0));
+}
+
+#[test]
+fn the_water_target_survives_a_restart_and_a_corrupt_file_falls_back_to_the_admin_default() {
+    let mut rig = Rig::new((false, false), 3.0, |c| (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(34.0), None, None));
+    assert_eq!(rig.c.cfg.target, 34.0);
+    rig.c.set_target(37.5).unwrap();
+    assert_eq!(rig.c.cfg.target, 37.5);
+    let next = rig.reborn((false, false), |c| (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(34.0), None, None));
+    assert_eq!(next.c.cfg.target, 37.5);
+    std::fs::write(next.dir.join("target.json"), r#"{"celsius":99.0}"#).unwrap();
+    let clamped = rig.reborn((false, false), |c| (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(34.0), None, None));
+    assert_eq!(clamped.c.cfg.target, 44.0);
+    std::fs::write(rig.dir.join("target.json"), "{ not json").unwrap();
+    let broken = rig.reborn((false, false), |c| (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(34.0), None, None));
+    assert_eq!(broken.c.cfg.target, 34.0);
+    std::fs::write(rig.dir.join("target.json"), r#"{"celsius":null}"#).unwrap();
+    assert_eq!(rig.reborn((false, false), |c| (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(34.0), None, None)).c.cfg.target, 34.0);
+    let _ = std::fs::remove_file(rig.dir.join("target.json"));
+    assert_eq!(rig.reborn((false, false), |c| (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(34.0), None, None)).c.cfg.target, 34.0);
+}
+
+#[test]
+fn the_old_keys_are_accepted_and_derive_the_default_target() {
+    let cc: ControlConfig = toml::from_str("water_plan_limit = 34.5\nweight_span_k = 1.0\nweight = 0.5\nfan_start_water = 33.0\nfan_stop_water = 31.5\n").unwrap();
+    assert!(cc.validate().is_ok() && (cc.default_target() - 34.0).abs() < 1e-9 && cc.legacy_keys().len() == 3);
+    let rig = Rig::new((false, false), 3.0, |c| c.control = cc.clone());
+    assert_eq!(rig.c.cfg.target, 34.0);
+    assert_eq!((rig.c.cfg.target, rig.c.cfg.fan_start(), rig.c.cfg.fan_stop()), (34.0, 33.0, 31.5));
+    let explicit: ControlConfig = toml::from_str("water_target = 38.0\nwater_plan_limit = 34.5\n").unwrap();
+    assert_eq!(explicit.default_target(), 38.0);
+}
+
+#[test]
+fn the_fan_hysteresis_follows_every_allowed_target() {
+    let mut cc = ControlConfig::default();
+    assert!(cc.validate().is_ok());
+    for t in [30.0, 32.0, 34.0, 38.0, 44.0] {
+        cc.target = t;
+        assert_eq!((cc.fan_start(), cc.fan_stop()), (t - 1.0, t - 2.5));
+        assert!(cc.fan_stop() < cc.fan_start() && cc.fan_start() < t && t + ControlConfig::TARGET_HEADROOM_K <= cc.water_limit);
+    }
+    let owner: ControlConfig = toml::from_str("fan_start_water = 33.0\nfan_stop_water = 31.5\n").unwrap();
+    assert!(owner.validate().is_ok());
+    for t in [30.0, 31.0, 33.0, 34.0, 44.0] {
+        let c = ControlConfig { target: t, ..owner.clone() };
+        assert!(c.fan_stop() < c.fan_start() && c.fan_start() < t, "{t}");
+    }
+    let hi = ControlConfig { water_limit: 38.0, ..ControlConfig::default() };
+    assert!(hi.validate().is_err());
 }
 
 #[test]
 fn stale_sensor_falls_back_to_the_firmware_pid_and_latches() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(5);
-    rig.active("d5.fan");
+    rig.once("d5.fan");
     rig.run(60);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
     rig.water = f64::NAN;
@@ -454,11 +518,11 @@ fn stale_sensor_falls_back_to_the_firmware_pid_and_latches() {
     rig.run(4);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
     let c = rig.ctl("d5.fan");
-    assert!(c.mode == Mode::Shadow && c.drive == Drive::Firmware && c.fallback.as_deref().unwrap().contains("veraltet"));
+    assert!(c.mode == Mode::Pid && c.drive == Drive::Firmware && c.fallback.as_deref().unwrap().contains("veraltet"));
     assert!(rig.alarm(AlarmKind::Stale) && rig.alarm(AlarmKind::Fallback));
     rig.water = 30.0;
     rig.run(120);
-    assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Pid);
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
 }
 
@@ -519,14 +583,14 @@ fn only_water_above_the_takeover_releases_and_the_top_limit_is_a_display_alarm()
     rig.run(2);
     assert!(rig.alarm(AlarmKind::WaterTop));
     let l = &rig.status().limits[0];
-    assert_eq!((l.plan, l.high, l.top), (Some(46.0), Some(48.0), Some(50.0)));
+    assert_eq!((l.plan, l.high, l.top), (Some(43.5), Some(48.0), Some(50.0)));
 }
 
 #[test]
 fn rpm_that_does_not_follow_the_command_is_a_fault() {
     let mut rig = Rig::new((true, true), 3.0, |c| c.control.fan.down_step_duty = Some(0.0));
     rig.run(5);
-    rig.active("d5.fan");
+    rig.once("d5.fan");
     rig.run(35);
     rig.sim.0.borrow_mut().freeze_rpm = true;
     rig.run(20);
@@ -576,7 +640,7 @@ fn write_failure_falls_back_instead_of_retrying_the_duty() {
     rig.sim.0.borrow_mut().corrupt_readback = false;
     rig.run(5);
     let c = rig.ctl("d5.fan");
-    assert!(c.mode == Mode::Shadow && c.fallback.unwrap().contains("Schreibfehler"));
+    assert!(c.mode == Mode::Pid && c.fallback.unwrap().contains("Schreibfehler"));
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
 }
 
@@ -601,7 +665,7 @@ fn shutdown_and_mode_changes_release_to_the_firmware_pid() {
     rig.active("d5.fan");
     rig.run(40);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    rig.c.set_mode("d5.fan", Mode::Off, false, rig.now).unwrap();
+    rig.c.set_mode("d5.fan", Mode::Pid, false, rig.now).unwrap();
     assert_eq!(rig.sim.mode(Spec::FAN), 1);
     rig.active("d5.fan");
     rig.run(35);
@@ -614,14 +678,14 @@ fn shutdown_and_mode_changes_release_to_the_firmware_pid() {
 fn autostart_is_off_by_default_and_waits_for_identification() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(100);
-    assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Pid);
     let mut auto = Rig::new((true, true), 3.0, |c| c.control.fan.autostart_active = Some(true));
     auto.run(100);
-    assert_eq!(auto.ctl("d5.fan").mode, Mode::Active);
-    assert_eq!(auto.ctl("d5.pump").mode, Mode::Shadow);
+    assert_eq!(auto.ctl("d5.fan").mode, Mode::Model);
+    assert_eq!(auto.ctl("d5.pump").mode, Mode::Pid);
     let mut unident = Rig::new((false, false), 3.0, |c| c.control.fan.autostart_active = Some(true));
     unident.run(400);
-    assert_eq!((unident.ctl("d5.fan").mode, unident.sim.sets()), (Mode::Shadow, 0));
+    assert_eq!((unident.ctl("d5.fan").mode, unident.sim.sets()), (Mode::Pid, 0));
 }
 
 #[test]
@@ -629,9 +693,9 @@ fn pacing_survives_mode_toggles() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(35);
     for _ in 0..30 {
-        rig.c.set_mode("d5.fan", Mode::Active, true, rig.now).ok();
+        rig.c.set_mode("d5.fan", Mode::Model, true, rig.now).ok();
         rig.tick();
-        rig.c.set_mode("d5.fan", Mode::Shadow, false, rig.now).ok();
+        rig.c.set_mode("d5.fan", Mode::Pid, false, rig.now).ok();
         rig.tick();
     }
     assert!(rig.sim.duty_sets().len() <= 2, "{}", rig.sim.duty_sets().len());
@@ -652,7 +716,7 @@ fn step_test_needs_confirmation_runs_the_schedule_and_releases() {
     assert!(rows.iter().any(|r| r.channel == "daisyloop/step/phase" && r.value == 1.0));
     assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.preset(Spec::FAN)), (0, 10000));
     assert_eq!(rig.status().step.unwrap().phases, 3);
-    assert!(rig.c.set_mode("d5.fan", Mode::Active, true, rig.now).is_err());
+    assert!(rig.c.set_mode("d5.fan", Mode::Model, true, rig.now).is_err());
     rig.run(30);
     assert_eq!(rig.sim.preset(Spec::FAN), 6000);
     rig.run(30);
@@ -719,3 +783,155 @@ mod fan_stop;
 
 #[path = "bound_tests.rs"]
 mod bound;
+
+#[test]
+fn the_chosen_mode_survives_a_restart_and_comes_back_without_a_command() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    assert_eq!((rig.ctl("d5.fan").mode, rig.sim.mode(Spec::FAN)), (Mode::Model, 0));
+    rig.c.shutdown(rig.now);
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    let mut next = rig.reborn((true, true), |_| {});
+    let c = next.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Model);
+    assert_eq!(next.ctl("d5.pump").chosen, Mode::Pid);
+    next.run(40);
+    assert_eq!((next.ctl("d5.fan").mode, next.sim.mode(Spec::FAN)), (Mode::Model, 0));
+    assert_eq!(next.ctl("d5.pump").mode, Mode::Pid);
+    next.c.set_mode("d5.fan", Mode::Pid, false, next.now).unwrap();
+    let mut last = next.reborn((true, true), |_| {});
+    last.run(60);
+    assert!(last.ctl("d5.fan").mode == Mode::Pid && last.ctl("d5.fan").chosen == Mode::Pid);
+}
+
+#[test]
+fn a_stored_model_choice_waits_while_writes_are_off_and_returns_when_they_are_on() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    let mut off = rig.reborn((true, true), |c| c.writes_enabled = false);
+    off.run(60);
+    let c = off.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Model && c.note.unwrap().contains("deaktiviert"));
+    assert_eq!(off.sim.sets(), 0);
+    let mut on = off.reborn((true, true), |_| {});
+    on.run(40);
+    assert_eq!(on.ctl("d5.fan").mode, Mode::Model);
+}
+
+#[test]
+fn a_tripped_channel_returns_to_the_stored_model_choice_after_its_cooldown_and_never_waits_for_a_warm_up() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(60);
+    rig.water = f64::NAN;
+    rig.run(13);
+    let c = rig.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Model && c.fallback.is_some() && rig.sim.mode(Spec::FAN) == 1);
+    rig.water = 30.0;
+    rig.run(3);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Pid);
+    rig.run(60);
+    let c = rig.ctl("d5.fan");
+    assert!(c.mode == Mode::Model && c.fallback.is_none());
+    rig.run(40);
+    assert_eq!(rig.sim.mode(Spec::FAN), 0);
+}
+
+#[test]
+fn after_water_at_the_takeover_limit_the_model_choice_waits_for_the_plan_limit() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(40);
+    rig.water = 48.5;
+    rig.run(3);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Pid);
+    rig.water = 47.0;
+    rig.run(200);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Pid);
+    rig.water = 35.0;
+    rig.run(120);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Model);
+}
+
+#[test]
+fn a_channel_fault_stays_on_the_pid_until_the_owner_selects_the_model_again() {
+    let mut rig = Rig::new((true, true), 3.0, |c| c.control.fan.down_step_duty = Some(0.0));
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.run(35);
+    rig.sim.0.borrow_mut().freeze_rpm = true;
+    rig.run(200);
+    rig.sim.0.borrow_mut().freeze_rpm = false;
+    for k in 0..30 {
+        rig.water = 30.0 + (k % 2) as f64;
+        rig.run(100);
+    }
+    rig.water = 30.0;
+    let c = rig.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Model && c.fallback.unwrap().contains("folgt") && c.note.unwrap().contains("erneut gewählt"));
+    assert_eq!(rig.sim.mode(Spec::FAN), 1);
+    rig.active("d5.fan");
+    rig.run(40);
+    assert_eq!((rig.ctl("d5.fan").mode, rig.sim.mode(Spec::FAN)), (Mode::Model, 0));
+}
+
+#[test]
+fn a_write_fault_stays_on_the_pid_until_the_owner_selects_the_model_again() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.fan");
+    rig.sim.0.borrow_mut().corrupt_readback = true;
+    rig.run(35);
+    rig.sim.0.borrow_mut().corrupt_readback = false;
+    for k in 0..30 {
+        rig.water = 30.0 + (k % 2) as f64;
+        rig.run(100);
+    }
+    rig.water = 30.0;
+    let c = rig.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Model && c.fallback.unwrap().contains("Schreibfehler"));
+    rig.active("d5.fan");
+    rig.run(40);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Model);
+}
+
+#[test]
+fn the_pump_returns_only_from_a_choice_stored_with_confirmation() {
+    let mut rig = Rig::new((true, true), 3.0, |_| {});
+    rig.run(5);
+    rig.active("d5.pump");
+    let mut next = rig.reborn((true, true), |_| {});
+    next.run(60);
+    assert_eq!(next.ctl("d5.pump").mode, Mode::Model);
+    let hand: HashMap<String, Saved> = [("pump".to_string(), Saved { mode: Mode::Model, confirmed: false })].into();
+    ModeStore::new(next.dir.clone()).store(&hand).unwrap();
+    let mut edited = next.reborn((true, true), |_| {});
+    edited.run(60);
+    let p = edited.ctl("d5.pump");
+    assert!(p.mode == Mode::Pid && p.chosen == Mode::Model && p.note.unwrap().contains("Bestätigung"));
+    std::fs::write(next.dir.join("modes.json"), r#"{"pump":"model"}"#).unwrap();
+    let mut plain = next.reborn((true, true), |_| {});
+    plain.run(60);
+    assert_eq!(plain.ctl("d5.pump").mode, Mode::Pid);
+}
+
+#[test]
+fn an_unparsable_mode_file_starts_on_the_pid_even_with_autostart() {
+    let mut rig = Rig::new((true, true), 3.0, |c| c.control.fan.autostart_active = Some(true));
+    rig.run(5);
+    rig.c.shutdown(rig.now);
+    std::fs::create_dir_all(&rig.dir).unwrap();
+    std::fs::write(rig.dir.join("modes.json"), "{ not json").unwrap();
+    let mut next = rig.reborn((true, true), |c| c.control.fan.autostart_active = Some(true));
+    next.run(60);
+    let c = next.ctl("d5.fan");
+    assert!(c.mode == Mode::Pid && c.chosen == Mode::Pid);
+    let _ = std::fs::remove_file(rig.dir.join("modes.json"));
+    let missing = rig.reborn((true, true), |c| c.control.fan.autostart_active = Some(true));
+    assert_eq!(missing.ctl("d5.fan").chosen, Mode::Model);
+}

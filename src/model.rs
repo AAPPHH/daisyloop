@@ -26,13 +26,18 @@ pub struct Live {
 pub trait Model {
     fn observe(&mut self, row: &HashMap<String, f64>, epoch: i64);
     fn identified(&self) -> (bool, bool);
-    fn warm_secs(&self) -> i64;
+    fn ready(&self) -> bool {
+        true
+    }
     fn seed(&mut self, _history: &[(i64, HashMap<String, f64>)], _now: i64, _max_gap: i64) -> usize {
         0
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout_s: u32, horizon_s: u32) -> Result<Forecast, String>;
     fn live(&self) -> Vec<Live> {
         Vec::new()
+    }
+    fn since_reset(&self) -> i64 {
+        i64::MAX
     }
     fn inputs(&self) -> Vec<String> {
         Vec::new()
@@ -63,7 +68,7 @@ pub struct XgbModel {
 
 impl XgbModel {
     fn advance(&mut self, raw: Vec<f64>, epoch: i64) {
-        if self.epoch != 0 && epoch - self.epoch > Self::FILL_SECS {
+        if self.epoch != 0 && epoch - self.epoch > self.bridge.max(Self::FILL_SECS) {
             self.p = self.fresh.clone();
             self.since = 0;
             self.fill = vec![f64::NAN; raw.len()];
@@ -80,9 +85,17 @@ impl XgbModel {
 
     pub const KEY_CHANNEL: &'static str = "d5next/water/temp";
     pub const FILL_SECS: i64 = 10;
+    pub const SETTLE_SECS: i64 = 1800;
+    pub const BRIDGE_SECS: i64 = 900;
+
+    #[cfg(test)]
+    pub fn history_secs(&self) -> i64 {
+        self.since
+    }
 
     pub fn from_text(spec: &str, model: &str) -> Result<XgbModel, String> {
-        let p = Predictor::load(spec, model)?;
+        let mut p = Predictor::load(spec, model)?;
+        p.set_eager(true);
         let channels: Vec<String> = p.engine.raw_channels.to_vec();
         if !channels.iter().any(|c| c == Self::KEY_CHANNEL) {
             return Err("feature spec has no water channel".into());
@@ -91,7 +104,7 @@ impl XgbModel {
         let inputs = p.weighted_channels("water_");
         let fallback_inputs = if p.model.has_fallback() { p.fallback_channels("water_") } else { inputs.clone() };
         let digest = spec.bytes().chain([0u8]).chain(model.bytes()).fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: 0, inputs, fallback_inputs, digest })
+        Ok(XgbModel { fresh: p.clone(), p, last: vec![f64::NAN; n], fill: vec![f64::NAN; n], fill_at: vec![0; n], x: vec![], channels, epoch: 0, since: 0, bridge: Self::BRIDGE_SECS, inputs, fallback_inputs, digest })
     }
 
     pub fn load(dirs: &[PathBuf], spec: &str, file: &str) -> Result<XgbModel, String> {
@@ -147,7 +160,7 @@ impl XgbModel {
 impl Model for XgbModel {
     fn observe(&mut self, row: &HashMap<String, f64>, epoch: i64) {
         let raw: Vec<f64> = self.channels.iter().map(|c| row.get(c).copied().filter(|v| v.is_finite()).unwrap_or(f64::NAN)).collect();
-        let bridge = std::mem::take(&mut self.bridge);
+        let bridge = self.bridge;
         let gap = epoch - self.epoch;
         if self.epoch != 0 && gap > 1 && gap <= bridge {
             let from = self.last.clone();
@@ -164,8 +177,8 @@ impl Model for XgbModel {
         (self.p.model.identified.fan, self.p.model.identified.pump)
     }
 
-    fn warm_secs(&self) -> i64 {
-        if !self.x.is_empty() && self.x.iter().all(|v| v.is_finite()) { self.since } else { 0 }
+    fn ready(&self) -> bool {
+        self.epoch != 0 && self.p.model.predict_parts(&self.x).iter().any(|(n, v, t)| n.starts_with("water_") && v.is_finite() && t.is_finite())
     }
 
     fn seed(&mut self, history: &[(i64, HashMap<String, f64>)], now: i64, max_gap: i64) -> usize {
@@ -176,7 +189,7 @@ impl Model for XgbModel {
         for (epoch, row) in history {
             self.observe(row, *epoch);
         }
-        self.bridge = max_gap;
+        self.bridge = max_gap.max(Self::FILL_SECS);
         self.since as usize
     }
 
@@ -200,8 +213,11 @@ impl Model for XgbModel {
         out.iter().find(|(n, ..)| *n == name).filter(|(_, v, t)| v.is_finite() && t.is_finite()).map(|(_, v, t)| Forecast { water: *v, response: -*t }).ok_or_else(|| format!("model has no finite target {name}"))
     }
 
+    fn since_reset(&self) -> i64 {
+        self.since
+    }
     fn live(&self) -> Vec<Live> {
-        if self.warm_secs() == 0 {
+        if self.epoch == 0 {
             return Vec::new();
         }
         self.p.model.predict_parts(&self.x).into_iter().filter_map(|(n, v, t)| Some(Live { h: n.strip_prefix("water_")?.parse().ok()?, pred: v, response: -t })).filter(|l| l.pred.is_finite() && l.response.is_finite()).collect()
@@ -307,10 +323,6 @@ pub struct Planner<'a> {
 }
 
 impl Planner<'_> {
-    pub fn limit(cfg: &ControlConfig, weight: f64) -> f64 {
-        cfg.water_plan_limit - weight.clamp(0.0, 1.0) * cfg.weight_span_k
-    }
-
     fn noise(&self, fan: &Axis, pump: &Axis, f: f64, p: f64) -> f64 {
         let n = |a: &Axis, r: f64| (r / a.rpm_range().1.max(1.0)).powi(3);
         n(fan, f) + self.cfg.pump_noise * n(pump, p)
@@ -320,8 +332,8 @@ impl Planner<'_> {
         plan.water.is_some_and(|t| t <= plan.limit - margin)
     }
 
-    pub fn plan(&self, model: &dyn Model, fan: &Axis, pump: &Axis, now: &Temps, weight: f64, prev: Option<(f64, f64)>) -> Result<Plan, String> {
-        let limit = Self::limit(self.cfg, weight);
+    pub fn plan(&self, model: &dyn Model, fan: &Axis, pump: &Axis, now: &Temps, prev: Option<(f64, f64)>) -> Result<Plan, String> {
+        let limit = self.cfg.target;
         let eval = |f: f64, p: f64| -> Result<Plan, String> {
             let mut hold = HashMap::new();
             fan.hold(f, &mut hold);
@@ -435,7 +447,7 @@ mod tests {
         let m = real();
         assert_eq!(m.identified(), (true, true));
         assert!(m.inputs().len() >= 6 && m.inputs().iter().any(|c| c == "nvml/0/power") && m.digest() != 0);
-        assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
+        assert!(m.history_secs() > 1800, "{}", m.history_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
         assert!(f.water.is_finite());
@@ -469,7 +481,7 @@ mod tests {
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
         let t0 = std::time::Instant::now();
-        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0) }, 0.5, None).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &Temps { water: Some(31.0) }, None).unwrap();
         assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
         assert!(plan.fan_rpm >= fan.rpm_range().0 && plan.fan_rpm <= fan.rpm_range().1 && plan.pump_rpm >= pump.rpm_range().0);
     }
@@ -487,7 +499,7 @@ mod tests {
         let runs = 10;
         let t0 = std::time::Instant::now();
         for _ in 0..runs {
-            Planner { cfg: &cfg }.plan(&m, &fan, &pump, &temps, 0.5, Some((1200.0, 3400.0))).unwrap();
+            Planner { cfg: &cfg }.plan(&m, &fan, &pump, &temps, Some((1200.0, 3400.0))).unwrap();
             m.forecast(&HashMap::new(), 0, cfg.horizon_secs).unwrap();
         }
         eprintln!("PLANCOST ms per run (plan plus direct forecast): {:.2}", t0.elapsed().as_secs_f64() * 1000.0 / runs as f64);
@@ -510,7 +522,7 @@ mod tests {
                 (rpm, m.forecast(&hold, cfg.rollout_secs, cfg.horizon_secs).unwrap().water)
             })
             .collect();
-        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0) }, 0.5, None).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(m, &fan, &pump, &Temps { water: Some(31.0) }, None).unwrap();
         assert!(plan.water.is_some_and(f64::is_finite));
         out
     }
@@ -548,7 +560,7 @@ mod tests {
     fn exported_step_model_is_identified_and_its_forecast_follows_the_fan_rpm() {
         let (m, water) = step_model_at_200_w();
         assert_eq!(m.identified(), (true, false));
-        assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
+        assert!(m.history_secs() > 1800, "{}", m.history_secs());
         let curve = fan_spread(&m);
         let old = fan_spread(&real());
         println!("step model {curve:?}
@@ -640,6 +652,23 @@ deployed   {old:?}");
     }
 
     #[test]
+    fn a_model_with_little_stored_history_is_ready_at_once_and_one_without_any_is_not() {
+        let g = Golden::load();
+        let mut none = g.model();
+        assert!(!none.ready() && none.live().is_empty() && none.forecast(&HashMap::new(), 0, 120).is_err());
+        for secs in [1usize, 40, 150, 700] {
+            let mut m = g.model();
+            let rows: Vec<(i64, HashMap<String, f64>)> = (0..secs).map(|k| (1000 + k as i64, g.row(3000 + k))).collect();
+            assert!(m.seed(&rows, 1000 + secs as i64 + 5, 300) > 0, "{secs}");
+            assert!(m.ready() && m.history_secs() < 1800, "{secs}");
+            assert!(m.forecast(&HashMap::new(), 0, 120).unwrap().water.is_finite(), "{secs}");
+            assert!(!m.live().is_empty(), "{secs}");
+        }
+        none.observe(&g.row(3000), 1000);
+        assert!(none.ready());
+    }
+
+    #[test]
     fn stale_history_and_a_running_model_are_not_seeded() {
         let g = Golden::load();
         let rows: Vec<(i64, HashMap<String, f64>)> = (0..100).map(|t| (1000 + t as i64, g.row(t))).collect();
@@ -669,7 +698,7 @@ mod cost {
         let mut ts: Vec<f64> = (0..reps)
             .map(|_| {
                 let t0 = std::time::Instant::now();
-                planner.plan(m, &fan, &pump, &temps, 0.5, Some((1200.0, 3400.0))).unwrap();
+                planner.plan(m, &fan, &pump, &temps, Some((1200.0, 3400.0))).unwrap();
                 t0.elapsed().as_secs_f64() * 1e3
             })
             .collect();
@@ -690,7 +719,7 @@ mod cost {
         let (gt, gl) = (Golden::load(), Golden::named("golden_linear.json"));
         for (name, g, m) in [("trees", &gt, gt.model()), ("linear", &gl, gl.linear())] {
             let m = warm(g, m);
-            assert!(m.warm_secs() > 0, "{name} not warm");
+            assert!(m.ready(), "{name} not ready");
             let (med, max) = plan_ms(&m, 40);
             let (roll, pred, obs) = m.parts(200);
             println!("COST {name}: plan median {med:.2} ms max {max:.2} ms; per forecast rollout {roll:.4} ms predict {pred:.4} ms; observe {obs:.4} ms; core share at 1 Hz {:.2} %, at 30 s {:.3} %", med / 10.0, med / 300.0);
@@ -702,7 +731,7 @@ mod cost {
         let g = Golden::named("golden_linear.json");
         let m = warm(&g, g.linear());
         assert_eq!(m.identified(), (false, false));
-        assert!(m.warm_secs() > 1800, "{}", m.warm_secs());
+        assert!(m.history_secs() > 1800, "{}", m.history_secs());
         let hold: HashMap<String, f64> = [("d5next/fan/rpm".to_string(), 800.0), ("d5next/fan/duty".to_string(), 50.0)].into();
         let f = m.forecast(&hold, 120, 120).unwrap();
         assert!(f.water.is_finite());

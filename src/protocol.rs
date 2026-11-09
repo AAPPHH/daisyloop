@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 5;
 pub const PIPE_NAME: &str = r"\\.\pipe\daisyloop";
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,10 +29,9 @@ pub enum ControlKind {
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    Off,
     #[default]
-    Shadow,
-    Active,
+    Pid = 1,
+    Model = 2,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -81,6 +80,7 @@ pub struct Control {
     pub rpm_channel: String,
     pub duty_channel: String,
     pub mode: Mode,
+    pub chosen: Mode,
     pub allowed: bool,
     pub identified: bool,
     pub drive: Drive,
@@ -121,8 +121,6 @@ pub struct Alarm {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ModelInfo {
     pub loaded: bool,
-    pub warm: bool,
-    pub warmup_left_s: u32,
     pub fan_identified: bool,
     pub pump_identified: bool,
     pub error: Option<String>,
@@ -168,7 +166,9 @@ pub struct StepStatus {
 pub struct Snapshot {
     pub ts_ms: i64,
     pub seq: u64,
-    pub weight: f64,
+    pub target: f64,
+    pub target_min: f64,
+    pub target_max: f64,
     pub model: ModelInfo,
     pub predicted: Option<Predicted>,
     pub step_test: Option<StepStatus>,
@@ -207,8 +207,8 @@ pub enum Command {
         #[serde(default)]
         confirmed: bool,
     },
-    SetWeight {
-        weight: f64,
+    SetWaterTarget {
+        celsius: f64,
     },
     StartStepTest {
         id: String,

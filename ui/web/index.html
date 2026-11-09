@@ -93,7 +93,7 @@
     <div class="block-head">
       <h2>Regelung</h2>
       <p>Das Modell berechnet je Kanal eine Drehzahl. Nur berechnet schreibt nichts, Aktiv setzt die Duty direkt.</p>
-      <label class="weight"><span>leise</span><input id="weight" type="range" min="0" max="1" step="0.05" aria-label="leise bis kühl"><span>kühl</span></label>
+      <div class="wt" role="group" aria-label="Wasser-Ziel"><span class="k">Wasser-Ziel</span><button id="wt-dn" aria-label="Wasser-Ziel senken">−</button><b id="wt-v">–</b><button id="wt-up" aria-label="Wasser-Ziel erhöhen">+</button><small id="wt-now"></small></div>
     </div>
     <div id="model-line" class="model-line"></div>
     <div id="ctl-list"></div>

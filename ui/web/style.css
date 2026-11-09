@@ -284,14 +284,14 @@ body.stale .cue span { animation: none; }
 .fc-grid small { display: block; font-size: 0.72rem; color: var(--faint); }
 .fc-modes { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.9rem; }
 .mode { font-size: 0.76rem; padding: 0.18rem 0.65rem; border-radius: 99px; background: rgba(255, 255, 255, 0.05); color: var(--dim); }
-.mode.shadow { box-shadow: inset 0 0 0 1px rgba(251, 212, 94, 0.35); color: var(--amber); }
-.mode.active { background: rgba(103, 212, 245, 0.14); color: var(--accent); }
+.mode.pid { box-shadow: inset 0 0 0 1px rgba(251, 212, 94, 0.35); color: var(--amber); }
+.mode.model { background: rgba(103, 212, 245, 0.14); color: var(--accent); }
 .mode.fb { background: rgba(255, 69, 58, 0.14); color: #ff8a82; }
 .node .age { display: none; font-size: 0.74rem; color: var(--amber); }
 .node.stale .age { display: block; }
 .node.stale .big, .node.stale .sub { color: var(--stale); }
 .node.stale .chip-node, .chip-node.stale { box-shadow: 0 0 0 1px rgba(251, 212, 94, 0.25); }
-.node.shadow .tgt::after { content: ' (nur berechnet)'; color: var(--amber); font-size: 0.82em; }
+.node.shadow .tgt::after { content: ' (Modell rechnet mit)'; color: var(--amber); font-size: 0.82em; }
 .node .tgt { color: var(--dim); }
 
 .alarm-bar { position: fixed; z-index: 55; left: 0; right: 0; top: 3.1rem; display: grid; gap: 1px; background: rgba(255, 69, 58, 0.3); }
@@ -302,9 +302,13 @@ body.stale .cue span { animation: none; }
 .alarm-bar .al.fallback { color: var(--amber); background: rgba(38, 28, 8, 0.96); }
 .toast { position: fixed; z-index: 70; left: 50%; bottom: 1.6rem; transform: translateX(-50%); max-width: min(46rem, 92vw); padding: 0.8rem 1.3rem; border-radius: 1rem; font-size: 0.92rem; background: rgba(46, 14, 14, 0.96); color: #ffb0a8; box-shadow: 0 0 0 1px rgba(255, 69, 58, 0.5), 0 18px 40px -10px rgba(0, 0, 0, 0.8); }
 
-.weight { margin-left: auto; display: inline-flex; align-items: center; gap: 0.8rem; color: var(--dim); font-size: 0.88rem; }
-.weight input { appearance: none; width: 12rem; height: 0.42rem; border-radius: 99px; background: linear-gradient(90deg, #4cc9f0, #5eead4 50%, #ff9a3c); outline: 0; }
-.weight input::-webkit-slider-thumb { appearance: none; width: 1.2rem; height: 1.2rem; border-radius: 50%; background: linear-gradient(180deg, #fff, #cfd6e2); box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6); cursor: grab; }
+.wt { margin-left: auto; display: inline-flex; align-items: center; gap: 0.7rem; color: var(--dim); font-size: 0.88rem; }
+.wt .k { font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 500; }
+.wt b { min-width: 5.2rem; text-align: center; font-size: 1.5rem; font-weight: 300; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; }
+.wt button { width: 2rem; height: 2rem; border-radius: 50%; background: var(--s3); color: var(--text); font-size: 1.2rem; line-height: 1; transition: background 0.2s, opacity 0.2s; }
+.wt button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+.wt button:disabled { opacity: 0.3; cursor: default; }
+.wt small { font-size: 0.82rem; color: var(--dim); font-weight: 450; }
 .model-line { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; margin: -0.6rem 0 1.2rem; font-size: 0.84rem; }
 .model-line .mi { padding: 0.2rem 0.7rem; border-radius: 99px; background: rgba(255, 255, 255, 0.045); color: var(--dim); }
 .model-line .mi.warn { color: var(--amber); background: rgba(251, 212, 94, 0.08); }
@@ -377,8 +381,7 @@ button.ghost:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); 
   .node.plain .big { font-size: 1.4rem; }
   .cue { display: none; }
   .block { padding: 3.5rem 1rem 0.5rem; }
-  .weight { margin-left: 0; }
-  .weight input { width: 9rem; }
+  .wt { margin-left: 0; flex-wrap: wrap; }
   .ch { padding: 1.1rem; }
   .ctl { grid-template-columns: 1fr; gap: 0.3rem; }
   .ctl .k { margin-top: 0.6rem; }

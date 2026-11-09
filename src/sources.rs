@@ -170,6 +170,8 @@ pub struct Lhm {
     latest: Arc<Mutex<Option<Latest>>>,
     spawned: Option<Instant>,
     stale: Duration,
+    grace: Duration,
+    slow_age: f64,
     log: PathBuf,
     failures: u32,
     backoff_until: Option<Instant>,
@@ -177,7 +179,7 @@ pub struct Lhm {
 
 impl Lhm {
     pub fn new(cfg: &Config) -> Lhm {
-        Lhm { exe: cfg.sidecar_exe(), child: None, latest: Arc::new(Mutex::new(None)), spawned: None, stale: Duration::from_secs(cfg.sidecar_stale_secs), log: cfg.data_dir.join("sidecar.log"), failures: 0, backoff_until: None }
+        Lhm { exe: cfg.sidecar_exe(), child: None, latest: Arc::new(Mutex::new(None)), spawned: None, stale: Duration::from_secs(cfg.sidecar_stale_secs), grace: Duration::from_secs(cfg.sidecar_start_grace_secs), slow_age: cfg.sidecar_slow_age_secs, log: cfg.data_dir.join("sidecar.log"), failures: 0, backoff_until: None }
     }
     fn kind(t: &str, unit: &str) -> &'static str {
         match t {
@@ -197,12 +199,15 @@ impl Lhm {
     fn clean(s: &str) -> String {
         s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string()
     }
-    pub fn parse(line: &str) -> Option<Vec<Row>> {
+    pub fn parse(line: &str, slow_age: f64) -> Option<Vec<Row>> {
         let json: Value = serde_json::from_str(line).ok()?;
         let rows = json["sensors"]
             .as_array()?
             .iter()
             .filter_map(|s| {
+                if s["age"].as_f64().is_some_and(|a| !(a <= slow_age)) {
+                    return None;
+                }
                 let unit = s["unit"].as_str().unwrap_or("");
                 let kind = Self::kind(s["type"].as_str()?, unit);
                 Some(Row::new("lhm", s["id"].as_str()?, Self::clean(&format!("{} {}", s["hw"].as_str()?, s["name"].as_str()?)), kind, unit, s["value"].as_f64()?))
@@ -218,11 +223,11 @@ impl Lhm {
         let mut child = Command::new(&self.exe).stdout(Stdio::piped()).stderr(stderr).stdin(Stdio::null()).creation_flags(0x0800_0000).spawn().map_err(|e| format!("{}: {e}", self.exe.display()))?;
         KillOnExit::assign(&child);
         let out = child.stdout.take().ok_or("no sidecar stdout")?;
-        let latest = self.latest.clone();
+        let (latest, slow_age) = (self.latest.clone(), self.slow_age);
         *latest.lock().unwrap() = None;
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if let Some(rows) = Self::parse(&line) {
+                if let Some(rows) = Self::parse(&line, slow_age) {
                     *latest.lock().unwrap() = Some(Latest { at: Instant::now(), rows });
                 }
             }
@@ -242,9 +247,13 @@ impl Lhm {
         if !matches!(child.try_wait(), Ok(None)) {
             return false;
         }
-        match self.latest.lock().unwrap().as_ref() {
-            Some(l) => l.at.elapsed() < self.stale,
-            None => self.spawned.is_some_and(|s| s.elapsed() < self.stale * 3),
+        let last = self.latest.lock().unwrap().as_ref().map(|l| l.at.elapsed());
+        Self::alive(last, self.spawned.map(|s| s.elapsed()), self.stale, self.grace)
+    }
+    fn alive(since_line: Option<Duration>, since_spawn: Option<Duration>, stale: Duration, grace: Duration) -> bool {
+        match since_line {
+            Some(a) => a < stale,
+            None => since_spawn.is_some_and(|s| s < grace),
         }
     }
 }
@@ -303,9 +312,57 @@ mod tests {
     #[test]
     fn sidecar_line() {
         let line = r#"{"seq":3,"sensors":[{"id":"/intelcpu/0/load/0","hw":"Intel Core","name":"CPU Total","type":"Load","unit":"%","value":43.5},{"id":"/x/temperature/0","hw":"H","name":"T","type":"Temperature","unit":"°C","value":40},{"id":"bad","hw":"H"}]}"#;
-        let rows = Lhm::parse(line).unwrap();
+        let rows = Lhm::parse(line, 15.0).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].channel.as_str(), rows[0].label.as_str(), rows[0].kind.as_str(), rows[0].role.as_str(), rows[0].value), ("/intelcpu/0/load/0", "Intel Core CPU Total", "load", "disturbance", 43.5));
         assert_eq!((rows[1].kind.as_str(), rows[1].role.as_str()), ("temperature", "state"));
+    }
+
+    #[test]
+    fn sidecar_age_is_optional_and_old_slow_sensors_are_dropped() {
+        let line = r#"{"seq":1,"sensors":[{"id":"/intelcpu/0/temperature/0","hw":"C","name":"T","type":"Temperature","unit":"°C","value":40},{"id":"/ssd/0/temperature/0","hw":"S","name":"T","type":"Temperature","unit":"°C","value":35,"age":9.5},{"id":"/nvme/1/temperature/0","hw":"N","name":"T","type":"Temperature","unit":"°C","value":36,"age":30.0}]}"#;
+        let ids: Vec<String> = Lhm::parse(line, 15.0).unwrap().into_iter().map(|r| r.channel).collect();
+        assert_eq!(ids, ["/intelcpu/0/temperature/0", "/ssd/0/temperature/0"]);
+        assert_eq!(Lhm::parse(line, 60.0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn startup_grace_is_independent_of_stale() {
+        let (stale, grace) = (Duration::from_secs(15), Duration::from_secs(60));
+        let s = |n| Some(Duration::from_secs(n));
+        assert!(Lhm::alive(None, s(50), stale, grace));
+        assert!(!Lhm::alive(None, s(61), stale, grace));
+        assert!(!Lhm::alive(None, None, stale, grace));
+        assert!(Lhm::alive(s(14), s(500), stale, grace));
+        assert!(!Lhm::alive(s(16), s(500), stale, grace));
+        assert!(!Lhm::alive(None, s(50), stale, Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn slow_first_line_and_slow_storage_do_not_cause_a_restart() {
+        let dir = std::env::temp_dir().join(format!("dl-fake-sidecar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cpu = r#"{"id":"/intelcpu/0/temperature/0","hw":"C","name":"T","type":"Temperature","unit":"°C","value":40}"#;
+        let ssd = r#"{"id":"/ssd/0/temperature/0","hw":"S","name":"T","type":"Temperature","unit":"°C","value":35,"age":0.0}"#;
+        let script = dir.join("fake.cmd");
+        std::fs::write(&script, format!("@echo off\r\nping -n 4 127.0.0.1 >nul\r\necho {{\"seq\":1,\"sensors\":[{cpu}]}}\r\nping -n 3 127.0.0.1 >nul\r\n:loop\r\necho {{\"seq\":2,\"sensors\":[{cpu},{ssd}]}}\r\nping -n 2 127.0.0.1 >nul\r\ngoto loop\r\n")).unwrap();
+        let cfg = Config { sidecar: Some(script), sidecar_stale_secs: 2, sidecar_start_grace_secs: 12, data_dir: dir.clone(), ..Config::default() };
+        let mut lhm = Lhm::new(&cfg);
+        let t0 = Instant::now();
+        assert!(lhm.poll().is_err());
+        let (mut cpu_at, mut ssd_at) = (None, None);
+        while t0.elapsed() < Duration::from_secs(9) {
+            if let Ok(sample) = lhm.poll() {
+                cpu_at = cpu_at.or(Some(t0.elapsed()));
+                if sample.rows.iter().any(|r| r.channel.starts_with("/ssd/")) {
+                    ssd_at = ssd_at.or(Some(t0.elapsed()));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        lhm.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(lhm.failures, 1, "sidecar was restarted during the grace window");
+        assert!(cpu_at.is_some_and(|t| t >= Duration::from_secs(2)) && ssd_at.is_some_and(|t| t > cpu_at.unwrap()), "{cpu_at:?} {ssd_at:?}");
     }
 }

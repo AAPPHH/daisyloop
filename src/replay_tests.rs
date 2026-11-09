@@ -82,10 +82,10 @@ fn replay(hysteresis: f64) -> (Stats, (f64, f64), (f64, f64)) {
             let (a, b, pr) = (cur.unwrap(), fut.unwrap(), p.water.unwrap());
             err = [(pr - b).powi(2), (a - b).powi(2)];
         }
-        if status.model.warm && scored && st.all.len() % 10 == 0 {
+        if t >= 1800 && scored && st.all.len() % 10 == 0 {
             st.timeline.push(format!("t {:>5} s  water {:.2}  fan target {:>5.0} (actual {:>5.0})  pump target {:>5.0}  predicted water +{h} s {:.2}  actual {:.2}  feasible {}", t, at(t, iw).unwrap(), f, at(t, ix("d5next/fan/rpm")).unwrap_or(f64::NAN), pu, p.water.unwrap(), at(t + h, iw).unwrap(), p.feasible));
         }
-        st.all.push(Dec { warm: status.model.warm, feasible: p.feasible, fan: f, pump: pu, err: scored.then_some(err) });
+        st.all.push(Dec { warm: t >= 1800, feasible: p.feasible, fan: f, pump: pu, err: scored.then_some(err) });
     }
     st.actuator_calls = sim.sets();
     let (fc, pc) = (&c.chans[0], &c.chans[1]);

@@ -115,7 +115,7 @@ export class Hero {
     set('fanDuty', fan ? value(fan.duty_channel) : null);
     set('pumpTarget', pump?.target_rpm ?? null);
     set('fanTarget', fan?.target_rpm ?? null);
-    for (const [id, c] of [['pump', pump], ['fan', fan]]) $('#n-' + id).classList.toggle('shadow', c?.mode === 'shadow');
+    for (const [id, c] of [['pump', pump], ['fan', fan]]) $('#n-' + id).classList.toggle('shadow', c?.mode === 'pid');
     this.m = { water: water ?? this.m.water, cpuP: v(KEYS.cpuPower) ?? this.m.cpuP, gpuP: v(KEYS.gpuPower) ?? this.m.gpuP, pumpRpm: rpm(pump) ?? 0, fanRpm: rpm(fan) ?? 0 };
     const root = document.documentElement.style;
     if (water != null) root.setProperty('--heat', heat(norm(Math.round(water * 2) / 2, WATER)));
@@ -158,14 +158,14 @@ export class Hero {
     el.classList.toggle('off', !p || !live);
     const m = S.snap?.model;
     $('#pred-title').textContent = p ? `Prognose in ${Math.round(p.horizon_s / 60)} min` : 'Prognose';
-    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : !m.warm ? `Modell wärmt auf (${Math.ceil(m.warmup_left_s / 60)} min)` : [p ? (p.feasible ? 'nur berechnet, innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewählt') : '', m.fan_identified && m.pump_identified ? '' : 'nicht identifiziert, nicht belastbar'].filter(Boolean).join(' · ');
+    $('#pred-tag').textContent = !m?.loaded ? 'Modell nicht geladen' : [p ? (p.feasible ? 'innerhalb der Grenzen' : 'Grenzen nicht haltbar, Maximum gewählt') : '', m.fan_identified && m.pump_identified ? '' : 'nicht identifiziert, nicht belastbar'].filter(Boolean).join(' · ');
     $('#pred-water').textContent = p?.water != null ? num(p.water, 1) + ' °C' : '–';
     $('#pred-water').classList.toggle('over', p?.water != null && p.water > p.water_limit);
-    $('#pred-water-lim').textContent = p ? `wirksame Planobergrenze ${num(p.water_limit, 1)}` : '';
+    $('#pred-water-lim').textContent = p ? `Ziel ${num(p.water_limit, 1)}` : '';
     const corr = p?.correction ?? [];
     const at = corr.find((c) => c.horizon_s === p?.horizon_s);
-    $('#pred-corr').textContent = !at ? '' : at.acting ? `Korrektur ${at.delta >= 0 ? '+' : ''}${num(at.delta, 2)} K (Versatz ${at.bias >= 0 ? '+' : ''}${num(at.bias, 2)}, Skala ${num(at.scale, 2)}, roh ${p.raw != null ? num(p.raw, 1) : '�'}) � ${corr.map((c) => `${c.horizon_s}s ${c.bias >= 0 ? '+' : ''}${num(c.bias, 2)}/${num(c.scale, 2)}`).join(' ')}` : `Korrektur lernt (${at.updates} Updates)`;
-    const modes = { off: 'Aus', shadow: 'nur berechnet', active: 'aktiv' };
+    $('#pred-corr').textContent = !at ? '' : at.acting ? `Korrektur ${at.delta >= 0 ? '+' : ''}${num(at.delta, 2)} K (Versatz ${at.bias >= 0 ? '+' : ''}${num(at.bias, 2)}, Skala ${num(at.scale, 2)}, roh ${p.raw != null ? num(p.raw, 1) : '–'}) � ${corr.map((c) => `${c.horizon_s}s ${c.bias >= 0 ? '+' : ''}${num(c.bias, 2)}/${num(c.scale, 2)}`).join(' ')}` : `Korrektur lernt (${at.updates} Updates)`;
+    const modes = { pid: 'PID', model: 'Modell' };
     $('#hero-modes').replaceChildren(...(S.snap?.controls ?? []).map((c) => h('span', { class: 'mode ' + c.mode + (c.fallback ? ' fb' : '') }, `${c.kind === 'pump' ? 'Pumpe' : 'Lüfter'} ${c.fallback ? 'Rückfall' : modes[c.mode]}`)));
   }
 
@@ -176,12 +176,12 @@ export class Hero {
     if (!l) return;
     const [lo, hi] = [28, 52];
     const pos = (v) => clamp((v - lo) / (hi - lo), 0, 1) * 100 + '%';
-    const ticks = [[l.plan, 'Plan'], [l.high, 'Firmware'], [l.top, 'Obergrenze']].filter(([v]) => v != null);
+    const ticks = [[l.plan, 'Ziel'], [l.high, 'Firmware'], [l.top, 'Obergrenze']].filter(([v]) => v != null);
     const sig = ticks.map(([v]) => v).join();
     if (bar.dataset.sig !== sig) {
       bar.dataset.sig = sig;
-      $('#lb-ticks').replaceChildren(...ticks.map(([v, name]) => h('span', { style: `left:${pos(v)}`, title: name === 'Plan' ? 'Plan-Grenze ohne Gewichtung' : name }, h('b', {}, num(v, 0)))));
-      $('#lb-legend').textContent = ticks.filter(([, name]) => name !== 'Plan').map(([v, name]) => `${name} ${num(v, 0)}`).join(' · ') + ' °C';
+      $('#lb-ticks').replaceChildren(...ticks.map(([v, name]) => h('span', { style: `left:${pos(v)}`, title: name === 'Ziel' ? 'Wasser-Ziel' : name }, h('b', {}, num(v, 0)))));
+      $('#lb-legend').textContent = ticks.filter(([, name]) => name !== 'Ziel').map(([v, name]) => `${name} ${num(v, 0)}`).join(' · ') + ' °C';
       $('#lb-track').style.setProperty('--plan', pos(l.plan ?? hi));
     }
     const w = value(KEYS.water);

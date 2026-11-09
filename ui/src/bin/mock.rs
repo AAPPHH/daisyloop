@@ -44,7 +44,7 @@ struct Sim {
     index: HashMap<String, usize>,
     controls: Vec<Control>,
     flags: Flags,
-    weight: f64,
+    target: f64,
     step: Option<(usize, i64)>,
     extremes: HashMap<String, (f64, f64)>,
     seq: u64,
@@ -190,7 +190,7 @@ impl Sim {
         let index: HashMap<String, usize> = sensors.iter().enumerate().map(|(i, s)| (s.channel.id.clone(), i)).collect();
         let flag = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");
         let flags = Flags { writes: flag("MOCK_WRITES"), identified: flag("MOCK_IDENTIFIED"), fault: flag("MOCK_FAULT") };
-        let mut sim = Self { sensors, index, controls: vec![], flags, weight: 0.5, step: None, extremes: HashMap::new(), seq: 0, live: vec![], water_offset: 0.0, last_tick: now_ms() - 1000, predicted: Predicted::default() };
+        let mut sim = Self { sensors, index, controls: vec![], flags, target: 34.0, step: None, extremes: HashMap::new(), seq: 0, live: vec![], water_offset: 0.0, last_tick: now_ms() - 1000, predicted: Predicted::default() };
         sim.build_controls();
         sim.tick();
         sim
@@ -208,7 +208,8 @@ impl Sim {
                 kind,
                 rpm_channel: rpm,
                 duty_channel: duty,
-                mode: Mode::Shadow,
+                mode: Mode::Pid,
+                chosen: Mode::Pid,
                 allowed: self.flags.writes,
                 identified: self.flags.identified,
                 drive: Drive::Firmware,
@@ -277,25 +278,19 @@ impl Sim {
     }
 
     fn plan(&mut self, water: f64, t: i64) {
-        let w = self.weight;
-        let need = ((water - (29.0 - 3.0 * w)) / 10.0).clamp(0.0, 1.0);
+        let need = ((water - (self.target - 7.0)) / 10.0).clamp(0.0, 1.0);
         for i in 0..2 {
             let c = &mut self.controls[i];
-            if c.mode == Mode::Off {
-                c.target_rpm = None;
-                continue;
-            }
             let want = c.min_rpm + (c.max_rpm - c.min_rpm) * need.powf(if i == 0 { 1.0 } else { 1.6 });
             let from = c.target_rpm.unwrap_or(want);
             c.target_rpm = Some(from + (want - from).clamp(-4.0, 20.0));
-            c.note = (c.mode == Mode::Shadow).then(|| "nur berechnet".to_string());
-            if c.mode == Mode::Active && c.drive != Drive::Test {
+            if c.mode == Mode::Model && c.drive != Drive::Test {
                 c.drive = Drive::Duty;
                 c.commanded_duty = Some(Self::duty_of(i, c.target_rpm.unwrap()).clamp(c.floor_duty, 100.0));
             }
         }
         let gain = 1.0 - (self.controls[0].target_rpm.unwrap_or(0.0) / FAN_MAX_RPM) * 0.8;
-        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), raw: Some(water + 0.28 + 1.2 * gain), correction: vec![Correction { horizon_s: 120, bias: -0.12, scale: 1.04, delta: -0.1, updates: 900, acting: true, drift: false }], water_limit: 43.5, feasible: water + 1.6 * gain < 41.0, age_ms: (t % 30_000) };
+        self.predicted = Predicted { horizon_s: 120, water: Some(water + 0.4 + 1.2 * gain), raw: Some(water + 0.28 + 1.2 * gain), correction: vec![Correction { horizon_s: 120, bias: -0.12, scale: 1.04, delta: -0.1, updates: 900, acting: true, drift: false }], water_limit: self.target, feasible: water + 1.6 * gain < self.target, age_ms: (t % 30_000) };
     }
 
     fn tick(&mut self) {
@@ -361,8 +356,10 @@ impl Sim {
         Snapshot {
             ts_ms: self.last_tick,
             seq: self.seq,
-            weight: self.weight,
-            model: ModelInfo { loaded: true, warm: true, warmup_left_s: 0, fan_identified: self.flags.identified, pump_identified: self.flags.identified, error: None },
+            target: self.target,
+            target_min: 32.0,
+            target_max: 36.0,
+            model: ModelInfo { loaded: true, fan_identified: self.flags.identified, pump_identified: self.flags.identified, error: None },
             predicted: Some(self.predicted.clone()),
             step_test: self.step.map(|(i, since)| {
                 let phase = (((self.last_tick - since) / 10_000) as u32).min(4);
@@ -370,7 +367,7 @@ impl Sim {
             }),
             channels,
             controls: self.controls.clone(),
-            limits: vec![Limit { channel: WATER.into(), low: None, high: Some(48.0), plan: Some(46.0), top: Some(50.0) }, Limit { channel: "d5next/pump/rpm".into(), low: Some(1800.0), high: None, plan: None, top: None }],
+            limits: vec![Limit { channel: WATER.into(), low: None, high: Some(48.0), plan: Some(self.target), top: Some(50.0) }, Limit { channel: "d5next/pump/rpm".into(), low: Some(1800.0), high: None, plan: None, top: None }],
             alarms,
         }
     }
@@ -379,7 +376,7 @@ impl Sim {
         match cmd {
             Command::SetMode { id, mode, confirmed } => {
                 let i = self.controls.iter().position(|c| c.id == id).ok_or("unbekannter Kanal")?;
-                if mode == Mode::Active {
+                if mode == Mode::Model {
                     if !self.flags.writes {
                         return Err("Schreiben ist deaktiviert (writes_enabled in der Admin-Konfiguration)".into());
                     }
@@ -392,24 +389,25 @@ impl Sim {
                 }
                 let c = &mut self.controls[i];
                 c.mode = mode;
+                c.chosen = mode;
                 c.fallback = None;
-                if mode != Mode::Active && c.drive == Drive::Duty {
+                if mode != Mode::Model && c.drive == Drive::Duty {
                     c.drive = Drive::Firmware;
                     c.commanded_duty = None;
                 }
             }
-            Command::SetWeight { weight } => {
-                if !(0.0..=1.0).contains(&weight) {
-                    return Err("Gewicht muss zwischen 0 und 1 liegen".into());
+            Command::SetWaterTarget { celsius } => {
+                if !celsius.is_finite() {
+                    return Err("Wasser-Ziel muss eine endliche Zahl sein".into());
                 }
-                self.weight = weight;
+                self.target = celsius.clamp(32.0, 36.0);
             }
             Command::StartStepTest { id, confirmed } => {
                 let i = self.controls.iter().position(|c| c.id == id).ok_or("unbekannter Kanal")?;
                 if !self.flags.writes {
                     return Err("Schreiben ist deaktiviert (writes_enabled in der Admin-Konfiguration)".into());
                 }
-                if !confirmed || self.step.is_some() || self.controls[i].mode == Mode::Active {
+                if !confirmed || self.step.is_some() || self.controls[i].mode == Mode::Model {
                     return Err("Stufentest nicht möglich: Bestätigung fehlt, Kanal aktiv oder Test läuft schon".into());
                 }
                 self.step = Some((i, now_ms()));

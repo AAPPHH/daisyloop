@@ -172,11 +172,9 @@ fn c_after_a_clean_learning_phase_garbage_keeps_bias_and_scale_inside_their_boun
 
 const OWNER_NOISE: f64 = 0.01;
 
-fn owner_set(c: &mut Config) {
-    c.control.water_plan_limit = 34.5;
-    c.control.weight_span_k = 1.0;
-    c.control.fan_start_water = 33.0;
-    c.control.fan_stop_water = 31.5;
+fn owner_set(c: &mut Config, target: f64) {
+    (c.control.water_target, c.control.fan_start_water, c.control.fan_stop_water) = (Some(target), Some(33.0), Some(31.5));
+    (c.control.water_plan_limit, c.control.weight_span_k) = (Some(34.5), Some(1.0));
     c.control.plan_secs = 5.0;
 }
 
@@ -190,9 +188,9 @@ struct Owner {
     fallback: bool,
 }
 
-fn owner_day(spec: PlantSpec, profile: Profile, on: bool) -> Owner {
+fn owner_day(spec: PlantSpec, profile: Profile, on: bool, target: f64) -> Owner {
     let mut run = Run::new(spec, profile, move |c| {
-        owner_set(c);
+        owner_set(c, target);
         c.control.correction.enabled = on;
     });
     run.noise = OWNER_NOISE;
@@ -226,24 +224,28 @@ fn owner_day(spec: PlantSpec, profile: Profile, on: bool) -> Owner {
 }
 
 #[test]
-fn owner_config_values_validate_and_hold_the_water_near_the_target_without_chatter_in_simulation() {
-    let cfg_text = "water_plan_limit = 34.5
-weight_span_k = 1.0
-fan_start_water = 33.0
-fan_stop_water = 31.5
-";
-    let cc: ControlConfig = toml::from_str(cfg_text).unwrap();
+fn the_planner_holds_the_water_near_the_target_without_chatter_in_simulation() {
+    let cc: ControlConfig = toml::from_str("water_target = 34.0\n").unwrap();
     assert!(cc.validate().is_ok());
-    assert!((Planner::limit(&cc, 0.5) - 34.0).abs() < 1e-9 && (Planner::limit(&cc, 1.0) - 33.5).abs() < 1e-9 && (Planner::limit(&cc, 0.0) - 34.5).abs() < 1e-9);
-    let rig = Rig::new((true, true), 3.0, owner_set);
-    assert_eq!((rig.c.cfg.water_plan_limit, rig.c.cfg.fan_start_water, rig.c.cfg.fan_stop_water, rig.c.cfg.weight_span_k), (34.5, 33.0, 31.5, 1.0));
-    for (name, spec, profile) in [("60 W", PlantSpec::MEASURED, Profile::Constant(60.0)), ("120 W", PlantSpec::MEASURED, Profile::Constant(120.0)), ("square 60/160 W", PlantSpec::MEASURED, Profile::Square(60.0, 160.0, 900, 900)), ("17 W bias, 120 W", biased_spec(), Profile::Constant(120.0))] {
-        for on in [false, true] {
-            let o = owner_day(spec, profile, on);
-            println!("owner config {name} correction {on}: writes {} fan swings {} late swings {} load changes {} mean water second half {:.2} peak {:.2}", o.writes, o.swings, o.late, o.changes, o.mean, o.peak);
-            assert!(o.writes <= 250 && o.late <= o.changes + 2 && o.peak <= 34.5 && !o.fallback, "{name} {on}");
-            if on && (name == "60 W" || name == "120 W") {
-                assert!((33.5..=34.2).contains(&o.mean), "{name} {on} mean {}", o.mean);
+    let rig = Rig::new((true, true), 3.0, |c| owner_set(c, 34.0));
+    assert_eq!((rig.c.cfg.target, rig.c.cfg.fan_start(), rig.c.cfg.fan_stop()), (34.0, 33.0, 31.5));
+    let legacy: ControlConfig = toml::from_str(&["water_plan_limit = 34.5", "weight_span_k = 1.0", "fan_start_water = 33.0", "fan_stop_water = 31.5"].join("\n")).unwrap();
+    assert_eq!(legacy.default_target(), 34.0);
+    let defaults = ControlConfig::default();
+    assert_eq!((defaults.target_min, defaults.target_max), (32.0, 36.0));
+    for target in [32.0, 33.0, 34.0, 35.0, 36.0] {
+        let mut loads = vec![("60 W", PlantSpec::MEASURED, Profile::Constant(60.0)), ("120 W", PlantSpec::MEASURED, Profile::Constant(120.0)), ("square 60/160 W", PlantSpec::MEASURED, Profile::Square(60.0, 160.0, 900, 900))];
+        if target <= 34.0 {
+            loads.push(("17 W bias, 120 W", biased_spec(), Profile::Constant(120.0)));
+        }
+        for (name, spec, profile) in loads {
+            for on in [false, true] {
+                let o = owner_day(spec, profile, on, target);
+                println!("target {target} {name} correction {on}: writes {} fan swings {} late swings {} load changes {} mean water second half {:.2} peak {:.2}", o.writes, o.swings, o.late, o.changes, o.mean, o.peak);
+                assert!(o.writes <= 250 && o.late <= o.changes + 2 && o.peak <= target + 0.5 && !o.fallback, "{target} {name} {on}");
+                if matches!(profile, Profile::Constant(_)) {
+                    assert!((target - 0.7..=target + 0.2).contains(&o.mean), "{target} {name} {on} mean {}", o.mean);
+                }
             }
         }
     }

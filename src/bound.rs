@@ -9,7 +9,7 @@ impl Control {
     pub(super) fn curve_bound(&self, i: usize, now: i64) -> Option<f64> {
         let w = self.temps(now).water?;
         let c = &self.chans[i];
-        let raw = if c.spec.kind == ControlKind::Fan && w < self.cfg.fan_start_water { 0.0 } else { c.min.at(w) };
+        let raw = if c.spec.kind == ControlKind::Fan && w < self.cfg.fan_start() { 0.0 } else { c.min.at(w) };
         Some(if raw <= 0.0 { 0.0 } else { c.cfg.commandable(raw, false) })
     }
 
@@ -79,9 +79,9 @@ impl Control {
             let Some(bound) = self.bound_duty(i, now) else { continue };
             let open = Self::raise_open(&mut self.chans[i], now, self.cfg.bound_raise_cap);
             let c = &self.chans[i];
-            let Some(cmd) = c.duty_cmd.or((frozen && c.mode == Mode::Active).then_some(0.0)) else { continue };
+            let Some(cmd) = c.duty_cmd.or((frozen && c.mode == Mode::Model).then_some(0.0)) else { continue };
             let behind = bound - cmd >= c.cfg.deadband_duty.max(f64::EPSILON) && now - c.wrote_ms >= Self::BOUND_GAP_MS;
-            if (c.driving() || frozen && c.mode == Mode::Active) && !c.release_due && bound > cmd && (cmd <= 0.0 || behind) {
+            if (c.driving() || frozen && c.mode == Mode::Model) && !c.release_due && bound > cmd && (cmd <= 0.0 || behind) {
                 let kind = c.spec.kind;
                 let exempt = if open || frozen { vec![kind] } else { vec![] };
                 self.restarted |= self.write(&[(kind, Setting::Duty(bound))], now, Drive::Duty, &exempt) && cmd <= 0.0;

@@ -67,6 +67,7 @@ pub struct Engine {
     pub raw_channels: Arc<Vec<String>>,
     pub outputs: Arc<Vec<String>>,
     out_idx: Arc<Vec<usize>>,
+    eager: bool,
 }
 
 fn pf(v: &Value, k: &str) -> f64 {
@@ -74,6 +75,8 @@ fn pf(v: &Value, k: &str) -> f64 {
 }
 
 impl Engine {
+    const EWM_HOLD: i64 = 600;
+
     pub fn from_json(text: &str) -> Engine {
         let spec: RawSpec = serde_json::from_str(text).unwrap();
         let index: HashMap<String, usize> = spec.nodes.iter().enumerate().map(|(i, n)| (n.name.clone(), i)).collect();
@@ -125,7 +128,7 @@ impl Engine {
         let n = nodes.len();
         Engine {
             nodes: Arc::new(nodes),
-            state: vec![State { age: 1_000_000_000, ..State::default() }; n],
+            state: vec![State { age: 1_000_000_000, y: f64::NAN, ..State::default() }; n],
             hist: cap.iter().map(|&c| VecDeque::with_capacity(c)).collect(),
             cap: Arc::new(cap),
             vals: vec![f64::NAN; n],
@@ -133,7 +136,12 @@ impl Engine {
             raw_channels: Arc::new(raw_channels),
             outputs: Arc::new(outputs),
             out_idx: Arc::new(out_idx),
+            eager: false,
         }
+    }
+
+    pub fn set_eager(&mut self, on: bool) {
+        self.eager = on;
     }
 
     pub fn raw_sources(&self, output: usize) -> Vec<usize> {
@@ -206,13 +214,17 @@ impl Engine {
                 Op::Ewm { alpha, warm } => {
                     let x = a[0];
                     if x.is_nan() {
-                        s.n = 0;
-                        s.y = f64::NAN;
+                        s.age = s.age.saturating_add(1);
+                        if !self.eager || s.age > Self::EWM_HOLD {
+                            s.n = 0;
+                            s.y = f64::NAN;
+                        }
                         f64::NAN
                     } else {
+                        s.age = 0;
                         s.n += 1;
-                        s.y = if s.n == 1 { x } else { alpha * x + (1.0 - alpha) * s.y };
-                        if s.n >= *warm { s.y } else { f64::NAN }
+                        s.y = if s.y.is_nan() || (!self.eager && s.n == 1) { x } else { alpha * x + (1.0 - alpha) * s.y };
+                        if self.eager || s.n >= *warm { s.y } else { f64::NAN }
                     }
                 }
                 Op::Diff(n) => {
@@ -490,6 +502,10 @@ impl Predictor {
 
     pub fn load(spec_json: &str, model_json: &str) -> Result<Predictor, String> {
         std::panic::catch_unwind(|| Predictor::new(spec_json, model_json)).map_err(|_| "feature spec or model file is malformed".to_string())
+    }
+
+    pub fn set_eager(&mut self, on: bool) {
+        self.engine.set_eager(on);
     }
 
     pub fn weighted_channels(&self, prefix: &str) -> Vec<String> {

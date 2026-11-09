@@ -28,8 +28,8 @@ impl Model for Shipped {
     fn identified(&self) -> (bool, bool) {
         (true, true)
     }
-    fn warm_secs(&self) -> i64 {
-        self.0.warm_secs()
+    fn ready(&self) -> bool {
+        self.0.ready()
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, horizon: u32) -> Result<Forecast, String> {
         self.0.forecast(hold, rollout, horizon)
@@ -68,9 +68,6 @@ impl Model for Biased {
     fn identified(&self) -> (bool, bool) {
         (true, true)
     }
-    fn warm_secs(&self) -> i64 {
-        5000
-    }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, horizon: u32) -> Result<Forecast, String> {
         let rpm = hold.get("d5next/fan/rpm").copied().unwrap_or(self.feed.get().1);
         let (d, off) = (self.delta(rpm, rollout + horizon), self.delta(0.0, rollout + horizon));
@@ -97,9 +94,6 @@ impl Model for Informed {
     fn observe(&mut self, _: &HashMap<String, f64>, _: i64) {}
     fn identified(&self) -> (bool, bool) {
         (true, true)
-    }
-    fn warm_secs(&self) -> i64 {
-        5000
     }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, horizon: u32) -> Result<Forecast, String> {
         let (power, rpm0) = self.feed.get();

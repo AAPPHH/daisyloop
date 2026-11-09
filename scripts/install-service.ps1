@@ -47,7 +47,10 @@ try {
         $running | Wait-Process -Timeout 20 -ErrorAction SilentlyContinue
         Remove-Item $stop -ErrorAction SilentlyContinue
     }
-    @(Procs $oldSidecar) + @(Procs $sidecarExe) | Stop-Process -Force -ErrorAction SilentlyContinue
+    $side = @(Procs $oldSidecar) + @(Procs $sidecarExe)
+    $side | Stop-Process -Force -ErrorAction SilentlyContinue
+    $side | Wait-Process -Timeout 20 -ErrorAction SilentlyContinue
+    if (@(Procs $oldSidecar) + @(Procs $sidecarExe) | Where-Object { -not $_.HasExited }) { throw 'old sidecar did not exit within 20 s' }
     New-Item -ItemType Directory -Force $install | Out-Null
     New-Item -ItemType Directory -Force (Join-Path $install 'state') | Out-Null
     if (Test-Path $exe) { Copy-Item $exe $prev -Force }
@@ -56,7 +59,10 @@ try {
     Get-ChildItem $base -Filter 'committed-*' -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Copy-Item (Join-Path $PSScriptRoot 'watchdog.ps1') (Join-Path $install 'watchdog.ps1') -Force
     New-Item -ItemType Directory -Force (Join-Path $install 'sidecar') | Out-Null
-    Copy-Item (Join-Path $newSidecar '*') (Join-Path $install 'sidecar') -Recurse -Force
+    foreach ($try in 1..10) {
+        try { Copy-Item (Join-Path $newSidecar '*') (Join-Path $install 'sidecar') -Recurse -Force -ErrorAction Stop; break }
+        catch { if ($try -eq 10) { throw }; Start-Sleep -Seconds 3 }
+    }
     New-Item -ItemType Directory -Force (Join-Path $install 'models') | Out-Null
     foreach ($m in 'feature_spec_deploy.json', 'model_deploy.json') { Copy-Item (Join-Path $PSScriptRoot "..\models\$m") (Join-Path $install 'models') -Force }
     if (-not (Test-Path $configPath)) {

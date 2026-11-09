@@ -1,7 +1,9 @@
 use crate::control::{ChannelConfig, ChannelOverride, ControlConfig};
-use crate::protocol::ControlKind;
+use crate::protocol::{ControlKind, Mode};
 use crate::Config;
 use hidapi::{HidApi, HidDevice};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -143,6 +145,102 @@ impl Ownership {
         }
         std::fs::write(&self.path, names.join("
 ")).map_err(|e| e.to_string())
+    }
+}
+
+pub struct ModeStore {
+    path: PathBuf,
+}
+
+impl ModeStore {
+    pub fn new(dir: PathBuf) -> ModeStore {
+        ModeStore { path: dir.join("modes.json") }
+    }
+    pub fn read(&self) -> Option<HashMap<String, Saved>> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(HashMap::new()),
+            Err(e) => {
+                log::warn!("control: {} unreadable, all channels start on the firmware PID: {e}", self.path.display());
+                return None;
+            }
+        };
+        match serde_json::from_str::<HashMap<String, SavedRaw>>(&text) {
+            Ok(m) => Some(m.into_iter().map(|(k, v)| (k, v.into())).collect()),
+            Err(e) => {
+                log::warn!("control: {} unparsable, all channels start on the firmware PID: {e}", self.path.display());
+                None
+            }
+        }
+    }
+    pub fn store(&self, modes: &HashMap<String, Saved>) -> Result<(), String> {
+        if let Some(d) = self.path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        write_atomic(&self.path, &serde_json::to_string(modes).map_err(|e| e.to_string())?)
+    }
+}
+
+fn write_atomic(path: &std::path::Path, text: &str) -> Result<(), String> {
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut f, text.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+pub struct TargetStore {
+    path: PathBuf,
+}
+
+impl TargetStore {
+    pub fn new(dir: PathBuf) -> TargetStore {
+        TargetStore { path: dir.join("target.json") }
+    }
+    pub fn read(&self) -> Option<f64> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                log::warn!("control: {} unreadable, the admin default water target is used: {e}", self.path.display());
+                return None;
+            }
+        };
+        let parsed = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("celsius").and_then(|c| c.as_f64())).filter(|c| c.is_finite());
+        if parsed.is_none() {
+            log::warn!("control: {} unparsable, the admin default water target is used", self.path.display());
+        }
+        parsed
+    }
+    pub fn store(&self, celsius: f64) -> Result<(), String> {
+        write_atomic(&self.path, &serde_json::json!({ "celsius": celsius }).to_string())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Saved {
+    pub mode: Mode,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedRaw {
+    Full(Saved),
+    Plain(Mode),
+}
+
+impl From<SavedRaw> for Saved {
+    fn from(r: SavedRaw) -> Saved {
+        match r {
+            SavedRaw::Full(s) => s,
+            SavedRaw::Plain(mode) => Saved { mode, confirmed: false },
+        }
     }
 }
 

@@ -8,9 +8,6 @@ impl Model for Lin {
     fn identified(&self) -> (bool, bool) {
         (true, true)
     }
-    fn warm_secs(&self) -> i64 {
-        5000
-    }
     fn forecast(&self, hold: &HashMap<String, f64>, rollout: u32, _: u32) -> Result<Forecast, String> {
         let g = |k: &str| hold.get(k).copied().unwrap_or(0.0);
         Ok(Forecast::plain(self.0(g("d5next/fan/rpm"), g("d5next/pump/rpm"), rollout)))
@@ -28,8 +25,8 @@ impl Model for Warming {
     fn identified(&self) -> (bool, bool) {
         (true, true)
     }
-    fn warm_secs(&self) -> i64 {
-        self.n
+    fn ready(&self) -> bool {
+        self.n > 0
     }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
         Ok(Forecast::plain(0.0))
@@ -70,7 +67,7 @@ fn b1_marker_is_set_before_the_first_duty_set_and_cleared_after_release() {
         assert!(rig.now < 60_000);
     }
     assert_eq!(rig.marker(), vec![ControlKind::Fan]);
-    rig.c.set_mode("d5.fan", Mode::Shadow, false, rig.now).unwrap();
+    rig.c.set_mode("d5.fan", Mode::Pid, false, rig.now).unwrap();
     assert_eq!((rig.sim.mode(Spec::FAN), rig.marker()), (1, vec![]));
 }
 
@@ -91,7 +88,7 @@ fn h2_writes_off_reads_the_mode_bytes_alarms_and_never_sets() {
     sim.set_raw(|r| r[Spec::FAN.mode()] = 0);
     let mut rig = Rig::with_sim(sim.clone(), (true, true), 3.0, |c| c.writes_enabled = false);
     rig.run(40);
-    for m in [Mode::Active, Mode::Off, Mode::Shadow] {
+    for m in [Mode::Model, Mode::Pid] {
         let _ = rig.c.set_mode("d5.fan", m, true, rig.now);
     }
     assert!(rig.c.start_test("d5.fan", true, rig.now).is_err());
@@ -101,35 +98,42 @@ fn h2_writes_off_reads_the_mode_bytes_alarms_and_never_sets() {
 }
 
 #[test]
-fn b2_missing_samples_keep_the_model_warm_and_only_gaps_over_ten_seconds_reset_it() {
+fn b2_input_gaps_never_restart_a_warm_up_and_the_model_stays_ready() {
     let g = Golden::load();
     let mut m = g.model();
     for t in 3000..g.rows.len() {
         m.observe(&g.row(t), g.k0 + t as i64);
     }
-    let (w, last) = (m.warm_secs(), g.k0 + g.rows.len() as i64 - 1);
-    assert!(w > 1800);
+    let (w, last) = (m.history_secs(), g.k0 + g.rows.len() as i64 - 1);
+    assert!(w > 1800 && m.ready());
     m.observe(&HashMap::new(), last + 1);
-    assert_eq!(m.warm_secs(), w + 1);
-    m.observe(&g.row(g.rows.len() - 1), last + 10);
-    assert_eq!(m.warm_secs(), w + 2);
+    assert_eq!(m.history_secs(), w + 1);
     m.observe(&g.row(g.rows.len() - 1), last + 21);
-    assert_eq!(m.warm_secs(), 0);
+    assert_eq!(m.history_secs(), w + 21);
+    assert!(m.ready() && m.live().len() > 0);
+    m.observe(&g.row(g.rows.len() - 1), last + 21 + 800);
+    assert!(m.history_secs() > w + 800 && m.ready());
+    m.observe(&g.row(g.rows.len() - 1), last + 21 + 800 + 2000);
+    assert!(m.history_secs() < 10 && m.ready() && m.forecast(&HashMap::new(), 0, 120).unwrap().water.is_finite());
 }
 
 #[test]
-fn b2_active_channel_that_is_not_warm_holds_its_command_and_the_bound_keeps_acting() {
+fn b2_a_model_that_is_not_ready_never_blocks_a_running_channel_and_engaging_waits_for_data() {
     let mut rig = Rig::new((true, true), 3.0, |_| {});
     rig.run(5);
     rig.active("d5.fan");
     rig.run(40);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    let held = rig.ctl("d5.fan").commanded_duty;
-    rig.warm.set(1);
+    rig.warm.set(0);
     rig.run(100);
     let c = rig.ctl("d5.fan");
-    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && c.commanded_duty == held && c.note.unwrap().contains("wärmt"));
-    assert!(rig.c.set_mode("d5.pump", Mode::Active, true, rig.now).unwrap_err().contains("wärmt"));
+    assert!(rig.sim.mode(Spec::FAN) == 0 && c.fallback.is_none() && c.mode == Mode::Model);
+    rig.c.set_mode("d5.pump", Mode::Model, true, rig.now).unwrap();
+    let p = rig.ctl("d5.pump");
+    assert!(p.mode == Mode::Pid && p.chosen == Mode::Model && p.note.unwrap().contains("Keine Verlaufsdaten"));
+    rig.warm.set(1);
+    rig.run(5);
+    assert_eq!(rig.ctl("d5.pump").mode, Mode::Model);
     rig.water = 42.0;
     rig.run(10);
     assert_eq!(rig.ctl("d5.fan").commanded_duty, Some(100.0));
@@ -176,13 +180,13 @@ fn b4_recovery_at_start_is_retried_until_it_succeeds_with_an_alarm_while_pending
 }
 
 #[test]
-fn h3_mode_off_stops_a_step_test() {
+fn h3_mode_pid_stops_a_step_test() {
     let mut rig = Rig::new((false, false), 3.0, stepped(60.0));
     rig.run(5);
     rig.c.start_test("d5.fan", true, rig.now).unwrap();
     rig.run(2);
     assert_eq!(rig.sim.mode(Spec::FAN), 0);
-    rig.c.set_mode("d5.fan", Mode::Off, false, rig.now).unwrap();
+    rig.c.set_mode("d5.fan", Mode::Pid, false, rig.now).unwrap();
     let sets = rig.sim.sets();
     rig.run(200);
     assert_eq!((rig.sim.mode(Spec::FAN), rig.sim.sets(), rig.status().step.is_none()), (1, sets, true));
@@ -229,13 +233,11 @@ fn m3_water_limit_fallback_names_the_firmware_setpoints_without_extra_writes() {
 }
 
 #[test]
-fn m4_autostart_waits_for_the_model_to_warm_up() {
+fn m4_autostart_engages_as_soon_as_the_model_has_data_and_never_waits_for_a_warm_up() {
     let mut rig = rig_with(Warming { n: 0 }, |c| c.control.fan.autostart_active = Some(true));
     rig.live = true;
-    rig.run(1700);
-    assert_eq!(rig.ctl("d5.fan").mode, Mode::Shadow);
-    rig.run(300);
-    assert_eq!(rig.ctl("d5.fan").mode, Mode::Active);
+    rig.run(3);
+    assert_eq!(rig.ctl("d5.fan").mode, Mode::Model);
 }
 
 #[test]
@@ -264,7 +266,7 @@ fn m6_daily_write_budget_holds_the_last_duty_with_an_alarm_and_resets_next_day()
     }
     assert_eq!(rig.sim.duty_sets().len(), 3);
     assert!(rig.alarm(AlarmKind::Budget));
-    assert_eq!((rig.ctl("d5.fan").mode, rig.sim.mode(Spec::FAN)), (Mode::Active, 0));
+    assert_eq!((rig.ctl("d5.fan").mode, rig.sim.mode(Spec::FAN)), (Mode::Model, 0));
     for i in 0..17 * 3600 {
         rig.heat.set(if (i / 30) % 2 == 0 { 3.0 } else { 12.0 });
         rig.tick();
@@ -309,18 +311,18 @@ fn axes<'a>(fc: &'a ChannelConfig, pc: &'a ChannelConfig, fcal: &'a Calibration,
 
 #[test]
 fn plan_changes_need_a_margin_and_missing_inputs_are_not_feasible() {
-    let cfg = ControlConfig::default();
+    let cfg = ControlConfig { target: 46.0, ..ControlConfig::default() };
     let (fc, pc) = (ChannelConfig::defaults(ControlKind::Fan), ChannelConfig::defaults(ControlKind::Pump));
     let (fcal, pcal) = (fc.calibration(), pc.calibration());
     let (fan, pump) = axes(&fc, &pc, &fcal, &pcal);
     let m = Lin(knife);
     let now = Temps { water: Some(30.0) };
     let planner = Planner { cfg: &cfg };
-    let fresh = planner.plan(&m, &fan, &pump, &now, 0.0, None).unwrap();
+    let fresh = planner.plan(&m, &fan, &pump, &now, None).unwrap();
     assert!((fresh.fan_rpm - fan.cal.rpm(fc.start_duty)).abs() < 1e-9 && fresh.feasible);
-    let kept = planner.plan(&m, &fan, &pump, &now, 0.0, Some((fan.rpm_range().1, 4400.0))).unwrap();
+    let kept = planner.plan(&m, &fan, &pump, &now, Some((fan.rpm_range().1, 4400.0))).unwrap();
     assert!(kept.fan_rpm > fan.rpm_range().0 + 100.0, "{}", kept.fan_rpm);
-    let blind = planner.plan(&m, &fan, &pump, &Temps { water: None }, 0.0, None).unwrap();
+    let blind = planner.plan(&m, &fan, &pump, &Temps { water: None }, None).unwrap();
     assert!(!blind.feasible);
 }
 
@@ -339,7 +341,7 @@ fn grid_top_is_always_the_maximum_rpm() {
 }
 
 #[test]
-fn the_shown_limit_is_the_weighted_water_plan_limit() {
+fn the_shown_limit_is_the_water_target() {
     let mut rig = Rig::new((false, false), 3.0, |_| {});
     rig.run(60);
     rig.cpu = 100.0;
@@ -347,7 +349,7 @@ fn the_shown_limit_is_the_weighted_water_plan_limit() {
     rig.cpu = 50.0;
     rig.run(35);
     let p = rig.status().predicted.unwrap();
-    assert!((p.water_limit - (ControlConfig::default().water_plan_limit - 0.5 * 5.0)).abs() < 1e-9);
+    assert!((p.water_limit - rig.c.cfg.target).abs() < 1e-9);
 }
 
 #[test]
@@ -370,7 +372,7 @@ fn unidentified_response_is_flagged_in_notes_and_telemetry_in_every_mode() {
     assert_eq!(id.value, 0.0);
     let mut known = Rig::new((true, true), 3.0, |_| {});
     known.run(35);
-    assert!(!known.ctl("d5.fan").note.unwrap().contains("nicht identifiziert"));
+    assert!(!known.ctl("d5.fan").note.unwrap_or_default().contains("nicht identifiziert"));
 }
 
 #[test]
@@ -385,13 +387,14 @@ fn the_forecast_shown_is_direct_and_the_plan_estimate_is_labelled_with_its_own_l
 }
 
 #[test]
-fn sparse_input_never_counts_as_warm() {
+fn sparse_input_runs_on_the_fallback_without_a_warm_up() {
     let mut m = Golden::load().model();
+    assert!(!m.ready());
     let row: HashMap<String, f64> = [("d5next/water/temp".to_string(), 31.0)].into();
-    for k in 0..2000 {
+    for k in 0..20 {
         m.observe(&row, 1_800_000_000 + k);
     }
-    assert_eq!(m.warm_secs(), 0);
+    assert!(m.history_secs() == 20 && m.live().len() <= 3);
 }
 
 #[test]
@@ -426,9 +429,6 @@ impl Model for Flat {
     fn identified(&self) -> (bool, bool) {
         (true, true)
     }
-    fn warm_secs(&self) -> i64 {
-        5000
-    }
     fn forecast(&self, _: &HashMap<String, f64>, _: u32, _: u32) -> Result<Forecast, String> {
         Ok(Forecast::plain(self.0))
     }
@@ -442,7 +442,7 @@ fn d_the_pump_decision_depends_only_on_the_water_forecast_and_sits_at_its_floor_
     let (fan, pump) = axes(&fc, &pc, &fcal, &pcal);
     let pump = Axis { free: true, ..pump };
     for water in [20.0, 30.0, 33.0] {
-        let plan = Planner { cfg: &cfg }.plan(&Flat(0.5), &fan, &pump, &Temps { water: Some(water) }, 0.5, Some((fan.rpm_range().1, pump.rpm_range().1))).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(&Flat(0.5), &fan, &pump, &Temps { water: Some(water) }, Some((fan.rpm_range().1, pump.rpm_range().1))).unwrap();
         assert!(plan.feasible && (plan.pump_rpm - pump.rpm_range().0).abs() < 1e-9 && (pump.rpm_range().0 - pcal.rpm(15.0)).abs() < 1e-9, "{water} {plan:?}");
     }
     let mut rig = super::bound::rig_with(Box::new(Flat(0.5)), |_| {});

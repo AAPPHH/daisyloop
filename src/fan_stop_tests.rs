@@ -81,7 +81,7 @@ fn z4_a_restart_leaves_zero_at_the_start_duty_without_waiting_for_the_rate_limit
 #[test]
 fn z5_stale_or_missing_water_never_means_stopped() {
     let cfg = ControlConfig::default();
-    assert!(cfg.fan_may_stop(Some(32.9), false) && !cfg.fan_may_stop(Some(33.0), false) && cfg.fan_may_stop(Some(34.9), true) && !cfg.fan_may_stop(Some(35.0), true));
+    assert!(cfg.fan_may_stop(Some(31.4), false) && !cfg.fan_may_stop(Some(31.5), false) && cfg.fan_may_stop(Some(32.9), true) && !cfg.fan_may_stop(Some(33.0), true));
     assert!(!cfg.fan_may_stop(None, false) && !cfg.fan_may_stop(None, true) && !cfg.fan_may_stop(Some(f64::NAN), true));
     let fc = ChannelConfig::defaults(ControlKind::Fan);
     let fcal = fc.calibration();
@@ -128,7 +128,7 @@ fn z7_commanded_zero_with_a_stopped_fan_is_no_stall_and_a_nonzero_command_withou
     let mut run = Rig::new((true, true), 3.0, |_| {});
     run.water = 34.0;
     run.run(5);
-    run.active("d5.fan");
+    run.once("d5.fan");
     run.run(40);
     assert!(run.ctl("d5.fan").commanded_duty.unwrap() >= 20.0 && !run.alarm(AlarmKind::FanStopped));
     run.sim.0.borrow_mut().force = [Some(0.0), None];
@@ -157,7 +157,7 @@ fn z8_shadow_mode_computes_the_snapped_stop_and_sends_nothing() {
     rig.run(200);
     assert_eq!(rig.sim.sets(), 0);
     let c = rig.ctl("d5.fan");
-    assert!(c.mode == Mode::Shadow && c.target_rpm == Some(0.0) && c.commanded_duty.is_none() && c.drive == Drive::Firmware);
+    assert!(c.mode == Mode::Pid && c.target_rpm == Some(0.0) && c.commanded_duty.is_none() && c.drive == Drive::Firmware);
     let rows = rig.tick();
     assert!(rows.iter().any(|r| r.channel == "daisyloop/fan/target_rpm" && r.value == 0.0));
     assert!(!rows.iter().any(|r| r.channel == "daisyloop/fan/duty_cmd"));
@@ -210,7 +210,7 @@ fn z10_calibration_and_the_features_cope_with_rpm_zero_and_duty_zero() {
         let op = Operating { duty, rpm, power: Some(0.02), current: Some(0.01) };
         let fan = Axis { name: "fan", cfg: &fc, cal: &fcal, free: true, base: op, zero_ok: true };
         let pump = Axis { name: "pump", cfg: &pc, cal: &pcal, free: true, base: Operating { duty: 50.0, rpm: 3400.0, ..op }, zero_ok: false };
-        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &now, 0.5, Some((0.0, 3132.0))).unwrap();
+        let plan = Planner { cfg: &cfg }.plan(&m, &fan, &pump, &now, Some((0.0, 3132.0))).unwrap();
         assert!([plan.fan_rpm, plan.pump_rpm, plan.water.unwrap()].iter().all(|v| v.is_finite()), "{rpm} {plan:?}");
         assert!(plan.fan_rpm == 0.0 || plan.fan_rpm >= fcal.rpm(20.0) - 1e-9);
     }
@@ -220,14 +220,15 @@ fn z10_calibration_and_the_features_cope_with_rpm_zero_and_duty_zero() {
 }
 
 #[test]
-fn z11_stop_and_start_water_must_be_ordered_below_the_plan_limit() {
-    for bad in ["fan_stop_water = 36.0", "fan_start_water = 46.0", "fan_stop_water = 35.0", "fan_start_water = 30.0", "water_plan_limit = 48.0", "water_limit = 50.0
-water_top_limit = 49.0", "water_plan_limit = 40.0"] {
+fn z11_stop_and_start_water_must_be_ordered_below_the_target() {
+    for bad in ["fan_stop_water = 36.0\nfan_start_water = 35.0", "fan_stop_water = 35.0\nfan_start_water = 35.0", "water_limit = 50.0
+water_top_limit = 49.0", "water_target = 48.0", "water_target = 29.0", "target_max = 45.5", "start_offset = 2.5", "stop_offset = 0.5"] {
         assert!(toml::from_str::<ControlConfig>(bad).unwrap().validate().is_err(), "{bad}");
     }
     assert!(toml::from_str::<ControlConfig>("fan_stop_water = 30.0\nfan_start_water = 36.0").unwrap().validate().is_ok());
+    assert!(toml::from_str::<ControlConfig>("fan_stop_water = 30.0").unwrap().validate().is_ok());
     let (d, f) = (ControlConfig::default(), ChannelConfig::defaults(ControlKind::Fan));
-    assert_eq!((d.fan_stop_water, d.fan_start_water, f.start_duty, f.floor_duty), (33.0, 35.0, 20.0, 0.0));
+    assert_eq!((d.fan_stop(), d.fan_start(), f.start_duty, f.floor_duty), (31.5, 33.0, 20.0, 0.0));
 }
 
 #[test]
@@ -304,7 +305,7 @@ fn z16_a_slow_tach_at_low_duty_is_not_following_and_a_spinning_fan_at_command_ze
     run.live = true;
     run.water = 34.0;
     run.run(5);
-    run.active("d5.fan");
+    run.once("d5.fan");
     run.run(400);
     assert_eq!(run.ctl("d5.fan").commanded_duty, Some(20.0));
     run.sim.0.borrow_mut().force = [Some(150.0), None];
@@ -321,7 +322,7 @@ fn z16_a_slow_tach_at_low_duty_is_not_following_and_a_spinning_fan_at_command_ze
     z.sim.0.borrow_mut().force = [Some(300.0), None];
     z.run(150);
     assert!(z.ctl("d5.fan").note.unwrap().contains("dreht") && z.ctl("d5.fan").fallback.is_none() && z.sim.mode(Spec::FAN) == 0);
-    z.c.cfg.water_plan_limit = 33.5;
+    z.c.cfg.target = 33.5;
     z.water = 34.0;
     z.run(5);
     assert_eq!(z.sim.mode(Spec::FAN), 0);

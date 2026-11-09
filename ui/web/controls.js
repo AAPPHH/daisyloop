@@ -1,10 +1,9 @@
 import { $, h, Tween, clamp, num, ageText } from './ui.js';
-import { S, send, channel, isStale, ageMs } from './state.js';
+import { S, KEYS, send, channel, isStale, ageMs, value } from './state.js';
 
 const MODES = [
-  ['off', 'Aus'],
-  ['shadow', 'Nur berechnet'],
-  ['active', 'Aktiv'],
+  ['pid', 'PID'],
+  ['model', 'Modell'],
 ];
 const ARM_MS = 8000;
 const rows = new Map();
@@ -87,15 +86,15 @@ class Row {
 
   pick(mode) {
     const c = S.ctl.get(this.id);
-    if (!c || c.mode === mode) return;
-    if (mode === 'active' && c.kind === 'pump') return this.arm('mode', 'active');
+    if (!c || ((c.chosen ?? c.mode) === mode && !c.fallback)) return;
+    if (mode === 'model' && c.kind === 'pump') return this.arm('mode', 'model');
     this.arm('mode', null);
     command({ cmd: 'set_mode', id: this.id, mode, confirmed: false }, this);
   }
 
   async setActivePump() {
     this.arm('mode', null);
-    await command({ cmd: 'set_mode', id: this.id, mode: 'active', confirmed: true }, this);
+    await command({ cmd: 'set_mode', id: this.id, mode: 'model', confirmed: true }, this);
   }
 
   async startTest() {
@@ -110,9 +109,9 @@ class Row {
     for (const k of Object.keys(this.armed)) if (this.armed[k] && now - this.armed[k].at > ARM_MS) this.armed[k] = null;
     if (this.refusal && now - this.refusal.at > ARM_MS) this.refusal = null;
     this.btns.forEach((b, i) => {
-      const on = b.dataset.m === c.mode;
+      const on = b.dataset.m === (c.chosen ?? c.mode);
       b.classList.toggle('on', on);
-      b.classList.toggle('locked', b.dataset.m === 'active' && (!c.allowed || !c.identified));
+      b.classList.toggle('locked', b.dataset.m === 'model' && (!c.allowed || !c.identified));
       if (on) {
         this.thumb.style.width = b.offsetWidth + 'px';
         this.thumb.style.transform = `translateX(${b.offsetLeft - 3}px)`;
@@ -139,10 +138,10 @@ class Row {
     const locks = [];
     if (!c.allowed) locks.push('Schreiben ist deaktiviert (writes_enabled)');
     if (!c.identified) locks.push('das Modell kennt die Antwort dieses Kanals noch nicht (nicht identifiziert)');
-    const lock = locks.length ? 'Aktiv gesperrt: ' + locks.join('; ') + '.' : null;
+    const lock = locks.length ? 'Modell gesperrt: ' + locks.join('; ') + '.' : null;
     const lines = [];
-    if (c.mode !== 'active' && lock) lines.push(h('p', { class: 'lock' }, lock));
-    if (c.note && !(c.mode === 'shadow' && c.note.startsWith('nur berechnet'))) lines.push(h('p', { class: 'note' }, c.note));
+    if (c.mode !== 'model' && lock) lines.push(h('p', { class: 'lock' }, lock));
+    if (c.note) lines.push(h('p', { class: 'note' }, c.note));
     if (this.refusal) lines.push(h('p', { class: 'refusal' }, 'Abgelehnt: ' + this.refusal.msg));
     this.notes.replaceChildren(...lines);
   }
@@ -156,13 +155,13 @@ class Row {
     this.duty.textContent = num(dch?.value ?? null, 0);
     this.el.classList.toggle('stale', stale || isStale(c.duty_channel));
     this.age.textContent = stale ? `Messwert seit ${ageText(ageMs(c.rpm_channel) / 1000)} veraltet` : '';
-    const shadow = c.mode === 'shadow';
+    const shadow = c.mode === 'pid';
     this.target.replaceChildren();
     if (c.target_rpm != null) {
-      this.target.append(h('span', { class: 'k' }, shadow || !c.identified ? `Soll (nur berechnet${c.identified ? '' : ', nicht identifiziert'})` : 'Soll'), h('b', {}, num(c.target_rpm, 0)), h('small', {}, ' U/min'));
+      this.target.append(h('span', { class: 'k' }, shadow || !c.identified ? `Soll (Modell rechnet mit${c.identified ? '' : ', nicht identifiziert'})` : 'Soll'), h('b', {}, num(c.target_rpm, 0)), h('small', {}, ' U/min'));
       this.target.classList.toggle('shadow', shadow);
-    } else this.target.append(h('span', { class: 'k' }, c.mode === 'off' ? 'Kanal aus: kein Soll' : 'Noch kein Soll'));
-    this.state.className = 'state' + (c.drive === 'firmware' ? '' : ' drive') + (c.mode === 'off' ? ' off' : '');
+    } else this.target.append(h('span', { class: 'k' }, 'Noch kein Soll'));
+    this.state.className = 'state' + (c.drive === 'firmware' ? '' : ' drive');
     this.state.textContent = driveText(c);
     this.fallback.hidden = !c.fallback;
     this.fallback.textContent = c.fallback ? `Rückfall auf Firmware-PID: ${c.fallback}` : '';
@@ -184,33 +183,54 @@ class Row {
 function modelLine(snap) {
   const m = snap.model;
   const bits = [];
-  bits.push(!m.loaded ? `Modell nicht geladen${m.error ? ': ' + m.error : ''}` : m.warm ? 'Modell geladen und warm' : `Modell wärmt auf, noch ${Math.ceil(m.warmup_left_s / 60)} min`);
+  bits.push(!m.loaded ? `Modell nicht geladen${m.error ? ': ' + m.error : ''}` : 'Modell geladen');
   if (m.loaded) bits.push(`Lüfter-Antwort ${m.fan_identified ? 'identifiziert' : 'nicht identifiziert'}`, `Pumpen-Antwort ${m.pump_identified ? 'identifiziert' : 'nicht identifiziert'}`);
   const p = snap.predicted;
   if (p && !p.feasible) bits.push('kein Kandidat hält die Grenzen, Maximum gewählt');
   return bits;
 }
 
-export function updateWeight(snap) {
-  const el = $('#weight');
-  if (document.activeElement !== el && !el.dragging) el.value = snap.weight;
+const STEP = 0.5;
+const TARGET = { pending: null, timer: 0, until: 0 };
+
+function targetShown(snap) {
+  return TARGET.pending != null && performance.now() < TARGET.until ? TARGET.pending : snap.target;
+}
+
+export function updateTarget(snap) {
+  if (snap.target == null) return;
+  const t = targetShown(snap);
+  const w = value(KEYS.water);
+  $('#wt-v').textContent = num(t, 1) + ' °C';
+  const now = w == null || isStale(KEYS.water) ? '' : ` · Wasser jetzt ${num(w, 1)} °C`;
+  $('#wt-now').textContent = `Bereich ${num(snap.target_min, 0)} bis ${num(snap.target_max, 0)} °C${now}`;
+  $('#wt-dn').disabled = t <= snap.target_min + 1e-9;
+  $('#wt-up').disabled = t >= snap.target_max - 1e-9;
+}
+
+function nudge(dir) {
+  const snap = S.snap;
+  if (!snap || snap.target == null) return;
+  const next = clamp(Math.round((targetShown(snap) + dir * STEP) / STEP) * STEP, snap.target_min, snap.target_max);
+  TARGET.pending = next;
+  TARGET.until = performance.now() + 2500;
+  updateTarget(snap);
+  clearTimeout(TARGET.timer);
+  TARGET.timer = setTimeout(async () => {
+    await command({ cmd: 'set_water_target', celsius: next });
+    TARGET.until = performance.now() + 600;
+  }, 200);
 }
 
 export function initControls() {
-  const el = $('#weight');
-  let timer = 0;
-  el.addEventListener('pointerdown', () => (el.dragging = true));
-  addEventListener('pointerup', () => setTimeout(() => (el.dragging = false), 400));
-  el.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => command({ cmd: 'set_weight', weight: parseFloat(el.value) }), 250);
-  });
+  $('#wt-dn').addEventListener('click', () => nudge(-1));
+  $('#wt-up').addEventListener('click', () => nudge(1));
 }
 
 export function updateControls() {
   const snap = S.snap;
   if (!snap) return;
-  updateWeight(snap);
+  updateTarget(snap);
   const sig = snap.controls.map((c) => c.id).join();
   if (sig !== built) {
     built = sig;
@@ -223,7 +243,7 @@ export function updateControls() {
       host.append(r.el);
     }
   }
-  $('#model-line').replaceChildren(...modelLine(snap).map((t, i) => h('span', { class: 'mi' + (/nicht|wärmt|kein/.test(t) ? ' warn' : '') }, t)));
+  $('#model-line').replaceChildren(...modelLine(snap).map((t, i) => h('span', { class: 'mi' + (/nicht|kein/.test(t) ? ' warn' : '') }, t)));
   for (const c of snap.controls) rows.get(c.id)?.render(c);
 }
 
