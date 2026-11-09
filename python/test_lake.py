@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from lake import CONFIG, Lake, LakeError
 
 FIXTURE = os.environ.get("DAISYLOOP_FIXTURE") or os.path.join(os.path.dirname(__file__), "..", "target", "test-tmp", "lake-fixture")
+if not os.path.exists(os.path.join(FIXTURE, "expected.json")):
+    raise unittest.SkipTest("needs the lake fixture written by cargo test lake (target/test-tmp/lake-fixture)")
 
 
 class LakeRegression(unittest.TestCase):
