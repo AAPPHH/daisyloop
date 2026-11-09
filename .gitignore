@@ -18,10 +18,8 @@ __pycache__/
 /python/.venv
 /models/lx44*.json
 /.playwright-mcp/
-/models/steptrain/
 snapshot/raw/d5_pre_*.bin
 CLAUDE.md
-.claude/
 /target-*/
 /models/steptrain*/
 .pytest_cache/

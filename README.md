@@ -21,7 +21,7 @@ The UI is in German. Code and documentation are in English.
 | --- | --- |
 | ![Control](docs/images/control.png) | ![History](docs/images/history.png) |
 
-The screenshots come from the development mock (`ui/web/dev`), not from a live system.
+The screenshots come from the development mock (`ui/web/dev`), from a recorded, anonymised development snapshot.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ The daemon writes HID reports to a pump and fan controller. Writes are off by de
 
 ## Requirements
 
-- Windows 11, LibreHardwareMonitor
+- Windows 11, .NET 8 SDK for the sidecar build (`sidecar/build.ps1` installs it if missing; LibreHardwareMonitorLib comes as a NuGet package)
 - Aqua Computer D5 NEXT (USB 0C70:F00E)
 - Rust (stable, MSVC), .NET 8 SDK (installed by `sidecar/build.ps1` if missing)
 - Python 3.12 with `python/requirements.txt` for the history store, training and tests (`steprun.py` also needs PyTorch for its GPU load generator)

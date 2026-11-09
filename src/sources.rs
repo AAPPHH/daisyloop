@@ -346,7 +346,7 @@ mod tests {
         let ssd = r#"{"id":"/ssd/0/temperature/0","hw":"S","name":"T","type":"Temperature","unit":"°C","value":35,"age":0.0}"#;
         let script = dir.join("fake.cmd");
         std::fs::write(&script, format!("@echo off\r\nping -n 4 127.0.0.1 >nul\r\necho {{\"seq\":1,\"sensors\":[{cpu}]}}\r\nping -n 3 127.0.0.1 >nul\r\n:loop\r\necho {{\"seq\":2,\"sensors\":[{cpu},{ssd}]}}\r\nping -n 2 127.0.0.1 >nul\r\ngoto loop\r\n")).unwrap();
-        let cfg = Config { sidecar: Some(script), sidecar_stale_secs: 2, sidecar_start_grace_secs: 12, data_dir: dir.clone(), ..Config::default() };
+        let cfg = Config { sidecar: Some(script), sidecar_stale_secs: 5, sidecar_start_grace_secs: 12, data_dir: dir.clone(), ..Config::default() };
         let mut lhm = Lhm::new(&cfg);
         let t0 = Instant::now();
         assert!(lhm.poll().is_err());

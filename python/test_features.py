@@ -2,7 +2,11 @@ import datetime as dt
 import math
 import numpy as np
 from features import BatchEngine, FeatureFrame, Spec, StreamEngine, CONFIG
-from rawstore import RawStore
+from rawstore import RawStore, CONFIG as RCFG
+import os
+import pytest
+
+pytestmark = pytest.mark.skipif(not os.path.exists(os.path.join(RCFG["cache_dir"], "meta.json")), reason="needs the local raw store cache")
 
 SPEC = Spec.load(CONFIG["spec_path"])
 
