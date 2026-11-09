@@ -22,3 +22,16 @@ __pycache__/
 snapshot/raw/d5_pre_*.bin
 CLAUDE.md
 .claude/
+/target-*/
+/models/steptrain*/
+.pytest_cache/
+*.pyc
+.venv/
+venv/
+*.log
+*.bak
+*.tmp
+.vscode/
+.idea/
+*.pkl
+*.npz
