@@ -2,3 +2,9 @@ duckdb==2.0.0
 pyarrow>=17
 numpy
 pytz
+scipy
+pandas
+psutil
+scikit-learn
+xgboost
+pytest
